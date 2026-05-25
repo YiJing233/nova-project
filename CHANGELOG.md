@@ -12,6 +12,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- WebUI：修复作品统计接口返回 `chapters: null` 时编辑区 Tab 标题渲染崩溃的问题，前端会将空章节列表标准化为空数组并回退显示文件名
 - 互动模式：修复前端刷新后故事舞台未加载已持久化回合内容的问题，首次加载时按故事元信息的当前分支获取快照，避免强制请求 `branch=main` 导致空结果
 - 后端 `interactive`：修复长篇回合持久化后快照读取失败（`bufio.Scanner: token too long`）的问题，故事 JSONL 读取 scanner buffer 上限提升至 16 MB
 

@@ -316,7 +316,11 @@ export async function getCurrentWorkspace(): Promise<{ workspace: string; has_st
 
 /** 获取当前作品章节统计 */
 export async function getWorkspaceSummary(): Promise<WorkspaceSummary> {
-  return requestJSON('/api/workspace/summary')
+  const summary = await requestJSON<WorkspaceSummary>('/api/workspace/summary')
+  return {
+    ...summary,
+    chapters: Array.isArray(summary.chapters) ? summary.chapters : [],
+  }
 }
 
 /** 读取文件内容 */

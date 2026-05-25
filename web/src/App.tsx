@@ -106,7 +106,7 @@ function tabLabel(tab: Tab): string {
 
 function formatChapterTabLabel(tab: Tab, summary: WorkspaceSummary | null): string {
   if (tab.kind !== 'file') return tabLabel(tab)
-  return summary?.chapters.find((chapter) => chapter.path === tab.path)?.display_title || tabLabel(tab)
+  return (summary?.chapters || []).find((chapter) => chapter.path === tab.path)?.display_title || tabLabel(tab)
 }
 
 function readLayoutBoolean(key: string, fallback: boolean) {

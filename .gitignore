@@ -10,3 +10,4 @@ docs/
 .worktrees/
 .superpowers/
 .DS_Store
+.nova

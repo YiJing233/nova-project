@@ -6,12 +6,14 @@ import {
   getBooks,
   getCurrentWorkspace,
   getStyles,
+  getWorkspaceSummary,
   moveWorkspaceItem,
   readFile as readWorkspaceFile,
   renameWorkspaceItem,
   saveFile,
 } from '@/lib/api'
 import type { BookRecord } from '@/lib/api'
+import type { WorkspaceSummary } from '@/lib/api'
 
 export interface FileNode {
   name: string
@@ -28,6 +30,7 @@ export function useWorkspace() {
   const [selectedFile, setSelectedFile] = useState<string | null>(null)
   const [fileContent, setFileContent] = useState<string>('')
   const [workspace, setWorkspace] = useState<string>('')
+  const [summary, setSummary] = useState<WorkspaceSummary | null>(null)
   const [styles, setStyles] = useState<string[]>([])
   const [books, setBooks] = useState<BookRecord[]>([])
 
@@ -57,6 +60,16 @@ export function useWorkspace() {
     }
   }, [])
 
+  /** 获取当前作品章节统计 */
+  const fetchSummary = useCallback(async () => {
+    try {
+      setSummary(await getWorkspaceSummary())
+    } catch (e) {
+      console.error('获取作品统计失败', e)
+      setSummary(null)
+    }
+  }, [])
+
   /** 获取 setting/styles 下的风格参考文件 */
   const fetchStyles = useCallback(async () => {
     try {
@@ -81,14 +94,15 @@ export function useWorkspace() {
     fetchWorkspace()
     fetchTree()
     fetchStyles()
+    fetchSummary()
     fetchBooks()
-  }, [fetchWorkspace, fetchTree, fetchStyles, fetchBooks])
+  }, [fetchWorkspace, fetchTree, fetchStyles, fetchSummary, fetchBooks])
 
   // 自动刷新目录树，覆盖 AI Agent 直接写入文件后的结构变化。
   useEffect(() => {
     const refreshIfVisible = () => {
       if (document.visibilityState === 'visible') {
-        void Promise.all([fetchTree(), fetchStyles()])
+        void Promise.all([fetchTree(), fetchStyles(), fetchSummary()])
       }
     }
 
@@ -101,7 +115,7 @@ export function useWorkspace() {
       window.removeEventListener('focus', refreshIfVisible)
       document.removeEventListener('visibilitychange', refreshIfVisible)
     }
-  }, [fetchTree, fetchStyles])
+  }, [fetchTree, fetchStyles, fetchSummary])
 
   /** 选中文件并加载内容 */
   const selectFile = useCallback(async (path: string) => {
@@ -129,7 +143,7 @@ export function useWorkspace() {
 
   /** Agent 写入或创建文件后，刷新目录树并同步当前打开文件内容。 */
   const refreshAfterAgentFileChange = useCallback(async (changedPath?: string) => {
-    await Promise.all([fetchTree(), fetchStyles()])
+    await Promise.all([fetchTree(), fetchStyles(), fetchSummary()])
     const currentFile = selectedFileRef.current
     if (!currentFile) return
 
@@ -149,32 +163,33 @@ export function useWorkspace() {
     } catch (e) {
       console.error('刷新当前文件失败', e)
     }
-  }, [fetchTree, fetchStyles])
+  }, [fetchTree, fetchStyles, fetchSummary])
 
   /** 保存当前文件内容 */
   const saveCurrentFile = useCallback(async (content: string): Promise<boolean> => {
     if (!selectedFile) return false
     try {
       await saveFile(selectedFile, content)
+      await fetchSummary()
       return true
     } catch (e) {
       console.error('保存文件失败', e)
       return false
     }
-  }, [selectedFile])
+  }, [fetchSummary, selectedFile])
 
   /** 切换 workspace 后刷新所有状态 */
   const refreshAll = useCallback(async () => {
     setSelectedFile(null)
     setFileContent('')
-    await Promise.all([fetchWorkspace(), fetchTree(), fetchStyles(), fetchBooks()])
-  }, [fetchWorkspace, fetchTree, fetchStyles, fetchBooks])
+    await Promise.all([fetchWorkspace(), fetchTree(), fetchStyles(), fetchSummary(), fetchBooks()])
+  }, [fetchWorkspace, fetchTree, fetchStyles, fetchSummary, fetchBooks])
 
   /** 新建文件或目录 */
   const createItem = useCallback(async (path: string, type: 'file' | 'dir') => {
     await createWorkspaceItem({ path, type, content: '' })
-    await Promise.all([fetchTree(), fetchStyles()])
-  }, [fetchTree, fetchStyles])
+    await Promise.all([fetchTree(), fetchStyles(), fetchSummary()])
+  }, [fetchTree, fetchStyles, fetchSummary])
 
   /** 删除文件或目录 */
   const deleteItem = useCallback(async (path: string) => {
@@ -183,8 +198,8 @@ export function useWorkspace() {
       setSelectedFile(null)
       setFileContent('')
     }
-    await Promise.all([fetchTree(), fetchStyles()])
-  }, [fetchTree, fetchStyles, selectedFile])
+    await Promise.all([fetchTree(), fetchStyles(), fetchSummary()])
+  }, [fetchTree, fetchStyles, fetchSummary, selectedFile])
 
   /** 重命名文件或目录 */
   const renameItem = useCallback(async (path: string, newName: string) => {
@@ -197,14 +212,14 @@ export function useWorkspace() {
       setSelectedFile(nextPath)
       await selectFile(nextPath)
     }
-    await Promise.all([fetchTree(), fetchStyles()])
-  }, [fetchTree, fetchStyles, selectFile, selectedFile])
+    await Promise.all([fetchTree(), fetchStyles(), fetchSummary()])
+  }, [fetchTree, fetchStyles, fetchSummary, selectFile, selectedFile])
 
   /** 复制文件或目录 */
   const copyItem = useCallback(async (from: string, to: string) => {
     await copyWorkspaceItem({ from, to })
-    await Promise.all([fetchTree(), fetchStyles()])
-  }, [fetchTree, fetchStyles])
+    await Promise.all([fetchTree(), fetchStyles(), fetchSummary()])
+  }, [fetchTree, fetchStyles, fetchSummary])
 
   /** 移动文件或目录 */
   const moveItem = useCallback(async (from: string, to: string) => {
@@ -217,13 +232,13 @@ export function useWorkspace() {
       setSelectedFile(nextPath)
       await selectFile(nextPath)
     }
-    await Promise.all([fetchTree(), fetchStyles()])
-  }, [fetchTree, fetchStyles, selectFile, selectedFile])
+    await Promise.all([fetchTree(), fetchStyles(), fetchSummary()])
+  }, [fetchTree, fetchStyles, fetchSummary, selectFile, selectedFile])
 
   /** 刷新目录树和风格参考 */
   const refresh = useCallback(async () => {
-    await Promise.all([fetchTree(), fetchStyles()])
-  }, [fetchTree, fetchStyles])
+    await Promise.all([fetchTree(), fetchStyles(), fetchSummary()])
+  }, [fetchTree, fetchStyles, fetchSummary])
 
   return {
     tree,
@@ -231,6 +246,7 @@ export function useWorkspace() {
     selectedFile,
     fileContent,
     workspace,
+    summary,
     styles,
     books,
     selectFile,
@@ -243,6 +259,7 @@ export function useWorkspace() {
     copyItem,
     moveItem,
     refresh,
+    refreshSummary: fetchSummary,
     refreshAfterAgentFileChange,
     refreshAll,
     refreshBooks: fetchBooks,

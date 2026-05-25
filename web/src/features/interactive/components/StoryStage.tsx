@@ -1,7 +1,8 @@
 import { useMemo, useState } from 'react'
-import { Send } from 'lucide-react'
+import { MessageSquareText, PenLine, Route, Send } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { Textarea } from '@/components/ui/textarea'
 import { MessageList } from '@/components/Chat/MessageList'
 import type { ChatMessage } from '@/lib/api'
@@ -18,6 +19,7 @@ interface StoryStageProps {
 
 export function StoryStage({ storyId, branchId, snapshot, onDone }: StoryStageProps) {
   const [input, setInput] = useState('')
+  const [workspaceMode, setWorkspaceMode] = useState('dialogue')
   const [streaming, setStreaming] = useState(false)
   const [activityContent, setActivityContent] = useState('')
   const [liveMessages, setLiveMessages] = useState<ChatMessage[]>([])
@@ -125,24 +127,45 @@ export function StoryStage({ storyId, branchId, snapshot, onDone }: StoryStagePr
   }
 
   return (
-    <main className="flex min-w-0 flex-1 flex-col bg-[#18191b] p-3">
-      <div data-testid="story-stage-card" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[#333842] bg-[#141519]">
-        <div className="flex h-10 items-center justify-between px-4">
-          <div className="text-xs font-medium text-[#7f8898]">故事舞台 · 当前分支 {branchId || 'main'}</div>
-          <Badge variant="outline" className="border-[#333842] bg-[#20242b] text-[#7f8898]">{snapshot?.turns?.length || 0} 回合</Badge>
+    <main className="flex min-w-0 flex-1 flex-col bg-[#17191d] p-4">
+      <div data-testid="story-stage-card" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[#343b47] bg-[#101216] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
+        <div className="flex min-h-12 items-center justify-between gap-3 border-b border-[#262c35] px-5">
+          <div className="min-w-0">
+            <div className="text-[11px] font-medium text-[#8893a4]">故事舞台 · 当前分支 {branchId || 'main'}</div>
+            <div className="truncate text-sm font-semibold text-[#e2e6ee]">主创作区</div>
+          </div>
+          <div className="flex items-center gap-2">
+            <Tabs value={workspaceMode} onValueChange={setWorkspaceMode}>
+              <TabsList className="h-8 bg-[#1f2430]">
+                <TabsTrigger value="draft" className="gap-1.5 px-2.5 text-xs">
+                  <PenLine className="h-3.5 w-3.5" />
+                  正文
+                </TabsTrigger>
+                <TabsTrigger value="dialogue" className="gap-1.5 px-2.5 text-xs">
+                  <MessageSquareText className="h-3.5 w-3.5" />
+                  对话
+                </TabsTrigger>
+                <TabsTrigger value="branch" className="gap-1.5 px-2.5 text-xs">
+                  <Route className="h-3.5 w-3.5" />
+                  推演
+                </TabsTrigger>
+              </TabsList>
+            </Tabs>
+            <Badge variant="outline" className="border-[#384150] bg-[#1c222b] text-[#8f98a8]">{snapshot?.turns?.length || 0} 回合</Badge>
+          </div>
         </div>
         {messages.length === 0 && !streaming ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center rounded-xl border border-dashed border-[#333842] bg-[#18191b]/80 text-sm text-[#858b96]">
-            输入第一句话，开始互动故事
+          <div className="m-5 flex min-h-0 flex-1 items-center justify-center rounded-lg border border-dashed border-[#343b47] bg-[#171b21]/80 text-sm text-[#858b96]">
+            输入第一句话，开始互动故事。
           </div>
         ) : (
           <MessageList messages={messages} isStreaming={streaming} activityContent={activityContent} />
         )}
       </div>
-      <div className="mt-3 rounded-xl border border-[#333842] bg-[#141519] p-3">
+      <div className="mt-3 rounded-xl border border-[#343b47] bg-[#101216] p-3 shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
         <div className="flex items-center gap-3">
           <Textarea
-            className="h-14 min-h-14 flex-1 resize-none border-[#333842] bg-[#1f2228] text-sm text-[#d7dbe2] placeholder:text-[#778091] focus-visible:ring-1"
+            className="h-16 min-h-16 flex-1 resize-none border-[#343b47] bg-[#1b2028] text-sm leading-6 text-[#d7dbe2] placeholder:text-[#778091] focus-visible:ring-1"
             value={input}
             placeholder="你要做什么？"
             onChange={(event) => setInput(event.target.value)}
@@ -150,7 +173,7 @@ export function StoryStage({ storyId, branchId, snapshot, onDone }: StoryStagePr
               if (event.key === 'Enter' && (event.metaKey || event.ctrlKey)) void send()
             }}
           />
-          <Button className="h-14 w-24" disabled={!storyId || streaming || !input.trim()} onClick={() => void send()}>
+          <Button className="h-16 w-24 bg-[#2d6fb8] hover:bg-[#347dca]" disabled={!storyId || streaming || !input.trim()} onClick={() => void send()}>
             <Send className="h-4 w-4" />
             {streaming ? '生成中' : '发送'}
           </Button>

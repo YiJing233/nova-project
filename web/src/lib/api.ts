@@ -55,6 +55,24 @@ export interface BookRecord {
   last_opened_at: string
 }
 
+export interface ChapterSummary {
+  path: string
+  file_name: string
+  display_title: string
+  index: number
+  words: number
+  status: string
+  updated_at: string
+}
+
+export interface WorkspaceSummary {
+  title: string
+  author: string
+  chapter_count: number
+  total_words: number
+  chapters: ChapterSummary[]
+}
+
 /** 书籍元信息 */
 export interface BookMeta {
   title: string
@@ -294,6 +312,11 @@ export async function removeBook(path: string): Promise<{ message: string }> {
 /** 获取当前 workspace */
 export async function getCurrentWorkspace(): Promise<{ workspace: string; has_state: boolean }> {
   return requestJSON('/api/workspace/current')
+}
+
+/** 获取当前作品章节统计 */
+export async function getWorkspaceSummary(): Promise<WorkspaceSummary> {
+  return requestJSON('/api/workspace/summary')
 }
 
 /** 读取文件内容 */

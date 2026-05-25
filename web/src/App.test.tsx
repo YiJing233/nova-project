@@ -11,6 +11,7 @@ describe('App', () => {
       const payloads: Record<string, unknown> = {
         '/api/workspace/current': { workspace: '', has_state: false },
         '/api/workspace/tree': [],
+        '/api/workspace/summary': { title: '', author: '', chapter_count: 0, total_words: 0, chapters: [] },
         '/api/styles': { styles: [] },
         '/api/books': { books: [] },
         '/api/settings': { effective: { max_open_tabs: 5 } },

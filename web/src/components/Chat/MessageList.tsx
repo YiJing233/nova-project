@@ -73,7 +73,7 @@ export function MessageList({ messages, isStreaming, activityContent }: MessageL
     <div
       ref={containerRef}
       onScroll={handleContainerScroll}
-      className="flex-1 overflow-y-auto space-y-3 bg-[#202124] px-4 py-4"
+      className="flex-1 space-y-4 overflow-y-auto bg-[#15181d] px-6 py-5"
     >
       {messages.length === 0 && !isStreaming && (
         <div className="flex h-full items-center justify-center text-sm text-[#858b96]">

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef } from 'react'
+import { BookOpen, CheckCircle2, Layers3, Lightbulb, PenLine, ScrollText } from 'lucide-react'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs'
 import { createInteractiveBranch, createInteractiveStory, deleteInteractiveStory, getInteractiveBranches, getInteractiveSnapshot, getInteractiveStories, getInteractiveTellers, switchInteractiveBranch, updateInteractiveStory } from '../api'
@@ -81,17 +82,43 @@ export function InteractiveLayout() {
     await reloadSnapshot(branch.id)
   }
 
+  const workflow = [
+    { label: '灵感', icon: Lightbulb },
+    { label: '设定', icon: ScrollText },
+    { label: '大纲', icon: Layers3 },
+    { label: '章节', icon: BookOpen },
+    { label: '正文', icon: PenLine, active: submode === 'story' },
+    { label: '检查', icon: CheckCircle2 },
+  ]
+
   return (
-    <div className="flex h-full min-h-0 flex-col bg-[#18191b] p-3 text-[#d7dbe2]">
-      <div data-testid="interactive-shell" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[#30343b] bg-[#18191b] shadow-[0_12px_36px_rgba(0,0,0,0.22)]">
-        <div className="relative flex h-[42px] shrink-0 items-center gap-3 border-b border-[#30343b] bg-[#202226] px-3">
-          <StoryPicker stories={stories} currentStoryId={currentStoryId} tellers={tellers} onSelect={setCurrentStoryId} onCreate={handleCreateStory} onDelete={handleDeleteStory} />
-          <TellerPicker story={currentStory} tellers={tellers} onChange={handleTellerChange} />
-          <Badge variant="outline" className="border-[#30343b] bg-[#2a2d34] text-[#aab2c0]">{currentStory ? `${currentStory.events} events` : '未选择故事'}</Badge>
-          <Tabs className="ml-auto" value={submode} onValueChange={(value) => setSubmode(value as InteractiveSubmode)}>
-            <TabsList className="h-8 bg-[#252831]">
-              <TabsTrigger value="story" className="px-3 text-xs">story</TabsTrigger>
-              <TabsTrigger value="setting" className="px-3 text-xs">setting</TabsTrigger>
+    <div className="flex h-full min-h-0 flex-col bg-[#15171a] p-3 text-[#d7dbe2]">
+      <div data-testid="interactive-shell" className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-xl border border-[#2f3540] bg-[#17191d] shadow-[0_18px_48px_rgba(0,0,0,0.26)]">
+        <div className="relative flex min-h-[64px] shrink-0 flex-wrap items-center gap-3 border-b border-[#2f3540] bg-[#1d2026] px-4 py-3">
+          <div className="flex min-w-0 flex-1 items-center gap-3">
+            <StoryPicker stories={stories} currentStoryId={currentStoryId} tellers={tellers} onSelect={setCurrentStoryId} onCreate={handleCreateStory} onDelete={handleDeleteStory} />
+            <TellerPicker story={currentStory} tellers={tellers} onChange={handleTellerChange} />
+            <Badge variant="outline" className="h-7 border-[#3a414d] bg-[#252a33] px-2.5 text-[#aab2c0]">{currentStory ? `${currentStory.events} 个事件` : '未选择故事'}</Badge>
+          </div>
+          <nav className="flex items-center gap-1 rounded-lg border border-[#303743] bg-[#171a20] p-1" aria-label="创作流程">
+            {workflow.map((item) => {
+              const Icon = item.icon
+              return (
+                <button
+                  key={item.label}
+                  type="button"
+                  className={`flex h-8 items-center gap-1.5 rounded-md px-2.5 text-xs font-medium transition ${item.active ? 'bg-[#2d6fb8] text-white shadow-[0_6px_18px_rgba(45,111,184,0.28)]' : 'text-[#8f98a8] hover:bg-[#232832] hover:text-[#d9dee7]'}`}
+                >
+                  <Icon className="h-3.5 w-3.5" />
+                  {item.label}
+                </button>
+              )
+            })}
+          </nav>
+          <Tabs value={submode} onValueChange={(value) => setSubmode(value as InteractiveSubmode)}>
+            <TabsList className="h-8 bg-[#252a33]">
+              <TabsTrigger value="story" className="px-3 text-xs">故事</TabsTrigger>
+              <TabsTrigger value="setting" className="px-3 text-xs">设定</TabsTrigger>
             </TabsList>
           </Tabs>
         </div>

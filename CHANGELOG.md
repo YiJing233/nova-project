@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- 后端 API：新增 `GET /api/workspace/summary`，统计当前书籍标题、章节数、全书字数以及每章标题、字数、状态和更新时间，供 WebUI 写作工作台展示进度
+
 ### Fixed
 
 - 互动模式：修复前端刷新后故事舞台未加载已持久化回合内容的问题，首次加载时按故事元信息的当前分支获取快照，避免强制请求 `branch=main` 导致空结果
@@ -13,6 +17,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- WebUI：IDE 模式左侧新增「作品目录 / 项目文件」切换，章节目录展示章节标题、字数和状态；编辑器标题栏和底部状态栏展示当前章节与全书统计；创作 Agent 空状态新增续写、润色、摘要和一致性检查快捷动作
+- WebUI：优化互动故事工作台界面层级，顶部改为中文创作流程导航，左侧设定区升级为资料库概览，中间故事舞台增加正文/对话/推演工作区切换，右侧快照区升级为场景记忆面板，底部剧情时间线默认轻量折叠
 - WebUI：聊天历史首次加载时直接定位到底部，避免刷新页面后 Chat 面板从顶部平滑滚动到末尾
 - 互动模式：修复 story 子模式 Agent 上下文注入，按故事标题、开端、讲述者、共享设定和当前快照构造本轮 prompt；同一轮 `/api/interactive/chat` 完成后原子写入 `turn` 与可选 `state_delta`，故事舞台流式展示 narrative 并隐藏状态元数据
 - 互动模式：story 子模式改用独立 Agent Runner 与专用系统 prompt，和 IDE 模式隔离；互动故事 Agent 禁止调用 `write_file` / `edit_file` / `delete_file` 等写文件工具，故事正文只能流式输出到主屏幕并由后端写入 story jsonl

@@ -18,13 +18,20 @@ import { useChat } from '@/hooks/useChat'
 import { useWorkspaceHotkeys } from '@/hooks/use-workspace-hotkeys'
 import type { FileNode } from '@/hooks/useWorkspace'
 import { useWorkspaceStore } from '@/stores/workspace-store'
+import type { ChapterSummary, WorkspaceSummary } from '@/lib/api'
 import {
   Bot,
+  BookOpen,
+  FileText,
   GitBranch,
   FolderTree,
   Home,
+  PenLine,
   RefreshCw,
+  SearchCheck,
   Settings,
+  Sparkles,
+  WandSparkles,
   X,
 } from 'lucide-react'
 
@@ -97,6 +104,11 @@ function tabLabel(tab: Tab): string {
   return tab.path.split('/').pop() || tab.path
 }
 
+function formatChapterTabLabel(tab: Tab, summary: WorkspaceSummary | null): string {
+  if (tab.kind !== 'file') return tabLabel(tab)
+  return summary?.chapters.find((chapter) => chapter.path === tab.path)?.display_title || tabLabel(tab)
+}
+
 function readLayoutBoolean(key: string, fallback: boolean) {
   if (typeof window === 'undefined') return fallback
   const value = window.localStorage.getItem(key)
@@ -141,6 +153,7 @@ function App() {
   const [openTabs, setOpenTabs] = useState<Tab[]>([])
   const [activeTabKey, setActiveTabKey] = useState<string | null>(null)
   const [maxOpenTabs, setMaxOpenTabs] = useState<number>(MAX_OPEN_TABS_FALLBACK)
+  const [sidebarView, setSidebarView] = useState<'outline' | 'files'>('outline')
   const chatBootstrappedRef = useRef(false)
   // 记录每个 tab 最后一次激活的时间戳（递增计数器），用于 LRU 淘汰
   const tabActivationsRef = useRef<Map<string, number>>(new Map())
@@ -164,7 +177,7 @@ function App() {
   const aiVisible = rightPanel === 'ai'
   const versionsVisible = rightPanel === 'versions'
   const {
-    tree, loading, selectedFile, fileContent, workspace, styles, books,
+    tree, loading, selectedFile, fileContent, workspace, summary, styles, books,
     selectFile, clearSelectedFile, saveCurrentFile, createItem, deleteItem, renameItem, copyItem, moveItem,
     refresh, refreshAfterAgentFileChange, refreshAll, refreshBooks, setWorkspace,
   } = useWorkspace()
@@ -200,6 +213,9 @@ function App() {
     addTextSelection,
     removeTextSelection,
   } = useChat({ onAgentFileChange: handleAgentFileChange })
+
+  const chapterStats: Record<string, ChapterSummary> = Object.fromEntries((summary?.chapters || []).map((chapter) => [chapter.path, chapter]))
+  const currentChapter = selectedFile ? chapterStats[selectedFile] : undefined
 
   useEffect(() => {
     if (chatBootstrappedRef.current) return
@@ -516,28 +532,57 @@ function App() {
 
   const sidebar = (
     <section className="flex h-full flex-col border-r border-[#303238] bg-[#202124]">
-      <div className="flex h-9 items-center justify-between border-b border-[#303238] px-3">
-        <span className="text-xs font-medium text-[#c5c9d1]">项目结构</span>
+      <div className="flex min-h-[92px] flex-col gap-2 border-b border-[#303238] px-3 py-3">
+        <div className="flex items-center justify-between">
+          <div>
+            <div className="text-xs font-medium text-[#d7dbe2]">{summary?.title || '作品'}</div>
+            <div className="mt-0.5 text-[11px] text-[#7f8794]">
+              {summary ? `${summary.chapter_count} 章 · ${formatNumber(summary.total_words)} 字` : '正在加载作品进度'}
+            </div>
+          </div>
+          <div className="flex items-center gap-1">
+            <button
+              type="button"
+              onClick={refresh}
+              className="rounded p-1 text-[#858b96] hover:bg-[#303238]"
+            >
+              <RefreshCw className="h-3.5 w-3.5" />
+            </button>
+            <button
+              type="button"
+              onClick={() => setProjectVisible(false)}
+              className="rounded px-1 text-[#858b96] hover:bg-[#303238] hover:text-[#d7dbe2]"
+            >
+              ×
+            </button>
+          </div>
+        </div>
         <div className="flex items-center gap-1">
           <button
             type="button"
-            onClick={refresh}
-            className="rounded p-1 text-[#858b96] hover:bg-[#303238]"
+            onClick={() => setSidebarView('outline')}
+            className={`flex-1 rounded-md px-2 py-1 text-xs ${sidebarView === 'outline' ? 'bg-[#2f7dd3] text-white' : 'bg-[#25262a] text-[#9aa0aa] hover:bg-[#303238]'}`}
           >
-            <RefreshCw className="h-3.5 w-3.5" />
+            作品目录
           </button>
           <button
             type="button"
-            onClick={() => setProjectVisible(false)}
-            className="rounded px-1 text-[#858b96] hover:bg-[#303238] hover:text-[#d7dbe2]"
+            onClick={() => setSidebarView('files')}
+            className={`flex-1 rounded-md px-2 py-1 text-xs ${sidebarView === 'files' ? 'bg-[#2f7dd3] text-white' : 'bg-[#25262a] text-[#9aa0aa] hover:bg-[#303238]'}`}
           >
-            ×
+            项目文件
           </button>
         </div>
       </div>
       <div className="flex-1 overflow-y-auto p-2 text-xs">
         {loading ? (
           <div className="py-4 text-center text-[#858b96]">加载中…</div>
+        ) : sidebarView === 'outline' ? (
+          <ChapterOutline
+            chapters={summary?.chapters || []}
+            selectedFile={selectedFile}
+            onSelectFile={handleSelectFile}
+          />
         ) : tree.length === 0 ? (
           <div className="py-4 text-center text-[#858b96]">暂无文件</div>
         ) : (
@@ -546,6 +591,7 @@ function App() {
             selectedFile={selectedFile}
             onSelectFile={handleSelectFile}
             onReferenceFile={addReference}
+            chapterStats={chapterStats}
             onCreateItem={handleCreateItem}
             onDeleteItem={handleDeleteItem}
             onRenameItem={handleRenameItem}
@@ -567,7 +613,7 @@ function App() {
         openTabs.map((tab) => {
           const key = tabKey(tab)
           const isActive = key === activeTabKey
-          const label = tabLabel(tab)
+          const label = formatChapterTabLabel(tab, summary)
           const tooltip = tab.kind === 'file' ? tab.path : label
           return (
             <div
@@ -626,6 +672,8 @@ function App() {
                 onSave={handleSaveCurrentFile}
                 onQuoteSelection={addTextSelection}
                 saveSignal={saveSignal}
+                chapterSummary={currentChapter}
+                workspaceSummary={summary}
               />
             ) : (
               <div className="flex h-full items-center justify-center text-xs text-[#7f8590]">
@@ -665,6 +713,13 @@ function App() {
           </button>
         </div>
       </div>
+      {messages.length === 0 && !isStreaming && (
+        <AgentQuickActions
+          chapter={currentChapter}
+          selectedFile={selectedFile}
+          onSend={send}
+        />
+      )}
       <MessageList
         messages={messages}
         isStreaming={isStreaming}
@@ -697,6 +752,12 @@ function App() {
   const statusBar = (
     <div className="flex h-6 shrink-0 items-center border-t border-[#303238] bg-[#1f2023] px-3 text-[11px] text-[#858b96]">
       <span>Nova v{APP_VERSION}</span>
+      {mode === 'ide' && summary && (
+        <span className="ml-4">《{summary.title || '未命名'}》 · {summary.chapter_count} 章 · {formatNumber(summary.total_words)} 字</span>
+      )}
+      {mode === 'ide' && currentChapter && (
+        <span className="ml-4">当前：{currentChapter.display_title} · {formatNumber(currentChapter.words)} 字 · {currentChapter.status}</span>
+      )}
       <span className="ml-auto">{isStreaming ? '生成中' : '空闲'} · DeepSeek</span>
     </div>
   )
@@ -735,6 +796,100 @@ function flattenFileTree(nodes: FileNode[], basePath = ''): string[] {
     if (node.type === 'file') return [path]
     return flattenFileTree(node.children || [], path)
   })
+}
+
+function ChapterOutline({
+  chapters,
+  selectedFile,
+  onSelectFile,
+}: {
+  chapters: ChapterSummary[]
+  selectedFile: string | null
+  onSelectFile: (path: string) => void
+}) {
+  if (chapters.length === 0) {
+    return (
+      <div className="rounded-lg border border-dashed border-[#343842] bg-[#1b1c1f] px-3 py-4 text-center text-xs text-[#858b96]">
+        chapters/ 下还没有章节
+      </div>
+    )
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {chapters.map((chapter) => {
+        const active = selectedFile === chapter.path
+        return (
+          <button
+            key={chapter.path}
+            type="button"
+            className={`w-full rounded-lg border px-3 py-2 text-left transition ${
+              active
+                ? 'border-[#2f7dd3]/60 bg-[#2f7dd3]/20 text-[#e6f1ff]'
+                : 'border-transparent bg-[#1b1c1f] text-[#aeb4bf] hover:border-[#343842] hover:bg-[#25262a]'
+            }`}
+            onClick={() => onSelectFile(chapter.path)}
+          >
+            <div className="flex min-w-0 items-center gap-2">
+              <BookOpen className={`h-3.5 w-3.5 shrink-0 ${active ? 'text-[#9fc7ff]' : 'text-[#7aa2f7]'}`} />
+              <span className="truncate text-xs font-medium">{chapter.display_title}</span>
+            </div>
+            <div className="mt-1 flex items-center justify-between text-[11px] text-[#7f8794]">
+              <span>{formatNumber(chapter.words)} 字</span>
+              <span className="rounded border border-[#3a4658] bg-[#1c2430] px-1.5 text-[#9fc7ff]">{chapter.status}</span>
+            </div>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function AgentQuickActions({
+  chapter,
+  selectedFile,
+  onSend,
+}: {
+  chapter?: ChapterSummary
+  selectedFile: string | null
+  onSend: (message: string) => void
+}) {
+  const target = chapter ? `当前章节《${chapter.display_title}》` : (selectedFile ? `当前文件 ${selectedFile}` : '当前作品')
+  const actions = [
+    { label: '续写下一段', icon: PenLine, prompt: `请基于${target}的上下文，续写下一段正文，保持原有叙事节奏和人物状态。` },
+    { label: '润色当前章', icon: WandSparkles, prompt: `请检查并润色${target}，重点优化语句节奏、动作描写和情绪推进，不改变核心剧情。` },
+    { label: '提取本章摘要', icon: FileText, prompt: `请为${target}提取章节摘要，包含关键事件、角色状态变化、伏笔和下一章衔接点。` },
+    { label: '一致性检查', icon: SearchCheck, prompt: `请对${target}做一致性检查，重点关注人物动机、时间线、道具、地点和前后文冲突。` },
+  ]
+
+  return (
+    <div className="border-b border-[#303238] bg-[#1b1c1f] p-3">
+      <div className="mb-2 flex items-center gap-2 text-xs font-medium text-[#c5c9d1]">
+        <Sparkles className="h-3.5 w-3.5 text-[#7aa2f7]" />
+        快捷创作
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        {actions.map((action) => {
+          const Icon = action.icon
+          return (
+            <button
+              key={action.label}
+              type="button"
+              className="flex items-center gap-2 rounded-lg border border-[#303238] bg-[#202124] px-3 py-2 text-left text-xs text-[#c5c9d1] hover:border-[#3a4658] hover:bg-[#252a33] hover:text-[#e6f1ff]"
+              onClick={() => onSend(action.prompt)}
+            >
+              <Icon className="h-3.5 w-3.5 shrink-0 text-[#8fb5ff]" />
+              <span className="truncate">{action.label}</span>
+            </button>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function formatNumber(value: number) {
+  return new Intl.NumberFormat('zh-CN').format(value)
 }
 
 export default App

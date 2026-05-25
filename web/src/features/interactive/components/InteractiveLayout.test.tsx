@@ -10,7 +10,7 @@ describe('InteractiveLayout', () => {
     const { container } = render(<InteractiveLayout />)
 
     expect(await screen.findByText('故事舞台 · 当前分支 main')).toBeInTheDocument()
-    expect(screen.getByText('当前快照')).toBeInTheDocument()
+    expect(screen.getByText('场景记忆')).toBeInTheDocument()
     expect(container.querySelector('[data-slot="select-trigger"]')).toBeInTheDocument()
     expect(container.querySelector('[data-slot="button"]')).toBeInTheDocument()
     expect(container.querySelector('[data-slot="tabs-list"]')).toBeInTheDocument()

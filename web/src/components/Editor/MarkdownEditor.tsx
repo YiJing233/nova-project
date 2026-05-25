@@ -13,6 +13,7 @@ import { BookOpen, Check, ChevronDown, ChevronUp, MessageSquareQuote, Palette, S
 import { toast } from 'sonner'
 
 import type { TextSelection as QuoteSelection } from '@/lib/api'
+import type { ChapterSummary, WorkspaceSummary } from '@/lib/api'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { TooltipIconButton } from '@/components/common/tooltip-icon-button'
@@ -23,6 +24,8 @@ interface MarkdownEditorProps {
   onSave: (content: string) => Promise<boolean>
   onQuoteSelection?: (sel: QuoteSelection) => void
   saveSignal?: number
+  chapterSummary?: ChapterSummary
+  workspaceSummary?: WorkspaceSummary | null
 }
 
 type EditorTheme = 'ide' | 'paper' | 'sepia'
@@ -88,7 +91,7 @@ function isTxtFile(name: string | null): boolean {
 }
 
 /** TipTap 编辑器组件，支持 Markdown 和纯文本格式 */
-export function MarkdownEditor({ fileName, content, onSave, onQuoteSelection, saveSignal = 0 }: MarkdownEditorProps) {
+export function MarkdownEditor({ fileName, content, onSave, onQuoteSelection, saveSignal = 0, chapterSummary, workspaceSummary }: MarkdownEditorProps) {
   const [saveStatus, setSaveStatus] = useState<string>('')
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, setSettings] = useState<EditorSettings>(() => loadEditorSettings())
@@ -387,10 +390,19 @@ export function MarkdownEditor({ fileName, content, onSave, onQuoteSelection, sa
   return (
     <div className="flex-1 flex flex-col min-h-0">
       {/* 编辑器工具栏 */}
-      <div className="flex h-9 shrink-0 items-center justify-between border-b border-[#2f3136] bg-[#1f2023] px-3">
-        <div className="flex min-w-0 items-center gap-2 text-xs text-[#b7bbc3]">
-          <BookOpen className="h-3.5 w-3.5 text-[#858b96]" />
-          <span className="truncate">{fileName}</span>
+      <div className="flex min-h-12 shrink-0 items-center justify-between gap-3 border-b border-[#2f3136] bg-[#1f2023] px-4">
+        <div className="flex min-w-0 items-center gap-3 text-xs text-[#b7bbc3]">
+          <BookOpen className="h-4 w-4 shrink-0 text-[#7aa2f7]" />
+          <div className="min-w-0">
+            <div className="truncate text-sm font-semibold text-[#d7dbe2]">
+              {chapterSummary?.display_title || fileName}
+            </div>
+            <div className="mt-0.5 flex min-w-0 flex-wrap items-center gap-2 text-[11px] text-[#858b96]">
+              <span className="truncate">{fileName}</span>
+              {chapterSummary && <span>{chapterSummary.status}</span>}
+              {workspaceSummary && <span>全书 {formatNumber(workspaceSummary.total_words)} 字</span>}
+            </div>
+          </div>
         </div>
         <div className="flex items-center gap-2">
           {saveStatus && (
@@ -504,10 +516,12 @@ export function MarkdownEditor({ fileName, content, onSave, onQuoteSelection, sa
           <SelectionToolbar editor={editor} onQuote={quoteCurrentSelection} />
         )}
       </div>
-      <div className="flex h-7 shrink-0 items-center border-t border-[#2f3136] bg-[#1f2023] px-3 text-[11px] text-[#858b96]">
-        <span>总字数：{formatNumber(totalCharacters)}</span>
+      <div className="flex h-7 shrink-0 items-center gap-4 border-t border-[#2f3136] bg-[#1f2023] px-3 text-[11px] text-[#858b96]">
+        <span>本章：{formatNumber(totalCharacters)} 字</span>
+        {workspaceSummary && <span>全书：{formatNumber(workspaceSummary.total_words)} 字</span>}
+        {chapterSummary && <span>更新：{chapterSummary.updated_at || '未知'}</span>}
         {selectedCharacters > 0 && (
-          <span className="ml-4 text-[#b7bbc3]">已选：{formatNumber(selectedCharacters)} 字</span>
+          <span className="text-[#b7bbc3]">已选：{formatNumber(selectedCharacters)} 字</span>
         )}
       </div>
     </div>

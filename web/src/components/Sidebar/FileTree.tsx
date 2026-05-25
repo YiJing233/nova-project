@@ -15,6 +15,7 @@ import {
   AtSign,
 } from 'lucide-react'
 import type { FileNode } from '@/hooks/useWorkspace'
+import type { ChapterSummary } from '@/lib/api'
 import {
   ContextMenu,
   ContextMenuContent,
@@ -44,6 +45,7 @@ interface FileTreeProps {
   onRenameItem?: (path: string, newName: string) => Promise<void>
   onCopyItem?: (from: string, to: string) => Promise<void>
   onMoveItem?: (from: string, to: string) => Promise<void>
+  chapterStats?: Record<string, ChapterSummary>
 }
 
 /** 内联编辑状态 */
@@ -80,6 +82,7 @@ export function FileTree({
   onRenameItem,
   onCopyItem,
   onMoveItem,
+  chapterStats = {},
 }: FileTreeProps) {
   // 内联编辑状态（新建 / 重命名）
   const [inlineEdit, setInlineEdit] = useState<InlineEditState | null>(null)
@@ -153,6 +156,7 @@ export function FileTree({
           setOperation({ open: true, mode, targetPath, defaultValue })
         }
         onDeleteTarget={setDeleteTarget}
+        chapterStats={chapterStats}
       />
       <FileOperationDialog
         open={operation.open}
@@ -190,6 +194,7 @@ interface FileTreeListProps {
   onInlineCancel: () => void
   onOpenOperation: (mode: FileOperationMode, targetPath: string, defaultValue: string) => void
   onDeleteTarget: (path: string) => void
+  chapterStats: Record<string, ChapterSummary>
 }
 
 /** 递归树列表 */
@@ -240,6 +245,7 @@ interface FileTreeNodeProps {
   onInlineCancel: () => void
   onOpenOperation: (mode: FileOperationMode, targetPath: string, defaultValue: string) => void
   onDeleteTarget: (path: string) => void
+  chapterStats: Record<string, ChapterSummary>
 }
 
 interface TreeAction {
@@ -263,12 +269,14 @@ function FileTreeNode({
   onInlineCancel,
   onOpenOperation,
   onDeleteTarget,
+  chapterStats,
 }: FileTreeNodeProps) {
   const [expanded, setExpanded] = useState(DEFAULT_EXPANDED.has(node.name))
   const isDir = node.type === 'dir'
   const isSelected = selectedFile === path
   const parentPath = getParentPath(path)
   const defaultCopyPath = `${path}-copy`
+  const chapter = chapterStats[path]
 
   // 是否正在重命名此节点
   const isRenaming = inlineEdit?.type === 'rename' && inlineEdit.renamePath === path
@@ -380,6 +388,7 @@ function FileTreeNode({
               onInlineCancel={onInlineCancel}
               onOpenOperation={onOpenOperation}
               onDeleteTarget={onDeleteTarget}
+              chapterStats={chapterStats}
             />
           </div>
         )}
@@ -413,7 +422,15 @@ function FileTreeNode({
                   onCancel={onInlineCancel}
                 />
               ) : (
-                <span className="truncate">{node.name}</span>
+                <span className="flex min-w-0 flex-1 items-center justify-between gap-2">
+                  <span className="truncate">{chapter?.display_title || node.name}</span>
+                  {chapter && (
+                    <span className="flex shrink-0 items-center gap-1 text-[10px] text-[#7f8794]">
+                      <span>{formatCompactWords(chapter.words)}</span>
+                      <span className="rounded border border-[#3a4658] bg-[#1c2430] px-1 text-[#9fc7ff]">{chapter.status}</span>
+                    </span>
+                  )}
+                </span>
               )}
             </button>
             {!isRenaming && <NodeDropdown actions={actions} />}
@@ -487,4 +504,10 @@ function sortFileNodesForDisplay(nodes: FileNode[]) {
     }
     return a.name.localeCompare(b.name, 'zh-Hans-CN')
   })
+}
+
+function formatCompactWords(words: number) {
+  if (words >= 10000) return `${(words / 10000).toFixed(1)}w`
+  if (words >= 1000) return `${(words / 1000).toFixed(1)}k`
+  return String(words)
 }

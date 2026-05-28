@@ -44,7 +44,7 @@ export interface TellerContextPolicy {
 export interface TellerPromptSlot {
   id: string
   name: string
-  target: 'system' | 'context' | 'thinking' | 'private_instruction' | 'turn' | 'state_agent' | 'editor_agent'
+  target: 'system' | 'turn_context' | 'state_memory'
   enabled: boolean
   content: string
 }

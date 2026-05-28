@@ -53,45 +53,21 @@ const IMPORTANCE_OPTIONS = [
 const TELLER_TARGET_OPTIONS = [
   {
     value: 'system',
-    label: '讲述者身份',
-    summary: '定义这个讲述者是谁',
-    detail: '随故事上下文注入，影响整体口吻、叙事偏好和主持人身份。',
+    label: '系统提示',
+    summary: 'Agent 初始化时注入',
+    detail: '和 CREATOR.md 同处系统提示层，定义讲述者身份、题材倾向和长期叙事原则。',
   },
   {
-    value: 'context',
-    label: '背景上下文',
-    summary: '补充长期设定和偏好',
-    detail: '随标题、开端、资料库和当前状态一起注入，适合稳定生效的世界观、风格和偏好。',
+    value: 'turn_context',
+    label: '本轮上下文',
+    summary: '每轮贴近用户行动',
+    detail: '每次生成下一回合时注入，强约束本轮裁定、NPC 主动反应、代价、暗线推进和行动空间。',
   },
   {
-    value: 'thinking',
-    label: '内部思考',
-    summary: '进入本轮 reasoning/thinking',
-    detail: '会靠近本轮行动注入，要求 Agent 在内部推理时使用；这些内容不应出现在故事正文里。',
-  },
-  {
-    value: 'private_instruction',
-    label: '内部规则',
-    summary: '隐式遵守，不直接展示',
-    detail: '随讲述者上下文注入，适合放裁定原则、自检清单和禁止输出的分析规则。',
-  },
-  {
-    value: 'turn',
-    label: '本轮输出',
-    summary: '约束故事舞台正文',
-    detail: '每次生成下一回合时注入，适合控制篇幅、结尾方式、对白比例和正文呈现格式。',
-  },
-  {
-    value: 'state_agent',
-    label: '状态引擎',
-    summary: '只影响右侧场景记忆',
-    detail: '主 Agent 写完正文后，后端会让状态引擎把本回合转成 JSON 状态变化；这里配置它应该记录什么。',
-  },
-  {
-    value: 'editor_agent',
-    label: '边界引擎',
-    summary: '预留给后续编辑/边界检查',
-    detail: '当前故事生成链路暂不使用，保留给后续编辑 Agent 或边界检查 Agent 的专用规则。',
+    value: 'state_memory',
+    label: '状态记忆',
+    summary: '只影响状态记录',
+    detail: '正文生成后注入状态 Agent，用于稳定记录危机、关系变化、资源压力、暗线和行动入口。',
   },
 ] as const
 
@@ -1228,7 +1204,7 @@ function TellerEditor({
     const slot: TellerPromptSlot = {
       id,
       name: '新规则',
-      target: 'context',
+      target: 'turn_context',
       enabled: true,
       content: '',
     }
@@ -1247,7 +1223,7 @@ function TellerEditor({
     return <EmptyState title="未选择讲述者" description="从左侧讲述者目录选择或新建一个规则包。" />
   }
 
-  const selectedTarget = targetOption(activeSlot?.target || 'context')
+  const selectedTarget = targetOption(activeSlot?.target || 'turn_context')
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
@@ -1337,7 +1313,7 @@ function TellerEditor({
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
-                <div className="grid gap-2 xl:grid-cols-4 lg:grid-cols-3 md:grid-cols-2">
+                <div className="grid gap-2 lg:grid-cols-3 md:grid-cols-2">
                   {TELLER_TARGET_OPTIONS.map((option) => {
                     const selected = activeSlot.target === option.value
                     return (
@@ -1554,24 +1530,24 @@ function newTellerDraft(): Partial<Teller> {
     slots: [
       {
         id: 'identity',
-        name: '讲述者身份',
+        name: '系统提示',
         target: 'system',
         enabled: true,
-        content: '你是一位自定义故事讲述者。',
+        content: '你是一位自定义故事讲述者。你要明确影响故事的题材倾向、角色反应和剧情推进方式。',
       },
       {
-        id: 'thinking_rules',
-        name: '内部思考规则',
-        target: 'thinking',
+        id: 'turn_context',
+        name: '本轮上下文',
+        target: 'turn_context',
         enabled: true,
-        content: '先判断用户行动的目标、风险、相关角色和世界规则，再决定本回合后果；不要把分析过程写进正文。',
+        content: '每轮都要让用户行动带来具体后果，并主动制造符合讲述者风格的反馈、阻碍、发现、NPC 反应或新的行动入口。',
       },
       {
-        id: 'turn_rules',
-        name: '回合输出规则',
-        target: 'turn',
+        id: 'state_memory',
+        name: '状态记忆',
+        target: 'state_memory',
         enabled: true,
-        content: '只输出本回合故事正文，并在结尾留下自然的继续入口。',
+        content: '记录本回合已经成立的关系变化、风险、线索、资源、暗线和可继续行动的入口。',
       },
     ],
   }

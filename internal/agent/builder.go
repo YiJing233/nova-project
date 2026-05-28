@@ -23,8 +23,8 @@ func Build(ctx context.Context, cfg *config.Config, state *book.State) (adk.Agen
 	return buildDeepAgent(ctx, cfg, "NovaAgent", "AI 小说创作助手", BuildInstruction(cfg, state), true, false, nil, nil)
 }
 
-func BuildInteractiveStory(ctx context.Context, cfg *config.Config, state *book.State) (adk.Agent, error) {
-	return buildDeepAgent(ctx, cfg, "NovaInteractiveStoryAgent", "AI 互动故事叙事助手", BuildInteractiveStoryInstruction(cfg, state), false, true, []adk.ChatModelAgentMiddleware{
+func BuildInteractiveStory(ctx context.Context, cfg *config.Config, state *book.State, teller prompts.InteractiveStorySystemInstructionInput) (adk.Agent, error) {
+	return buildDeepAgent(ctx, cfg, "NovaInteractiveStoryAgent", "AI 互动故事叙事助手", BuildInteractiveStoryInstruction(cfg, state, teller), false, true, []adk.ChatModelAgentMiddleware{
 		newInteractiveStoryToolMiddleware(),
 	}, interactiveMaxTokens(cfg))
 }

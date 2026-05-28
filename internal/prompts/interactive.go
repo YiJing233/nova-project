@@ -6,32 +6,32 @@ import (
 )
 
 type InteractiveStorySystemInstructionInput struct {
-	CreatorPrompt    string
-	Workspace        string
-	ReplyTargetChars int
+	CreatorPrompt           string
+	Workspace               string
+	ReplyTargetChars        int
+	StoryTellerID           string
+	StoryTellerName         string
+	StoryTellerDescription  string
+	StoryTellerSystemPrompt string
 }
 
 type InteractiveStoryPromptInput struct {
-	Title               string
-	Origin              string
-	StoryTellerID       string
-	StoryTellerContext  string
-	StoryTellerPrivate  string
-	StoryTellerThinking string
-	StoryTellerTurn     string
-	BranchID            string
-	ReplyTargetChars    int
-	Characters          string
-	WorldBuilding       string
-	LoreItems           string
-	SnapshotStateJSON   string
+	Title             string
+	Origin            string
+	StoryTellerID     string
+	BranchID          string
+	ReplyTargetChars  int
+	Characters        string
+	WorldBuilding     string
+	LoreItems         string
+	SnapshotStateJSON string
 }
 
 type InteractiveStatePromptInput struct {
 	Title             string
 	Origin            string
 	StoryTellerID     string
-	StoryTellerState  string
+	StoryTellerMemory string
 	BranchID          string
 	Characters        string
 	WorldBuilding     string
@@ -46,8 +46,17 @@ const defaultInteractiveReplyTargetChars = 1200
 func BuildInteractiveStorySystemInstruction(in InteractiveStorySystemInstructionInput) string {
 	var sb strings.Builder
 	if creator := strings.TrimSpace(in.CreatorPrompt); creator != "" {
-		sb.WriteString("# 创作者指令（最高优先级）\n\n")
+		sb.WriteString("# 创作者指令\n\n")
 		sb.WriteString(creator)
+		sb.WriteString("\n\n---\n\n")
+	}
+	if tellerSystem := strings.TrimSpace(in.StoryTellerSystemPrompt); tellerSystem != "" {
+		sb.WriteString("# 讲述者系统规则\n\n")
+		writeField(&sb, "讲述者 ID", in.StoryTellerID)
+		writeField(&sb, "讲述者名称", in.StoryTellerName)
+		writeField(&sb, "讲述者说明", in.StoryTellerDescription)
+		sb.WriteString("\n")
+		sb.WriteString(tellerSystem)
 		sb.WriteString("\n\n---\n\n")
 	}
 	sb.WriteString("你是 Nova 的互动故事模式 Agent，只负责根据用户行动生成故事舞台上的下一回合内容。\n\n")
@@ -101,8 +110,6 @@ func InteractiveStoryContext(in InteractiveStoryPromptInput) string {
 	writeField(&sb, "开端", in.Origin)
 	writeField(&sb, "当前分支", in.BranchID)
 	writeField(&sb, "讲述者 ID", in.StoryTellerID)
-	writeBlock(&sb, "讲述者上下文规则", in.StoryTellerContext)
-	writeBlock(&sb, "讲述者内部规则", in.StoryTellerPrivate)
 	if strings.TrimSpace(in.LoreItems) != "" {
 		writeBlock(&sb, "资料库", in.LoreItems)
 	} else {
@@ -120,27 +127,29 @@ func normalizeInteractiveReplyTargetChars(v int) int {
 	return v
 }
 
-func InteractiveStoryTurnInstruction(message, thinkingInstruction, turnInstruction string) string {
-	thinkingInstruction = strings.TrimSpace(thinkingInstruction)
-	turnInstruction = strings.TrimSpace(turnInstruction)
-	thinkingBlock := ""
-	if thinkingInstruction != "" {
-		thinkingBlock = fmt.Sprintf(`
-本轮内部思考引导：
-%s
-以上内容只用于你在 reasoning/thinking 中裁定剧情，不要作为正文、解释或标题输出。
-`, thinkingInstruction)
-	}
+func InteractiveStoryTurnInstruction(message, turnContext string, randomEventRate float64) string {
+	turnContext = strings.TrimSpace(turnContext)
 	turnBlock := ""
-	if turnInstruction != "" {
-		turnBlock = fmt.Sprintf(`
-本轮输出规则：
-%s
-`, turnInstruction)
+	if turnContext != "" || randomEventRate > 0 {
+		var sb strings.Builder
+		sb.WriteString(`
+讲述者本轮上下文规则：
+`)
+		if turnContext != "" {
+			sb.WriteString(turnContext)
+			sb.WriteString("\n")
+		} else {
+			sb.WriteString("（未配置专门规则，仅使用随机事件率影响剧情扰动强度。）\n")
+		}
+		fmt.Fprintf(&sb, `
+
+讲述者随机事件率：%.2f。该值代表本轮主动引入意外、压力、转折或新线索的倾向；值越高，越应该让场景出现符合讲述者风格的扰动，但扰动必须遵守既有设定和因果。
+以上讲述者规则必须显著影响本轮剧情裁定、NPC 主动反应、代价、暗线推进和行动空间；不要把规则文本作为正文输出。
+`, randomEventRate)
+		turnBlock = sb.String()
 	}
 	return fmt.Sprintf(`[互动输入]
 用户本回合行动：
-%s
 %s
 %s
 
@@ -148,7 +157,7 @@ func InteractiveStoryTurnInstruction(message, thinkingInstruction, turnInstructi
 本回合必须隐式完成：识别用户行动、判断相关角色和世界规则、裁定后果、制造新的可行动空间、保持角色和世界一致性；不要输出这些分析过程。
 本回合要让主角作为故事人物正常与环境、物品和其他角色互动，写出行动带来的反馈、代价、发现、阻碍或机会；不要每发生一个小动作就停下等待用户。
 其他角色应依据性格、目标、关系和当前局势主动反应。结尾请停在有意义的选择点、悬念点或决策点，让用户能决定下一步，但不要替用户做出重大选择。
-不要输出状态 JSON。`, strings.TrimSpace(message), thinkingBlock, turnBlock)
+不要输出状态 JSON。`, strings.TrimSpace(message), turnBlock)
 }
 
 func BuildInteractiveStateSystemInstruction() string {
@@ -178,7 +187,7 @@ func InteractiveStateInstruction(in InteractiveStatePromptInput) string {
 	writeField(&sb, "开端", in.Origin)
 	writeField(&sb, "当前分支", in.BranchID)
 	writeField(&sb, "讲述者 ID", in.StoryTellerID)
-	writeBlock(&sb, "状态记录规则", in.StoryTellerState)
+	writeBlock(&sb, "讲述者状态记忆规则", in.StoryTellerMemory)
 	if strings.TrimSpace(in.LoreItems) != "" {
 		writeBlock(&sb, "资料库", in.LoreItems)
 	} else {

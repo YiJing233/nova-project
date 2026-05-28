@@ -27,7 +27,7 @@ func BuildInstruction(cfg *config.Config, state *book.State) string {
 	return instruction
 }
 
-func BuildInteractiveStoryInstruction(cfg *config.Config, state *book.State) string {
+func BuildInteractiveStoryInstruction(cfg *config.Config, state *book.State, teller prompts.InteractiveStorySystemInstructionInput) string {
 	workspace := ""
 	replyTargetChars := 0
 	if cfg != nil {
@@ -39,15 +39,31 @@ func BuildInteractiveStoryInstruction(cfg *config.Config, state *book.State) str
 		creator = state.ReadCreatorPrompt()
 	}
 	instruction := prompts.BuildInteractiveStorySystemInstruction(prompts.InteractiveStorySystemInstructionInput{
-		CreatorPrompt:    creator,
-		Workspace:        workspace,
-		ReplyTargetChars: replyTargetChars,
+		CreatorPrompt:           creator,
+		Workspace:               workspace,
+		ReplyTargetChars:        replyTargetChars,
+		StoryTellerID:           teller.StoryTellerID,
+		StoryTellerName:         teller.StoryTellerName,
+		StoryTellerDescription:  teller.StoryTellerDescription,
+		StoryTellerSystemPrompt: teller.StoryTellerSystemPrompt,
 	})
-	logSystemPromptComposition("interactive", workspace, creator, "", instruction)
+	logSystemPromptComposition("interactive", workspace, creator, "", instruction, promptSource{
+		source:  "系统提示",
+		title:   "讲述者系统规则",
+		content: teller.StoryTellerSystemPrompt,
+		note:    teller.StoryTellerID,
+	})
 	return instruction
 }
 
-func logSystemPromptComposition(mode, workspace, creator, stateContext, instruction string) {
+type promptSource struct {
+	source  string
+	title   string
+	content string
+	note    string
+}
+
+func logSystemPromptComposition(mode, workspace, creator, stateContext, instruction string, extraSources ...promptSource) {
 	log.Printf(
 		"[agent-prompt] system composition mode=%s workspace=%s creator=%s state=%s instruction=%s",
 		mode,
@@ -56,13 +72,19 @@ func logSystemPromptComposition(mode, workspace, creator, stateContext, instruct
 		promptPartSummary(stateContext),
 		promptPartSummary(instruction),
 	)
-	log.Printf("[agent-prompt] system sources mode=%s workspace=%s sources=%s", mode, workspace, systemPromptSourceSummary(mode, creator, stateContext))
+	log.Printf("[agent-prompt] system sources mode=%s workspace=%s sources=%s", mode, workspace, systemPromptSourceSummary(mode, creator, stateContext, extraSources...))
 }
 
-func systemPromptSourceSummary(mode, creator, stateContext string) string {
+func systemPromptSourceSummary(mode, creator, stateContext string, extraSources ...promptSource) string {
 	contextLog := newContextBuildLog()
 	if strings.TrimSpace(creator) != "" {
 		contextLog.add("系统提示", "CREATOR.md", creator, "创作者指令")
+	}
+	for _, source := range extraSources {
+		if strings.TrimSpace(source.content) == "" {
+			continue
+		}
+		contextLog.add(source.source, source.title, source.content, source.note)
 	}
 	for _, section := range promptStateSections(stateContext) {
 		contextLog.add("作品状态", section.Title, section.Content, section.Source)

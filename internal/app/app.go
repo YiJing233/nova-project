@@ -17,6 +17,7 @@ import (
 	"nova/internal/agent"
 	"nova/internal/book"
 	"nova/internal/interactive"
+	"nova/internal/prompts"
 	"nova/internal/session"
 )
 
@@ -496,7 +497,13 @@ func (a *App) StartInteractiveTask(storyID, branchID, message string) *Task {
 		log.Printf("[interactive-agent-task] load interactive settings failed workspace=%s err=%v", workspace, err)
 	}
 
-	runner, err := buildInteractiveStoryRunner(context.Background(), &runtimeCfg, state)
+	storyCtx, err := store.StoryContext(storyID, branchID)
+	if err != nil {
+		log.Printf("[interactive-agent-task] 读取互动故事上下文失败 story_id=%s branch_id=%s err=%v", storyID, branchID, err)
+		return nil
+	}
+	teller := loadInteractiveTeller(novaDir, storyCtx.Meta.StoryTellerID)
+	runner, err := buildInteractiveStoryRunner(context.Background(), &runtimeCfg, state, interactiveStoryTellerSystemInput(teller))
 	if err != nil {
 		log.Printf("[interactive-agent-task] 刷新互动故事 Agent Runner 失败 workspace=%s err=%v", workspace, err)
 		return nil
@@ -1167,7 +1174,7 @@ func buildRuntime(ctx context.Context, cfg *config.Config, workspace string) (*r
 	if err != nil {
 		return nil, err
 	}
-	interactiveStoryRunner, err := buildInteractiveStoryRunner(ctx, &runtimeCfg, state)
+	interactiveStoryRunner, err := buildInteractiveStoryRunner(ctx, &runtimeCfg, state, prompts.InteractiveStorySystemInstructionInput{})
 	if err != nil {
 		return nil, err
 	}
@@ -1193,8 +1200,8 @@ func buildAgentRunner(ctx context.Context, cfg *config.Config, state *book.State
 	return agent.NewRunner(ctx, builtAgent), nil
 }
 
-func buildInteractiveStoryRunner(ctx context.Context, cfg *config.Config, state *book.State) (*adk.Runner, error) {
-	builtAgent, err := agent.BuildInteractiveStory(ctx, cfg, state)
+func buildInteractiveStoryRunner(ctx context.Context, cfg *config.Config, state *book.State, teller prompts.InteractiveStorySystemInstructionInput) (*adk.Runner, error) {
+	builtAgent, err := agent.BuildInteractiveStory(ctx, cfg, state, teller)
 	if err != nil {
 		return nil, fmt.Errorf("构建互动故事 Agent 失败: %w", err)
 	}

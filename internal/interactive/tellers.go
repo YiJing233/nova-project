@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-const tellerVersion = 1
+const tellerVersion = 2
 
 type TellerLibrary struct {
 	novaDir string
@@ -177,7 +177,9 @@ func (l *TellerLibrary) ensureBuiltins() error {
 	}
 	for id, teller := range builtinTellers {
 		path := filepath.Join(l.dir(), id+".json")
-		if _, err := os.Stat(path); err == nil {
+		version, versionErr := readTellerFileVersion(path)
+		current, parseErr := parseTellerFile(path)
+		if versionErr == nil && parseErr == nil && current.Version == tellerVersion && version == tellerVersion {
 			continue
 		}
 		if err := writeTellerFile(path, teller); err != nil {
@@ -185,6 +187,20 @@ func (l *TellerLibrary) ensureBuiltins() error {
 		}
 	}
 	return nil
+}
+
+func readTellerFileVersion(path string) (int, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0, err
+	}
+	var payload struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return 0, err
+	}
+	return payload.Version, nil
 }
 
 func parseTellerFile(path string) (Teller, error) {
@@ -288,6 +304,11 @@ func validateTeller(teller Teller) error {
 	if len(teller.Slots) == 0 {
 		return errors.New("讲述者至少需要一个 prompt slot")
 	}
+	for _, slot := range teller.Slots {
+		if !isAllowedSlotTarget(slot.Target) {
+			return fmt.Errorf("讲述者规则 %q 使用了无效注入位置 %q，仅支持 system、turn_context、state_memory", slot.Name, slot.Target)
+		}
+	}
 	return nil
 }
 
@@ -330,11 +351,15 @@ func normalizeSlotID(id string) string {
 }
 
 func normalizeSlotTarget(target string) string {
-	switch strings.TrimSpace(target) {
-	case "system", "context", "thinking", "private_instruction", "turn", "state_agent", "editor_agent":
-		return strings.TrimSpace(target)
+	return strings.TrimSpace(target)
+}
+
+func isAllowedSlotTarget(target string) bool {
+	switch target {
+	case "system", "turn_context", "state_memory":
+		return true
 	default:
-		return "context"
+		return false
 	}
 }
 
@@ -353,22 +378,19 @@ func isBuiltinID(id string) bool {
 
 var builtinTellers = map[string]Teller{
 	"classic": builtinTeller("classic", "经典叙事者", "平衡叙事，节奏稳定，少量随机事件", 0.15, []string{"通用", "平衡"}, []TellerPromptSlot{
-		{ID: "identity", Name: "讲述者身份", Target: "system", Enabled: true, Content: "你是一位经典叙事者，注重故事节奏、角色选择与清晰的场景反馈。"},
-		{ID: "deliberation", Name: "内部裁定规则", Target: "thinking", Enabled: true, Content: "每轮内部检查用户行动、在场角色、世界规则、因果代价和开放选择点；不要输出分析过程。"},
-		{ID: "turn_rules", Name: "回合输出规则", Target: "turn", Enabled: true, Content: "正文要聚焦、有推进，并在结尾停留于可继续行动的选择点或悬念点。"},
-		{ID: "state_rules", Name: "状态记录规则", Target: "state_agent", Enabled: true, Content: "只记录本回合已经发生且确定成立的状态变化，不记录未来计划。"},
+		{ID: "identity", Name: "系统提示", Target: "system", Enabled: true, Content: "你是一位经典叙事者，注重故事节奏、角色选择与清晰的场景反馈。你要像可靠的文字小说主持人一样推动剧情：让用户行动产生明确后果，让角色保持能动性，让场景持续打开新的行动空间。"},
+		{ID: "turn_context", Name: "本轮上下文", Target: "turn_context", Enabled: true, Content: "每轮都要平衡行动反馈、角色反应、信息发现和开放选择点。允许主动引入小型阻碍、线索、误会或环境变化，让剧情继续向前，但不要替用户做重大选择。"},
+		{ID: "state_memory", Name: "状态记忆", Target: "state_memory", Enabled: true, Content: "优先记录本回合已经成立的角色位置、关系变化、风险、线索、未解决问题和可行动入口，帮助后续回合稳定承接。"},
 	}),
 	"grimdark": builtinTeller("grimdark", "黑暗低魔", "压抑氛围，强调代价、危险与残酷选择", 0.25, []string{"黑暗", "低魔"}, []TellerPromptSlot{
-		{ID: "identity", Name: "讲述者身份", Target: "system", Enabled: true, Content: "你是一位黑暗低魔叙事者，偏好艰难抉择、稀缺资源、危险旅程和不可逆后果。"},
-		{ID: "deliberation", Name: "内部裁定规则", Target: "thinking", Enabled: true, Content: "每轮都要检查行动代价、资源消耗、风险升级和势力反应；不要输出分析过程。"},
-		{ID: "turn_rules", Name: "回合输出规则", Target: "turn", Enabled: true, Content: "避免轻易圆满解决冲突。成功也应留下代价、阴影、误解、伤势、债务或新的危险。"},
-		{ID: "state_rules", Name: "状态记录规则", Target: "state_agent", Enabled: true, Content: "优先记录伤势、资源损耗、危险等级、势力敌意、未解决危机和角色心理压力。"},
+		{ID: "identity", Name: "系统提示", Target: "system", Enabled: true, Content: "你是一位黑暗低魔叙事者，偏好艰难抉择、稀缺资源、危险旅程、势力压迫和不可逆后果。剧情可以残酷，但必须因果清楚，不能为了折磨而破坏世界规则或替用户决定重大选择。"},
+		{ID: "turn_context", Name: "本轮上下文", Target: "turn_context", Enabled: true, Content: "每轮都要检查行动代价、资源消耗、伤势、误判、敌意和风险升级。即使用户成功，也应留下阴影、债务、暴露的踪迹、恶化的关系或新的危险入口。"},
+		{ID: "state_memory", Name: "状态记忆", Target: "state_memory", Enabled: true, Content: "优先记录伤势、资源损耗、危险等级、势力敌意、未解决危机、倒计时、角色心理压力和已经欠下的代价。"},
 	}),
 	"lighthearted": builtinTeller("lighthearted", "轻松日常", "轻快温暖，偏向日常互动和角色关系", 0.1, []string{"日常", "轻松"}, []TellerPromptSlot{
-		{ID: "identity", Name: "讲述者身份", Target: "system", Enabled: true, Content: "你是一位轻松日常叙事者，偏好温暖互动、幽默细节、人物关系变化和低压力事件。"},
-		{ID: "deliberation", Name: "内部裁定规则", Target: "thinking", Enabled: true, Content: "每轮内部检查角色情绪、关系变化、生活细节和小小的行动回报；不要输出分析过程。"},
-		{ID: "turn_rules", Name: "回合输出规则", Target: "turn", Enabled: true, Content: "正文可以更重对白、互动和细节反馈，让角色主动回应并留下自然的继续入口。"},
-		{ID: "state_rules", Name: "状态记录规则", Target: "state_agent", Enabled: true, Content: "优先记录关系变化、情绪、承诺、共同经历、当前地点和可互动对象。"},
+		{ID: "identity", Name: "系统提示", Target: "system", Enabled: true, Content: "你是一位轻松日常叙事者，偏好温暖互动、幽默细节、人物关系变化和低压力事件。你要让角色主动回应主角，让小行动也产生情绪、关系或生活细节上的回报。"},
+		{ID: "turn_context", Name: "本轮上下文", Target: "turn_context", Enabled: true, Content: "每轮优先推进对白、互动、情绪变化、生活细节和轻微意外。冲突可以存在，但应更多表现为误会、尴尬、约定、好奇心、善意麻烦或新的相处机会。"},
+		{ID: "state_memory", Name: "状态记忆", Target: "state_memory", Enabled: true, Content: "优先记录关系变化、情绪、承诺、共同经历、当前地点、可互动对象、日常线索和后续可继续展开的小约定。"},
 	}),
 }
 

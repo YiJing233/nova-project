@@ -13,8 +13,6 @@ import (
 // Settings 是用户可见且可在三层配置中持久化的字段。
 // 指针类型用于区分 "未设置"（继承上层）与 "显式置零"。
 type Settings struct {
-	InteractiveMaxTokens *int `toml:"interactive_max_tokens,omitempty" json:"interactive_max_tokens,omitempty"`
-
 
 	// 模型
 	OpenAIAPIKey              string                 `toml:"openai_api_key,omitempty" json:"openai_api_key,omitempty"`

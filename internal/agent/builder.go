@@ -68,9 +68,7 @@ func BuildInteractiveStory(ctx context.Context, cfg *config.Config, state *book.
 		Instruction:       BuildInteractiveStoryInstruction(cfg, state, teller),
 		EnableSkills:      true,
 		DisableWriteTodos: true,
-		ExtraTools:        extraTools,
-		MaxTokens:         interactiveMaxTokens(cfg),
-	})
+		ExtraTools:        extraTools,	})
 }
 
 // BuildConfigManagerAgent 构建统一配置管理 Agent（deep agent + 通用工具 + Skill + 模块资源工具）。
@@ -270,14 +268,6 @@ func configModelMaxRetries(cfg *config.Config) int {
 		return 5
 	}
 	return cfg.ModelMaxRetries
-}
-
-func interactiveMaxTokens(cfg *config.Config) *int {
-	if cfg == nil || cfg.InteractiveMaxTokens <= 0 {
-		return nil
-	}
-	tokens := cfg.InteractiveMaxTokens
-	return &tokens
 }
 
 // handleUnknownTool 拦截 LLM 调用未知工具的错误，把可读提示作为工具结果回传给模型，

@@ -4,6 +4,7 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/openai"
 
 	"nova/config"
+	"nova/internal/providercompat"
 )
 
 func chatModelConfigForAgent(cfg *config.Config, agentKind string) openai.ChatModelConfig {
@@ -21,10 +22,10 @@ func chatModelConfigForAgent(cfg *config.Config, agentKind string) openai.ChatMo
 	if resolved.EnableThinking != nil {
 		extraFields["enable_thinking"] = *resolved.EnableThinking
 	}
-	// MiniMax-M3 默认把思考写入 content 的 <think> 标签；reasoning_split=true 让其改用标准
-	// reasoning_content 字段返回，从根本上避免 <think> 泄漏到正文（见 MiniMax OpenAI 兼容文档）。
-	if isMinimaxModel(modelCfg) {
-		extraFields["reasoning_split"] = true
+	// 让 providercompat 决定是否要注入 provider 特有的请求字段。
+	// agent 包不感知任何具体 provider。
+	for k, v := range providercompat.ExtraRequestFields(modelCfg) {
+		extraFields[k] = v
 	}
 	if len(extraFields) > 0 {
 		modelCfg.ExtraFields = extraFields

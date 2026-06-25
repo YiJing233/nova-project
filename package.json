@@ -5,8 +5,11 @@
   "description": "Nova AI Novel Creation Workspace",
   "scripts": {
     "tauri": "tauri",
-    "tauri:dev": "tauri dev --config desktop/tauri/tauri.conf.json",
-    "tauri:build": "tauri build --config desktop/tauri/tauri.conf.json",
+    "tauri:prebuild": "bash scripts/build-tauri-prebuild.sh",
+    "tauri:dev": "pnpm tauri:prebuild && tauri dev --config desktop/tauri/tauri.conf.json",
+    "tauri:build": "pnpm tauri:prebuild && tauri build --config desktop/tauri/tauri.conf.json",
+    "tauri:build:deb": "pnpm tauri:prebuild && tauri build --config desktop/tauri/tauri.conf.json --bundles deb",
+    "tauri:build:appimage": "pnpm tauri:prebuild && tauri build --config desktop/tauri/tauri.conf.json --bundles appimage",
     "tauri:icon": "tauri icon web/public/favicon.svg"
   },
   "devDependencies": {

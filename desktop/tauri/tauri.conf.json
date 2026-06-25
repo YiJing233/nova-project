@@ -4,9 +4,9 @@
   "version": "0.1.13",
   "identifier": "app.nova.nova",
   "build": {
-    "beforeDevCommand": "bash ../../scripts/build-tauri-prebuild.sh",
-    "beforeBuildCommand": "bash ../../scripts/build-tauri-prebuild.sh",
-    "devUrl": "data:text/html;base64,PGh0bWw+PGJvZHk+PGgxPlN0YXJ0aW5nIE5vdmEuLi48L2gxPjwvYm9keT48L2h0bWw+",
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devUrl": "data:text/html;base64,PGh0bWw+PGJvZHk+PGgxPk5vdmEgbG9hZGluZy4uLjwvaDE+PC9ib2R5PjwvaHRtbD4=",
     "frontendDist": "../../web/dist"
   },
   "app": {
@@ -31,23 +31,23 @@
   },
   "bundle": {
     "active": true,
-    "targets": "all",
+    "targets": ["deb", "appimage", "nsis", "dmg"],
     "icon": [
       "icons/128x128.png",
       "icons/icon.icns",
       "icons/icon.ico"
     ],
-    "resources": [
-      "binaries/*/web/**",
-      "binaries/*/skills/**",
-      "binaries/*/config.toml"
-    ],
+    "resources": {
+      "binaries/web": "binaries/web",
+      "binaries/skills": "binaries/skills",
+      "binaries/config.toml": "binaries/config.toml"
+    },
     "externalBin": [
-      "binaries/*/nova"
+      "binaries/nova"
     ],
     "fileAssociations": [
       {
-        "extname": "nova",
+        "ext": ["nova"],
         "name": "Nova Workspace",
         "role": "Editor",
         "description": "Nova 创作工作区"
@@ -59,6 +59,9 @@
     "linux": {
       "deb": {
         "depends": ["libgtk-3-0", "libwebkit2gtk-4.1-0"]
+      },
+      "appimage": {
+        "bundleMediaFramework": true
       }
     },
     "macOS": {
@@ -66,17 +69,7 @@
       "exceptionDomain": "localhost"
     },
     "windows": {
-      "nsis": true
-    }
-  },
-  "plugins": {
-    "updater": {
-      "active": true,
-      "endpoints": [
-        "https://github.com/alfredxw/nova/releases/latest/download/latest.json"
-      ],
-      "dialog": true,
-      "pubkey": ""
+      "nsis": {}
     }
   }
 }

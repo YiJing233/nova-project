@@ -1,19 +1,28 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BINARIES_DIR="${ROOT_DIR}/desktop/tauri/binaries"
+# This script is executed from the project root directory (because of cd ../.. in tauri.conf.json beforeBuildCommand)
+ROOT_DIR="$(pwd)"
+SRC_TAURI_DIR="${ROOT_DIR}/desktop/tauri"
+
 TARGET_TRIPLE="${TARGET_TRIPLE:-$(rustc -vV 2>/dev/null | grep host | cut -d' ' -f2)}"
 
-echo "==> Tauri pre-build: building Go binary for ${TARGET_TRIPLE}"
-echo "    ROOT_DIR: ${ROOT_DIR}"
-echo "    BINARIES_DIR: ${BINARIES_DIR}"
+# Tauri sidecar naming convention: binaries/<name>-<target-triple>(.exe)
+SIDECAR_NAME="nova-${TARGET_TRIPLE}"
+if [[ "${TARGET_TRIPLE}" == *"windows"* ]]; then
+  SIDECAR_NAME="${SIDECAR_NAME}.exe"
+fi
 
-mkdir -p "${BINARIES_DIR}/${TARGET_TRIPLE}"
+echo "==> Tauri pre-build"
+echo "    ROOT_DIR: ${ROOT_DIR}"
+echo "    TARGET_TRIPLE: ${TARGET_TRIPLE}"
+echo "    SIDECAR: ${SIDECAR_NAME}"
+echo "    SRC_TAURI_DIR: ${SRC_TAURI_DIR}"
+
+mkdir -p "${SRC_TAURI_DIR}/binaries"
 
 GOOS=""
 GOARCH=""
-EXE=""
 
 case "${TARGET_TRIPLE}" in
   x86_64-apple-darwin)
@@ -23,7 +32,7 @@ case "${TARGET_TRIPLE}" in
     GOOS="darwin"; GOARCH="arm64"
     ;;
   x86_64-pc-windows-msvc)
-    GOOS="windows"; GOARCH="amd64"; EXE=".exe"
+    GOOS="windows"; GOARCH="amd64"
     ;;
   x86_64-unknown-linux-gnu)
     GOOS="linux"; GOARCH="amd64"
@@ -32,7 +41,20 @@ case "${TARGET_TRIPLE}" in
     GOOS="linux"; GOARCH="arm64"
     ;;
   *)
-    echo "Warning: unknown TARGET_TRIPLE '${TARGET_TRIPLE}', attempting native build"
+    echo "Warning: unknown TARGET_TRIPLE '${TARGET_TRIPLE}', native build"
+    UNAME_S="$(uname -s)"
+    UNAME_M="$(uname -m)"
+    case "${UNAME_S}" in
+      Darwin) GOOS="darwin" ;;
+      Linux) GOOS="linux" ;;
+      MINGW*|MSYS*|CYGWIN*) GOOS="windows" ;;
+      *) GOOS="linux" ;;
+    esac
+    case "${UNAME_M}" in
+      x86_64|amd64) GOARCH="amd64" ;;
+      arm64|aarch64) GOARCH="arm64" ;;
+      *) GOARCH="amd64" ;;
+    esac
     ;;
 esac
 
@@ -47,23 +69,24 @@ fi
 (cd web && pnpm build)
 
 echo "==> Building Go binary GOOS=${GOOS} GOARCH=${GOARCH}"
-BINARY_NAME="nova${EXE}"
-CGO_ENABLED=0 go build -trimpath \
+OUTPUT_BINARY="${SRC_TAURI_DIR}/binaries/${SIDECAR_NAME}"
+CGO_ENABLED=0 GOOS="${GOOS}" GOARCH="${GOARCH}" go build -trimpath \
   -ldflags "-s -w -X nova/internal/buildinfo.Version=${VERSION}" \
-  -o "${BINARIES_DIR}/${TARGET_TRIPLE}/${BINARY_NAME}" \
+  -o "${OUTPUT_BINARY}" \
   ./cmd/nova/
 
 if [ "${GOOS}" != "windows" ]; then
-  chmod +x "${BINARIES_DIR}/${TARGET_TRIPLE}/${BINARY_NAME}"
+  chmod +x "${OUTPUT_BINARY}"
 fi
 
-echo "==> Copying resources to binaries directory..."
-cp -R "${ROOT_DIR}/skills" "${BINARIES_DIR}/${TARGET_TRIPLE}/skills"
+echo "==> Copying resources..."
+rm -rf "${SRC_TAURI_DIR}/binaries/web" "${SRC_TAURI_DIR}/binaries/skills"
+cp -R "${ROOT_DIR}/skills" "${SRC_TAURI_DIR}/binaries/"
 if [ -f "${ROOT_DIR}/config.toml" ]; then
-  cp "${ROOT_DIR}/config.toml" "${BINARIES_DIR}/${TARGET_TRIPLE}/config.toml"
+  cp "${ROOT_DIR}/config.toml" "${SRC_TAURI_DIR}/binaries/"
 fi
-mkdir -p "${BINARIES_DIR}/${TARGET_TRIPLE}/web"
-cp -R "${ROOT_DIR}/web/dist/"* "${BINARIES_DIR}/${TARGET_TRIPLE}/web/"
+mkdir -p "${SRC_TAURI_DIR}/binaries/web"
+cp -R "${ROOT_DIR}/web/dist/"* "${SRC_TAURI_DIR}/binaries/web/"
 
 echo "==> Pre-build complete"
-ls -la "${BINARIES_DIR}/${TARGET_TRIPLE}/"
+ls -la "${SRC_TAURI_DIR}/binaries/"

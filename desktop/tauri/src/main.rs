@@ -1,9 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use std::io::{BufRead, BufReader};
-use std::process::Command;
 use std::sync::Mutex;
-use std::thread;
 use std::time::Duration;
 
 use regex::Regex;
@@ -40,7 +37,6 @@ fn get_workspace_from_args(app: &tauri::App) -> Option<String> {
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let window = app.get_webview_window("main").expect("main window");
 
@@ -65,26 +61,38 @@ fn main() {
                 let port_re = Regex::new(r"\[nova-desktop-ready\] port=(\d+)").unwrap();
                 let mut found_port: Option<u16> = None;
 
-                while let Some(event) = rx.recv().await {
-                    match event {
-                        CommandEvent::Stdout(line) => {
-                            let line = String::from_utf8_lossy(&line);
-                            println!("[nova] {}", line.trim());
-                            if let Some(caps) = port_re.captures(&line) {
-                                if let Some(m) = caps.get(1) {
-                                    found_port = m.as_str().parse::<u16>().ok();
+                for _ in 0..120 {
+                    tokio::select! {
+                        Some(event) = rx.recv() => {
+                            match event {
+                                CommandEvent::Stdout(line) => {
+                                    let line = String::from_utf8_lossy(&line);
+                                    println!("[nova] {}", line.trim());
+                                    if let Some(caps) = port_re.captures(&line) {
+                                        if let Some(m) = caps.get(1) {
+                                            found_port = m.as_str().parse::<u16>().ok();
+                                        }
+                                    }
                                 }
+                                CommandEvent::Stderr(line) => {
+                                    let line = String::from_utf8_lossy(&line);
+                                    eprintln!("[nova] {}", line.trim());
+                                }
+                                CommandEvent::Terminated(status) => {
+                                    eprintln!("[nova] terminated: {:?}", status);
+                                    break;
+                                }
+                                _ => {}
                             }
                         }
-                        CommandEvent::Stderr(line) => {
-                            let line = String::from_utf8_lossy(&line);
-                            eprintln!("[nova] {}", line.trim());
+                        _ = tokio::time::sleep(Duration::from_millis(250)) => {
+                            if found_port.is_some() {
+                                break;
+                            }
                         }
-                        CommandEvent::Terminated(status) => {
-                            eprintln!("[nova] process terminated: {:?}", status);
-                            break;
-                        }
-                        _ => {}
+                    }
+                    if found_port.is_some() {
+                        break;
                     }
                 }
 
@@ -116,10 +124,9 @@ fn main() {
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } = event {
                 let state = window.state::<SidecarProcess>();
-                if let Ok(mut guard) = state.0.lock() {
-                    if let Some(ref mut child) = *guard {
-                        let _ = child.kill();
-                    }
+                let mut guard = state.0.lock().unwrap();
+                if let Some(child) = guard.take() {
+                    let _ = child.kill();
                 }
             }
         })

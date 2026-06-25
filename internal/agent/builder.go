@@ -13,6 +13,7 @@ import (
 	filesystemmw "github.com/cloudwego/eino/adk/middlewares/filesystem"
 	"github.com/cloudwego/eino/adk/middlewares/skill"
 	"github.com/cloudwego/eino/adk/prebuilt/deep"
+	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 
@@ -34,12 +35,13 @@ func Build(ctx context.Context, cfg *config.Config, state *book.State, teller ID
 		}
 	}
 	return buildDeepAgent(ctx, cfg, deepAgentSpec{
-		Kind:         config.AgentKindIDE,
-		Name:         "NovaAgent",
-		Description:  "AI 小说创作助手",
-		Instruction:  BuildInstruction(cfg, state, teller),
-		EnableSkills: true,
-		ExtraTools:   loreTools,
+		Kind:                config.AgentKindIDE,
+		Name:                "NovaAgent",
+		Description:         "AI 小说创作助手",
+		Instruction:         BuildInstruction(cfg, state, teller),
+		EnableSkills:        true,
+		RepairTextToolCalls: true,
+		ExtraTools:          loreTools,
 	})
 }
 
@@ -90,12 +92,13 @@ func BuildConfigManagerAgent(ctx context.Context, cfg *config.Config, state *boo
 	}
 	extraTools = append(extraTools, configTools...)
 	return buildDeepAgent(ctx, cfg, deepAgentSpec{
-		Kind:         config.AgentKindConfigManager,
-		Name:         "NovaConfigManagerAgent",
-		Description:  "AI 配置与资源管理助手",
-		Instruction:  BuildConfigManagerInstruction(cfg, state, resourceSkills...),
-		EnableSkills: true,
-		ExtraTools:   extraTools,
+		Kind:                config.AgentKindConfigManager,
+		Name:                "NovaConfigManagerAgent",
+		Description:         "AI 配置与资源管理助手",
+		Instruction:         BuildConfigManagerInstruction(cfg, state, resourceSkills...),
+		EnableSkills:        true,
+		RepairTextToolCalls: true,
+		ExtraTools:          extraTools,
 	})
 }
 
@@ -111,25 +114,27 @@ func BuildAutomationAgent(ctx context.Context, cfg *config.Config, state *book.S
 		}
 	}
 	return buildDeepAgent(ctx, cfg, deepAgentSpec{
-		Kind:         config.AgentKindAutomation,
-		Name:         "NovaAutomationAgent",
-		Description:  "AI 自动化任务助手",
-		Instruction:  BuildAutomationInstruction(cfg, state, task),
-		EnableSkills: true,
-		ExtraTools:   loreTools,
+		Kind:                config.AgentKindAutomation,
+		Name:                "NovaAutomationAgent",
+		Description:         "AI 自动化任务助手",
+		Instruction:         BuildAutomationInstruction(cfg, state, task),
+		EnableSkills:        true,
+		RepairTextToolCalls: true,
+		ExtraTools:          loreTools,
 	})
 }
 
 type deepAgentSpec struct {
-	Kind              string
-	Name              string
-	Description       string
-	Instruction       string
-	EnableSkills      bool
-	DisableWriteTodos bool
-	ExtraHandlers     []adk.ChatModelAgentMiddleware
-	ExtraTools        []tool.BaseTool
-	MaxTokens         *int
+	Kind                string
+	Name                string
+	Description         string
+	Instruction         string
+	EnableSkills        bool
+	DisableWriteTodos   bool
+	RepairTextToolCalls bool
+	ExtraHandlers       []adk.ChatModelAgentMiddleware
+	ExtraTools          []tool.BaseTool
+	MaxTokens           *int
 }
 
 func buildDeepAgent(ctx context.Context, cfg *config.Config, spec deepAgentSpec) (adk.Agent, error) {
@@ -139,6 +144,12 @@ func buildDeepAgent(ctx context.Context, cfg *config.Config, spec deepAgentSpec)
 	cm, err := openai.NewChatModel(ctx, &modelCfg)
 	if err != nil {
 		return nil, fmt.Errorf("创建模型失败: %w", err)
+	}
+	// MiniMax 等不返回标准 tool_calls 的模型，在需要执行工具的创作类 Agent 上启用文本工具调用适配。
+	var chatModel model.ToolCallingChatModel = cm
+	if spec.RepairTextToolCalls && isMinimaxModel(modelCfg) {
+		chatModel = wrapMinimaxToolCalls(cm)
+		log.Printf("[agent] enable minimax tool-call adapter agent=%s model=%s", spec.Kind, modelCfg.Model)
 	}
 
 	localBackend, err := localbk.NewBackend(ctx, &localbk.Config{})
@@ -196,7 +207,7 @@ func buildDeepAgent(ctx context.Context, cfg *config.Config, spec deepAgentSpec)
 	return deep.New(ctx, &deep.Config{
 		Name:              spec.Name,
 		Description:       spec.Description,
-		ChatModel:         cm,
+		ChatModel:         chatModel,
 		Instruction:       spec.Instruction,
 		WithoutWriteTodos: spec.DisableWriteTodos || !toolSettings.Todo,
 		MaxIteration:      configMaxIteration(cfg),

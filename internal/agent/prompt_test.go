@@ -149,8 +149,49 @@ func TestBuildInstructionKeepsWorkspaceStateOutOfSystemPrompt(t *testing.T) {
 	if strings.Contains(instruction, "主角进入废城") || strings.Contains(instruction, "# 当前作品状态") {
 		t.Fatalf("system prompt should not include dynamic workspace state:\n%s", instruction)
 	}
+	contexts := IDEWorkspaceRuntimeContextsForState(state)
+	if !strings.Contains(contexts.Stable, "主角进入废城") {
+		t.Fatalf("stable runtime workspace context should include outline: %#v", contexts)
+	}
+	if strings.Contains(contexts.Dynamic, "主角进入废城") {
+		t.Fatalf("dynamic runtime workspace context should not include stable outline: %#v", contexts)
+	}
 	if context := IDEWorkspaceRuntimeContext(state); !strings.Contains(context, "主角进入废城") {
-		t.Fatalf("runtime workspace context should include state: %q", context)
+		t.Fatalf("legacy runtime workspace context should include state: %q", context)
+	}
+}
+
+func TestBuildInstructionIncludesStyleRulesInSystemPrompt(t *testing.T) {
+	state := book.NewState(t.TempDir())
+	cfg := &config.Config{Workspace: state.Workspace()}
+
+	instruction := BuildInstruction(cfg, state, IDEStoryTeller{
+		ID:         "classic",
+		Prompt:     "导演系统规则",
+		StyleRules: []StyleRule{{Scene: "激烈打斗", StyleContents: []string{"短句留白"}}},
+	})
+
+	for _, required := range []string{"## 场景化风格规则", "场景：激烈打斗", "短句留白", "触发规则", "system prompt 注入了场景化风格规则"} {
+		if !strings.Contains(instruction, required) {
+			t.Fatalf("system prompt should include style rule %q:\n%s", required, instruction)
+		}
+	}
+}
+
+func TestBuildInteractiveStoryInstructionIncludesStyleRulesInSystemPrompt(t *testing.T) {
+	state := book.NewState(t.TempDir())
+	cfg := &config.Config{Workspace: state.Workspace()}
+
+	instruction := BuildInteractiveStoryInstruction(cfg, state, prompts.InteractiveStorySystemInstructionInput{
+		StoryTellerID:           "classic",
+		StoryTellerSystemPrompt: "导演系统规则",
+		StyleRules:              []prompts.StyleRule{{Scene: "日常对话", StyleContents: []string{"克制对白"}}},
+	})
+
+	for _, required := range []string{"## 场景化风格规则", "场景：日常对话", "克制对白", "system prompt 中的场景化风格内容"} {
+		if !strings.Contains(instruction, required) {
+			t.Fatalf("interactive system prompt should include style rule %q:\n%s", required, instruction)
+		}
 	}
 }
 

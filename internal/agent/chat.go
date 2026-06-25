@@ -16,10 +16,8 @@ import (
 )
 
 const (
-	maxReferenceFileBytes       = 80 * 1024
-	maxReferenceTotalBytes      = 200 * 1024
-	maxStyleReferenceFileBytes  = 80 * 1024
-	maxStyleReferenceTotalBytes = 200 * 1024
+	maxReferenceFileBytes  = 80 * 1024
+	maxReferenceTotalBytes = 200 * 1024
 )
 
 // Event 表示 Agent 输出的传输无关事件。
@@ -30,16 +28,15 @@ type Event struct {
 
 // ChatRequest 表示一次聊天请求的传输无关参数。
 type ChatRequest struct {
-	Message         string             `json:"message"`
-	References      []string           `json:"references"`
-	LoreReferences  []string           `json:"lore_references"`
-	StyleReferences []string           `json:"style_references"`
-	Selections      []TextSelectionRef `json:"selections"`
-	PlanMode        bool               `json:"plan_mode"`
+	Message        string             `json:"message"`
+	References     []string           `json:"references"`
+	LoreReferences []string           `json:"lore_references"`
+	StyleScenes    []string           `json:"style_scenes"`
+	Selections     []TextSelectionRef `json:"selections"`
+	PlanMode       bool               `json:"plan_mode"`
 
-	// StyleRules 由后端按当前导演配置注入（场景 → 风格文件）。
-	// 仅当 StyleReferences 为空时才会作为"默认场景化建议"参与本轮上下文，
-	// 由 Agent 基于本轮章节内容自动匹配最相近的场景并 read_file 对应文件。
+	// StyleRules 由后端按当前导演配置注入（场景 → 风格内容）。
+	// StyleScenes 非空时只注入用户本轮通过 # 指定的场景；为空时作为场景化建议参与本轮上下文。
 	StyleRules []StyleRule `json:"-"`
 }
 
@@ -182,18 +179,18 @@ func (r *Runtime) Run(
 	}})
 	originalMessage := req.Message
 	if err := runLedger.Record("run_started", map[string]any{
-		"workspace":        workspace,
-		"task_id":          options.TaskID,
-		"agent_kind":       options.AgentKind,
-		"session_id":       options.SessionID,
-		"mode":             options.Mode,
-		"message":          textSummary{Bytes: len(originalMessage), Chars: len([]rune(originalMessage)), Preview: safeLogPreview(originalMessage, policy.RunLedger.PreviewChars)},
-		"references":       len(req.References),
-		"lore_references":  len(req.LoreReferences),
-		"style_references": len(req.StyleReferences),
-		"selections":       len(req.Selections),
-		"plan_mode":        req.PlanMode,
-		"checkpoint_id":    checkpointID,
+		"workspace":       workspace,
+		"task_id":         options.TaskID,
+		"agent_kind":      options.AgentKind,
+		"session_id":      options.SessionID,
+		"mode":            options.Mode,
+		"message":         textSummary{Bytes: len(originalMessage), Chars: len([]rune(originalMessage)), Preview: safeLogPreview(originalMessage, policy.RunLedger.PreviewChars)},
+		"references":      len(req.References),
+		"lore_references": len(req.LoreReferences),
+		"style_scenes":    len(req.StyleScenes),
+		"selections":      len(req.Selections),
+		"plan_mode":       req.PlanMode,
+		"checkpoint_id":   checkpointID,
 	}); err != nil {
 		runLogger.Warn("run_ledger_start_failed", slog.String("run_id", runLedger.ID()), slog.Any("error", err))
 	}
@@ -262,7 +259,7 @@ func (r *Runtime) Run(
 		slog.String("agent_message", promptPartSummary(agentMessage)),
 		slog.String("references", stringListSummary(req.References)),
 		slog.String("lore_references", stringListSummary(req.LoreReferences)),
-		slog.String("style_references", stringListSummary(req.StyleReferences)),
+		slog.String("style_scenes", stringListSummary(req.StyleScenes)),
 		slog.Int("style_rules", len(req.StyleRules)),
 		slog.String("selections", selectionListSummary(req.Selections)),
 		slog.Bool("plan_mode", req.PlanMode),
@@ -275,7 +272,8 @@ func (r *Runtime) Run(
 		}
 	}
 
-	runCtx := contextWithCompactionController(ContextWithRunObserver(ctx, observer), conversation)
+	runCtx, cancelRun := context.WithCancel(contextWithCompactionController(ContextWithRunObserver(ctx, observer), conversation))
+	defer cancelRun()
 	runOptions := []adk.AgentRunOption{}
 	if checkpointID != "" {
 		runOptions = append(runOptions, adk.WithCheckPointID(checkpointID))
@@ -283,7 +281,7 @@ func (r *Runtime) Run(
 	events := runner.Run(runCtx, history, runOptions...)
 	var fullContent strings.Builder
 	var fullThinking strings.Builder
-	runLogger.Info("run_started", slog.Int("history", len(history)), slog.Int("message_len", len(req.Message)), slog.Int("agent_message_len", len(agentMessage)), slog.Bool("plan_mode", req.PlanMode), slog.Int("style_references", len(req.StyleReferences)), slog.Int("style_rules", len(req.StyleRules)))
+	runLogger.Info("run_started", slog.Int("history", len(history)), slog.Int("message_len", len(req.Message)), slog.Int("agent_message_len", len(agentMessage)), slog.Bool("plan_mode", req.PlanMode), slog.Int("style_scenes", len(req.StyleScenes)), slog.Int("style_rules", len(req.StyleRules)))
 
 	for {
 		if err := ctx.Err(); err != nil {
@@ -294,7 +292,22 @@ func (r *Runtime) Run(
 			emit(Event{Type: "aborted", Data: map[string]string{}})
 			return
 		}
-		event, ok := events.Next()
+		event, ok, waitErr := waitForRunnerEvent(runCtx, events, options.IdleTimeout)
+		if waitErr != nil {
+			generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
+			if ctx.Err() != nil {
+				runLogger.Warn("run_interrupted", slog.String("reason", "context"), slog.Any("error", ctx.Err()), slog.Int("generated_bytes", len(generated)))
+				finishRun("aborted", ctx.Err().Error(), len(generated))
+				emit(Event{Type: "aborted", Data: map[string]string{}})
+				return
+			}
+			cancelRun()
+			runLogger.Error("run_interrupted", slog.String("reason", "idle_timeout"), slog.Any("error", waitErr), slog.Int("generated_bytes", len(generated)))
+			markInterruptionIfNeeded(conversation, resumeInterruption, originalMessage, generated, waitErr.Error())
+			finishRun("error", waitErr.Error(), len(generated))
+			emit(Event{Type: "error", Data: map[string]string{"message": waitErr.Error()}})
+			return
+		}
 		if !ok {
 			break
 		}
@@ -317,7 +330,22 @@ func (r *Runtime) Run(
 			if mv.Message == nil {
 				continue
 			}
-			content := drainContent(mv)
+			content, drainErr := drainContent(runCtx, mv, options.IdleTimeout)
+			if drainErr != nil {
+				generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
+				if ctx.Err() != nil {
+					runLogger.Warn("run_interrupted", slog.String("reason", "context"), slog.Any("error", ctx.Err()), slog.Int("generated_bytes", len(generated)))
+					finishRun("aborted", ctx.Err().Error(), len(generated))
+					emit(Event{Type: "aborted", Data: map[string]string{}})
+					return
+				}
+				cancelRun()
+				runLogger.Error("run_interrupted", slog.String("reason", "tool_result_idle_timeout"), slog.Any("error", drainErr), slog.Int("generated_bytes", len(generated)))
+				markInterruptionIfNeeded(conversation, resumeInterruption, originalMessage, generated, drainErr.Error())
+				finishRun("error", drainErr.Error(), len(generated))
+				emit(Event{Type: "error", Data: map[string]string{"message": drainErr.Error()}})
+				return
+			}
 			fullToolContent := content
 			if content == "" {
 				content = "(无返回内容)"
@@ -344,12 +372,19 @@ func (r *Runtime) Run(
 			continue
 		}
 		if mv.IsStreaming && mv.MessageStream != nil {
-			msg, ok := processStreamingEvent(mv, &fullContent, &fullThinking, emit)
+			msg, streamErr := processStreamingEvent(runCtx, mv, &fullContent, &fullThinking, options.IdleTimeout, emit)
 			usageCollector.AddMessage(msg)
-			if !ok {
+			if streamErr != nil {
 				generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
-				markInterruptionIfNeeded(conversation, resumeInterruption, originalMessage, generated, "stream recv error")
-				finishRun("error", "stream recv error", len(generated))
+				if ctx.Err() != nil {
+					runLogger.Warn("run_interrupted", slog.String("reason", "context"), slog.Any("error", ctx.Err()), slog.Int("generated_bytes", len(generated)))
+					finishRun("aborted", ctx.Err().Error(), len(generated))
+					emit(Event{Type: "aborted", Data: map[string]string{}})
+					return
+				}
+				cancelRun()
+				markInterruptionIfNeeded(conversation, resumeInterruption, originalMessage, generated, streamErr.Error())
+				finishRun("error", streamErr.Error(), len(generated))
 				return
 			}
 			continue

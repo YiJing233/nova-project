@@ -1,0 +1,15 @@
+{
+  "name": "nova",
+  "version": "0.1.13",
+  "private": true,
+  "description": "Nova AI Novel Creation Workspace",
+  "scripts": {
+    "tauri": "tauri",
+    "tauri:dev": "tauri dev --config desktop/tauri/tauri.conf.json",
+    "tauri:build": "tauri build --config desktop/tauri/tauri.conf.json",
+    "tauri:icon": "tauri icon web/public/favicon.svg"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

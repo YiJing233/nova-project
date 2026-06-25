@@ -6,11 +6,13 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"time"
 
 	"nova/config"
 	"nova/internal/agent"
@@ -25,6 +27,7 @@ func main() {
 		dev       bool
 		devMode   bool
 		noOpen    bool
+		desktop   bool
 	)
 	cfg := config.Load()
 	port := defaultPort(cfg)
@@ -35,6 +38,7 @@ func main() {
 	flag.BoolVar(&dev, "dev", false, "开发模式：同时启动 Vite 前端 dev server")
 	flag.BoolVar(&devMode, "dev-mode", false, "开发启动模式：由 bootstrap.sh 传入，开启开发诊断能力")
 	flag.BoolVar(&noOpen, "no-open", false, "启动服务后不自动打开浏览器")
+	flag.BoolVar(&desktop, "desktop", false, "桌面模式：作为 Tauri sidecar 运行，绑定本地回环，输出就绪信号")
 	flag.Parse()
 
 	agent.SetModelInputLoggingEnabled(dev || devMode)
@@ -43,7 +47,13 @@ func main() {
 	defer closeLog()
 	observability.ConfigureStructuredLogging()
 	log.Printf("[startup] 日志输出已启用 dir=./log current_file=%s", logPath)
-	port = selectStartupPort(port, shouldAutoPickPort())
+
+	if desktop {
+		cfg.AllowLANAccess = false
+		noOpen = true
+	}
+
+	port = selectStartupPort(port, shouldAutoPickPort() || desktop)
 	frontendPort = selectFrontendPort(frontendPort)
 	if runtimeWebPort, err := strconv.Atoi(port); err == nil {
 		cfg.RuntimeWebPort = runtimeWebPort
@@ -66,41 +76,48 @@ func main() {
 
 	ctx := context.Background()
 
-	// 初始化应用运行时
 	application, err := app.New(ctx, cfg)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "初始化应用失败: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 启动 HTTP 服务
-	srv := api.NewServer(application, port)
-	listenHost := config.HTTPListenHost(cfg.AllowLANAccess)
+	var listenHost string
+	if desktop {
+		listenHost = "127.0.0.1"
+	} else {
+		listenHost = config.HTTPListenHost(cfg.AllowLANAccess)
+	}
+	srv := api.NewServerWithHost(application, port, listenHost)
 
-	// 打印启动信息
-	url := fmt.Sprintf("http://localhost:%s", port)
+	url := fmt.Sprintf("http://127.0.0.1:%s", port)
 	frontendURL := fmt.Sprintf("http://localhost:%s", frontendPort)
-	fmt.Printf("\n  Nova AI 小说创作工具\n")
-	fmt.Printf("  ─────────────────────\n")
-	fmt.Printf("  后端服务: %s\n", url)
-	if dev {
-		fmt.Printf("  前端入口: %s\n", frontendURL)
-	}
-	if cfg.AllowLANAccess {
-		if dev {
-			fmt.Printf("  局域网入口: http://%s:%s\n", config.LANAddress(), frontendPort)
-		} else {
-			fmt.Printf("  局域网后端: http://%s:%s\n", config.LANAddress(), port)
-		}
-	}
-	fmt.Printf("  作品目录: %s\n", application.Workspace())
-	fmt.Printf("  按 Ctrl+C 停止服务\n\n")
 
-	// 开发模式：同时启动 Vite dev server
+	if !desktop {
+		fmt.Printf("\n  Nova AI 小说创作工具\n")
+		fmt.Printf("  ─────────────────────\n")
+		fmt.Printf("  后端服务: %s\n", url)
+		if dev {
+			fmt.Printf("  前端入口: %s\n", frontendURL)
+		}
+		if cfg.AllowLANAccess {
+			if dev {
+				fmt.Printf("  局域网入口: http://%s:%s\n", config.LANAddress(), frontendPort)
+			} else {
+				fmt.Printf("  局域网后端: http://%s:%s\n", config.LANAddress(), port)
+			}
+		}
+		fmt.Printf("  作品目录: %s\n", application.Workspace())
+		fmt.Printf("  按 Ctrl+C 停止服务\n\n")
+	} else {
+		fmt.Printf("[nova-desktop-ready] port=%s url=%s\n", port, url)
+		go monitorParentProcess()
+	}
+
 	if dev {
 		go startViteDev(frontendPort, listenHost)
 	}
-	if !noOpen {
+	if !noOpen && !desktop {
 		if dev {
 			go openBrowser(frontendURL)
 		} else {
@@ -108,7 +125,14 @@ func main() {
 		}
 	}
 
-	srv.Run()
+	go func() {
+		if desktop {
+			waitForPortReady(port)
+			fmt.Printf("[nova-desktop-ready] port=%s url=%s\n", port, url)
+		}
+	}()
+
+	srv.RunWithHost(listenHost)
 }
 
 // openBrowser 打开默认浏览器
@@ -284,4 +308,32 @@ func existingDir(path string) string {
 		return clean
 	}
 	return ""
+}
+
+func monitorParentProcess() {
+	if os.Getppid() == 1 {
+		return
+	}
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if os.Getppid() == 1 {
+			log.Printf("[desktop] parent process exited, shutting down")
+			os.Exit(0)
+		}
+	}
+}
+
+func waitForPortReady(port string) {
+	client := http.Client{
+		Timeout: 500 * time.Millisecond,
+	}
+	for i := 0; i < 60; i++ {
+		resp, err := client.Get(fmt.Sprintf("http://127.0.0.1:%s", port))
+		if err == nil && resp.StatusCode >= 200 && resp.StatusCode < 500 {
+			_ = resp.Body.Close()
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 }

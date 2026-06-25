@@ -19,6 +19,7 @@ type IDEStoryTeller struct {
 	Name        string
 	Description string
 	Prompt      string
+	StyleRules  []StyleRule
 }
 
 // ConfigManagerResourceSkill is a bounded, already-resolved Skill body that
@@ -37,12 +38,20 @@ func BuildInstruction(cfg *config.Config, state *book.State, teller IDEStoryTell
 
 // BuildInstructionComposition returns the IDE system prompt and its auditable source summary.
 func BuildInstructionComposition(cfg *config.Config, state *book.State, teller IDEStoryTeller) SystemPromptCompositionLog {
+	teller.StyleRules = boundedStyleRules(teller.StyleRules, maxStyleRuleContextChars)
 	builtIn, workspace, creator, stateContext := buildIDEBuiltinInstruction(cfg, state, teller)
 	instruction := protectedSystemInstruction(cfg, config.AgentKindIDE, builtIn)
 	var stateParts []book.CompactContextPart
 	if state != nil {
 		stateParts = state.CompactContextParts()
 	}
+	extraSources := []promptSource{{
+		source:  "系统提示",
+		title:   "写作模式默认导演规则",
+		content: teller.Prompt,
+		note:    teller.ID,
+	}}
+	extraSources = append(extraSources, styleRulePromptSources(teller.StyleRules)...)
 	return SystemPromptCompositionLog{
 		mode:         "ide",
 		workspace:    workspace,
@@ -50,12 +59,7 @@ func BuildInstructionComposition(cfg *config.Config, state *book.State, teller I
 		stateContext: stateContext,
 		stateParts:   stateParts,
 		instruction:  instruction,
-		extraSources: []promptSource{{
-			source:  "系统提示",
-			title:   "写作模式默认导演规则",
-			content: teller.Prompt,
-			note:    teller.ID,
-		}},
+		extraSources: extraSources,
 	}
 }
 
@@ -96,19 +100,22 @@ func (l SystemPromptCompositionLog) logForRun(options RunOptions) {
 }
 
 func newInteractiveStoryInstructionComposition(cfg *config.Config, state *book.State, teller prompts.InteractiveStorySystemInstructionInput) SystemPromptCompositionLog {
+	teller.StyleRules = boundedStyleRules(teller.StyleRules, maxStyleRuleContextChars)
 	builtIn, workspace, creator := buildInteractiveStoryBuiltinInstruction(cfg, state, teller)
 	instruction := protectedSystemInstruction(cfg, config.AgentKindInteractiveStory, builtIn)
+	extraSources := []promptSource{{
+		source:  "系统提示",
+		title:   "导演系统规则",
+		content: teller.StoryTellerSystemPrompt,
+		note:    teller.StoryTellerID,
+	}}
+	extraSources = append(extraSources, styleRulePromptSources(teller.StyleRules)...)
 	return SystemPromptCompositionLog{
-		mode:        "interactive",
-		workspace:   workspace,
-		creator:     creator,
-		instruction: instruction,
-		extraSources: []promptSource{{
-			source:  "系统提示",
-			title:   "导演系统规则",
-			content: teller.StoryTellerSystemPrompt,
-			note:    teller.StoryTellerID,
-		}},
+		mode:         "interactive",
+		workspace:    workspace,
+		creator:      creator,
+		instruction:  instruction,
+		extraSources: extraSources,
 	}
 }
 
@@ -171,6 +178,7 @@ func buildIDEBuiltinInstruction(cfg *config.Config, state *book.State, teller ID
 		StoryTellerName:        teller.Name,
 		StoryTellerDescription: teller.Description,
 		StoryTellerPrompt:      teller.Prompt,
+		StyleRules:             boundedStyleRules(teller.StyleRules, maxStyleRuleContextChars),
 		ChapterFilenameFormat:  cfg.ChapterFilenameFormat,
 		VolumeDirFormat:        cfg.VolumeDirFormat,
 		DraftFlowEnabled:       cfg.DraftFlowEnabled,
@@ -180,13 +188,47 @@ func buildIDEBuiltinInstruction(cfg *config.Config, state *book.State, teller ID
 	return builtIn, workspace, creator, stateContext
 }
 
-const ideWorkspaceRuntimeContextTitle = "本轮动态作品状态"
+const (
+	ideWorkspaceStableContextTitle  = "稳定作品上下文"
+	ideWorkspaceDynamicContextTitle = "本轮动态作品状态"
+)
+
+type IDEWorkspaceRuntimeContexts struct {
+	StableTitle  string
+	Stable       string
+	DynamicTitle string
+	Dynamic      string
+}
+
+func IDEWorkspaceRuntimeContextsForState(state *book.State) IDEWorkspaceRuntimeContexts {
+	contexts := IDEWorkspaceRuntimeContexts{
+		StableTitle:  ideWorkspaceStableContextTitle,
+		DynamicTitle: ideWorkspaceDynamicContextTitle,
+	}
+	if state == nil {
+		return contexts
+	}
+	contexts.Stable = strings.TrimSpace(state.StableContext())
+	contexts.Dynamic = strings.TrimSpace(state.DynamicContext())
+	if contexts.Stable == "" && contexts.Dynamic == "" {
+		contexts.Stable = prompts.EmptyIDEStateHint()
+	}
+	return contexts
+}
 
 func IDEWorkspaceRuntimeContext(state *book.State) string {
 	if state == nil {
 		return ""
 	}
-	if context := strings.TrimSpace(state.CompactContext()); context != "" {
+	contexts := IDEWorkspaceRuntimeContextsForState(state)
+	parts := make([]book.CompactContextPart, 0, 2)
+	if contexts.Stable != "" {
+		parts = append(parts, book.CompactContextPart{PromptTitle: contexts.StableTitle, Content: contexts.Stable})
+	}
+	if contexts.Dynamic != "" {
+		parts = append(parts, book.CompactContextPart{PromptTitle: contexts.DynamicTitle, Content: contexts.Dynamic})
+	}
+	if context := strings.TrimSpace(book.FormatCompactContextParts(parts)); context != "" {
 		return context
 	}
 	return prompts.EmptyIDEStateHint()
@@ -215,6 +257,7 @@ func buildInteractiveStoryBuiltinInstruction(cfg *config.Config, state *book.Sta
 		StoryTellerName:         teller.StoryTellerName,
 		StoryTellerDescription:  teller.StoryTellerDescription,
 		StoryTellerSystemPrompt: teller.StoryTellerSystemPrompt,
+		StyleRules:              boundedStyleRules(teller.StyleRules, maxStyleRuleContextChars),
 	})
 	return builtIn, workspace, creator
 }
@@ -351,6 +394,27 @@ func readonlyPromptSource(id, title, source, content string) config.AgentPromptS
 		Source:  source,
 		Content: strings.TrimSpace(content),
 	}
+}
+
+func styleRulePromptSources(rules []StyleRule) []promptSource {
+	sources := make([]promptSource, 0, len(rules))
+	for _, rule := range rules {
+		scene := strings.TrimSpace(rule.Scene)
+		if scene == "" || len(rule.StyleContents) == 0 {
+			continue
+		}
+		content := styleRulesSystemInstruction([]StyleRule{rule})
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		sources = append(sources, promptSource{
+			source:  "系统提示",
+			title:   "场景化风格规则：" + scene,
+			content: content,
+			note:    "当前叙事编排",
+		})
+	}
+	return sources
 }
 
 func ideFlowInstruction(cfg *config.Config, workspace string) string {

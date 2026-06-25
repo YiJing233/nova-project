@@ -47,7 +47,6 @@ func (s *Server) registerRoutes(h *hertzserver.Hertz) {
 		api.POST("/config-manager/stream", apiHandlers.HandleConfigManagerStream)
 		api.GET("/config-manager/messages", apiHandlers.HandleConfigManagerMessages)
 		api.POST("/config-manager/clear", apiHandlers.HandleConfigManagerClear)
-		api.GET("/styles", apiHandlers.HandleStyles)
 		api.GET("/interactive/stories", apiHandlers.HandleInteractiveStories)
 		api.POST("/interactive/stories", apiHandlers.HandleInteractiveStoryCreate)
 		api.PATCH("/interactive/stories/:id", apiHandlers.HandleInteractiveStoryUpdate)
@@ -132,6 +131,7 @@ func (s *Server) registerRoutes(h *hertzserver.Hertz) {
 		api.PUT("/settings/workspace", apiHandlers.HandleSettingsWorkspaceUpdate)
 		api.GET("/update/check", apiHandlers.HandleUpdateCheck)
 		api.POST("/update/install", apiHandlers.HandleUpdateInstall)
+		api.POST("/update/install/stream", apiHandlers.HandleUpdateInstallStream)
 		api.GET("/status", apiHandlers.HandleStatus)
 	}
 

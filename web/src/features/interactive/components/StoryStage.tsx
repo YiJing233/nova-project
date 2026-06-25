@@ -33,7 +33,7 @@ import { useIsMobile } from '@/hooks/useIsMobile'
 
 interface StoryStageProps {
   workspace?: string
-  styleSuggestions?: string[]
+  styleSceneSuggestions?: string[]
   stories?: StorySummary[]
   story?: StorySummary
   tellers?: Teller[]
@@ -59,13 +59,13 @@ const DEFAULT_STAGE_LINE_HEIGHT = 1.78
 const EMPTY_STAGE_RUN = emptyStoryStageRun()
 const stageAbortControllers = new Map<string, AbortController>()
 
-export function StoryStage({ workspace, styleSuggestions = [], stories = [], story, tellers = [], storyId, branchId, snapshot, snapshotLoading = false, loreEmpty = false, bookOpeningPresets = [], sceneMemoryVisible = true, onStorySelect = noop, onStoryCreate = noop, onStoryDelete = noop, onTellerChange = noop, onReplyTargetCharsChange, onRequestLoreInit, onToggleSceneMemory, onDone }: StoryStageProps) {
+export function StoryStage({ workspace, styleSceneSuggestions = [], stories = [], story, tellers = [], storyId, branchId, snapshot, snapshotLoading = false, loreEmpty = false, bookOpeningPresets = [], sceneMemoryVisible = true, onStorySelect = noop, onStoryCreate = noop, onStoryDelete = noop, onTellerChange = noop, onReplyTargetCharsChange, onRequestLoreInit, onToggleSceneMemory, onDone }: StoryStageProps) {
   const { t } = useTranslation()
   const isMobile = useIsMobile()
   const [input, setInput] = useState('')
   const [stageControlsOpen, setStageControlsOpen] = useState(false)
-  const [styleReferences, setStyleReferences] = useState<string[]>([])
-  const [styleReferenceQuery, setStyleReferenceQuery] = useState<string | null>(null)
+  const [styleScenes, setStyleScenes] = useState<string[]>([])
+  const [styleSceneQuery, setStyleSceneQuery] = useState<string | null>(null)
   const [showSkillCommands, setShowSkillCommands] = useState(false)
   const [activeSkillCommandIndex, setActiveSkillCommandIndex] = useState(0)
   const [inputFloatHeight, setInputFloatHeight] = useState(0)
@@ -406,12 +406,12 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
       return
     }
     const nextRewindTurnId = override?.rewindTurnId ?? editingTurn?.id
-    const inlineStyleReferences = parseInlineStyleReferences(message)
-    const mergedStyleReferences = Array.from(new Set([...styleReferences, ...inlineStyleReferences]))
+    const inlineStyleScenes = parseInlineStyleScenes(message)
+    const mergedStyleScenes = Array.from(new Set([...styleScenes, ...inlineStyleScenes]))
     setInput('')
     setEditingTurn(null)
-    setStyleReferences([])
-    setStyleReferenceQuery(null)
+    setStyleScenes([])
+    setStyleSceneQuery(null)
     setShowSkillCommands(false)
     setActiveSkillCommandIndex(0)
     setStageActivityContent(t('storyStage.activity.connecting'))
@@ -429,7 +429,7 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
         story_id: storyId,
         branch: branchId,
         message,
-        style_references: mergedStyleReferences,
+        style_scenes: mergedStyleScenes,
         regenerate_from_turn_id: nextRewindTurnId || undefined,
         signal: abortController.signal,
       })
@@ -546,8 +546,8 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
     if (!storyId || streaming) return
     setInput('')
     setEditingTurn(null)
-    setStyleReferences([])
-    setStyleReferenceQuery(null)
+    setStyleScenes([])
+    setStyleSceneQuery(null)
     setShowSkillCommands(false)
     setActiveSkillCommandIndex(0)
     setStageStreaming(true)
@@ -583,8 +583,8 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
   const analyzeCurrentContext = async (rawMessage: string) => {
     const message = rawMessage.trim()
     if (!message || !storyId || streaming) return
-    const inlineStyleReferences = parseInlineStyleReferences(message)
-    const mergedStyleReferences = Array.from(new Set([...styleReferences, ...inlineStyleReferences]))
+    const inlineStyleScenes = parseInlineStyleScenes(message)
+    const mergedStyleScenes = Array.from(new Set([...styleScenes, ...inlineStyleScenes]))
     setContextAnalysisLoading(true)
     setContextAnalysisError(null)
     setContextAnalysis(null)
@@ -594,7 +594,7 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
         story_id: storyId,
         branch: branchId,
         message,
-        style_references: mergedStyleReferences,
+        style_scenes: mergedStyleScenes,
       }))
     } catch (e) {
       setContextAnalysis(null)
@@ -701,7 +701,7 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
   const cancelEditing = () => {
     setEditingTurn(null)
     setInput('')
-    setStyleReferenceQuery(null)
+    setStyleSceneQuery(null)
     setShowSkillCommands(false)
     setActiveSkillCommandIndex(0)
   }
@@ -712,7 +712,7 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
     setShowSkillCommands(nextValue.startsWith('/'))
     setActiveSkillCommandIndex(0)
     const styleMatch = nextValue.match(/(?:^|\s)#([^\s#]*)$/)
-    setStyleReferenceQuery(styleMatch ? styleMatch[1] : null)
+    setStyleSceneQuery(styleMatch ? styleMatch[1] : null)
   }
 
   const selectSkillCommand = (name: string) => {
@@ -722,20 +722,20 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
     inputRef.current?.focus()
   }
 
-  const selectStyleReference = (path: string) => {
+  const selectStyleScene = (scene: string) => {
     setInput((current) =>
       current.replace(/(?:^|\s)#([^\s#]*)$/, (match) => {
         const prefix = match.startsWith(' ') ? ' ' : ''
-        return `${prefix}#${path} `
+        return `${prefix}#${scene} `
       }),
     )
-    setStyleReferences((current) => Array.from(new Set([...current, path])))
-    setStyleReferenceQuery(null)
+    setStyleScenes((current) => Array.from(new Set([...current, scene])))
+    setStyleSceneQuery(null)
     inputRef.current?.focus()
   }
 
-  const removeStyleReference = (path: string) => {
-    setStyleReferences((current) => current.filter((item) => item !== path))
+  const removeStyleScene = (scene: string) => {
+    setStyleScenes((current) => current.filter((item) => item !== scene))
   }
 
   const stageControls = (
@@ -925,8 +925,8 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
             </div>
           ) : null}
           <div className="relative min-w-0">
-            <ReferenceChips files={styleReferences} onRemove={removeStyleReference} prefix="#" tone="style" />
-              <FileReferencePicker open={styleReferenceQuery !== null && styleSuggestions.length > 0} query={styleReferenceQuery || ''} files={styleSuggestions} onSelect={selectStyleReference} trigger="#" placeholder={t('chat.styleReference.placeholder')} emptyText={t('chat.styleReference.empty')} heading={t('chat.styleReference.heading')} />
+            <ReferenceChips files={styleScenes} onRemove={removeStyleScene} prefix="#" tone="style" />
+              <FileReferencePicker open={styleSceneQuery !== null && styleSceneSuggestions.length > 0} query={styleSceneQuery || ''} files={styleSceneSuggestions} onSelect={selectStyleScene} trigger="#" placeholder={t('chat.styleReference.placeholder')} emptyText={t('chat.styleReference.empty')} heading={t('chat.styleReference.heading')} />
               <Popover open={showSkillCommands && filteredSkillCommands.length > 0}>
                 <PopoverTrigger asChild>
                   <span className="absolute bottom-full left-0 h-0 w-0" />
@@ -1001,7 +1001,7 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
                       return
                     }
                     if (event.key === 'Escape') {
-                      setStyleReferenceQuery(null)
+                      setStyleSceneQuery(null)
                       setShowSkillCommands(false)
                       setActiveSkillCommandIndex(0)
                       return
@@ -1161,29 +1161,57 @@ export function StoryStage({ workspace, styleSuggestions = [], stories = [], sto
     ])
   }
 
-  function appendToolArgsDelta(payload: { id?: string; args?: string; delta?: string }) {
-    if (!payload.id) return
-    setStageLiveMessages((prev) =>
-      prev.map((msg) =>
-        msg.role === 'tool_call' && msg.id === payload.id
+  function appendToolArgsDelta(payload: { id?: string; name?: string; args?: string; delta?: string }) {
+    if (!payload.id && !payload.name) return
+    setStageLiveMessages((prev) => {
+      const targetIndex = findToolMessageIndex(prev, payload.id, payload.name)
+      if (targetIndex < 0) return prev
+      return prev.map((msg, index) =>
+        index === targetIndex
           ? {
               ...msg,
               args: payload.args !== undefined ? payload.args : `${msg.args || ''}${payload.delta || ''}`,
             }
           : msg,
-      ),
-    )
+      )
+    })
   }
 
   function updateToolCallMessage(id: string | undefined, name: string | undefined, status: 'success' | 'error', result = '') {
-    setStageLiveMessages((prev) =>
-      prev.map((msg) => {
-        if (msg.role !== 'tool_call') return msg
-        const matched = id ? msg.id === id : Boolean(name && msg.name === name)
-        if (!matched) return msg
-        return { ...msg, status, result, streaming: false }
-      }),
-    )
+    setStageLiveMessages((prev) => {
+      const targetIndex = findToolMessageIndex(prev, id, name)
+      if (targetIndex < 0) return prev
+      return prev.map((msg, index) => (
+        index === targetIndex ? { ...msg, status, result, streaming: false } : msg
+      ))
+    })
+  }
+
+  function findToolMessageIndex(messages: ChatMessage[], id?: string, name?: string) {
+    if (id) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i]
+        if (message.role === 'tool_call' && message.id === id) return i
+      }
+      return -1
+    }
+    if (name) {
+      let match = -1
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const message = messages[i]
+        if (message.role === 'tool_call' && message.name === name) {
+          if (match >= 0) return -1
+          match = i
+        }
+      }
+      return match
+    }
+    if (!id && !name) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i].role === 'tool_call') return i
+      }
+    }
+    return -1
   }
 
   function appendContextCompactionMessage(data: Record<string, unknown>) {
@@ -1438,7 +1466,7 @@ function mergeHotChoices(current: string[], next: string[]) {
   return merged
 }
 
-function parseInlineStyleReferences(input: string): string[] {
+function parseInlineStyleScenes(input: string): string[] {
   const result = new Set<string>()
   const regex = /(?:^|\s)#([^\s#]+)/g
   let match: RegExpExecArray | null

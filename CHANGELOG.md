@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- 写作 Skill Preset：内置 `novel-lite`、`novel-standard`、`novel-heavy` 三种 IDE 写作 Skill，默认使用 `novel-standard`；创作 Agent 输入区可选择当前写作 Skill，也可选择用户/工作区自建的 IDE Skill，运行时按工作区覆盖 > 用户覆盖 > 内置预设解析并注入有效 SKILL.md。
+- 配置管理 Agent：新增 `list_agent_configs` / `write_agent_configs` 专用工具，可在 Agents 页通过对话管理 Agent 模型覆盖、Prompt、工具权限、Skills 可用性、上下文压缩、General SubAgent 和自定义 `sub_agents`；新增 `agent_config_read` / `agent_config_write` 工具权限，默认仅配置管理 Agent 启用。
 - Added SubAgent delegation support with configurable General SubAgent availability, custom `sub_agents`, real-time subagent stream metadata, and compact Agents page management UI.
 
 ### Changed
@@ -16,12 +18,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Agent：默认不再为所有 Agent 设置 `max_iteration` 轮数上限；只有用户显式配置正数时才限制迭代次数。
 - Agent：Review 自动化不再强制把 `max_iteration` 提升到 100，避免 task 委派继续被隐藏上限截断。
 - Agent：自定义 SubAgent 现在继承父 Agent 稳定 system prompt、workspace/mode/tool 边界，并要求父 Agent 委派 task 时传递目标、约束和路径/资源 ID；若旧 SubAgent prompt 试图覆盖父 Agent 工具权限或模式边界，会以父级契约为准。
+- Skills：内置预制 Skill 支持在界面中创建同名覆盖，默认写入用户级 `<nova_dir>/skills/<skill-name>/SKILL.md`，只有用户级目录不可写时才退回工作区覆盖；Skill 配置页现在支持修改 Skill 名称，并可在用户级与工作区级保存位置之间迁移。
 - WebUI：Agents 页面默认编辑用户配置，Skills 页面默认在用户级目录新建 Skill；需要工作区级覆盖时仍可手动切换到工作区配置。
 - WebUI：创作 Agent 面板移除独立 Review tab，Review 任务配置与运行过程统一回到自动化页；SubAgent 正文输出改为主会话高亮进度卡，点击后可在右侧打开独立子会话详情栏，避免混入父 Agent 正文。
 - WebUI：写作模式作品目录上方的灵感、大纲和状态文件入口合并为可折叠的“书籍设定”，并新增创作规则、写作进度和角色当前状态快捷入口。
 
 ### Fixed
 
+- WebUI：允许 pnpm 在安装时执行 `msw` 的构建脚本，避免高版本 pnpm 首次安装后因 `ERR_PNPM_IGNORED_BUILDS` 导致前端启动失败。
+- WebUI：修复 Agent 对话、SubAgent 详情栏和工具流式预览在输出增长时不会稳定锁定到底部的问题；现在默认跟随到底部，用户主动上滑后停止自动滚动，重新滚到底部后再恢复跟随。
+- WebUI：修复创作 Agent 输入动作菜单里的写作 Skill 列表需要鼠标悬停后才开始加载、首次展开慢一拍的问题；现在创作 Agent 面板打开时就会预加载写作 Skill 列表和默认选择。
 - Agent：修复自定义 SubAgent 在互动故事父 Agent 下可能绕过写文件拦截的问题，并让配置管理 SubAgent 的专属读写工具遵守自身工具权限限制。
 - WebUI：修复浅色主题下 SubAgent 删除确认弹窗危险按钮对比度不足的问题，并将基础弹窗宽度改为随视口自适应，避免自定义 SubAgent 编辑等弹窗过窄。
 - Agent 模型：所有 Agent 请求不再主动设置 `max_tokens` 输出上限，避免长章节通过 `write_file` 写入时工具参数在正文中途被截断并报 JSON EOF。
@@ -85,6 +91,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- 修复豆包等输入法/语音输入仍在组合或后处理文字时，Agent 和互动输入框按 Enter 会误发送未定稿文本的问题。
 - 修复配置管理 Agent 在自动化、资料库、故事记忆、叙事编排和 Skills 等不同配置入口之间共用同一段对话历史的问题；现在会按入口和目标资源隔离历史与 `/clear`。
 - 修复写作 Agent 上下文分析器会按作品状态 Markdown 小标题误拆来源的问题；现在作品状态按创作灵感、状态文件、章节目录、资料库和章节组细纲等真实来源展示。
 - 修复上下文压缩运行时同时出现压缩卡片和 activity 卡片的问题；现在 IDE 与互动故事只保留一个简洁压缩卡片，并用旋转 Loading 表示进行中状态。

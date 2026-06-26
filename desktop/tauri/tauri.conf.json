@@ -6,7 +6,7 @@
   "build": {
     "beforeDevCommand": "",
     "beforeBuildCommand": "",
-    "devUrl": "data:text/html;base64,PGh0bWw+PGJvZHk+PGgxPk5vdmEgbG9hZGluZy4uLjwvaDE+PC9ib2R5PjwvaHRtbD4=",
+    "devUrl": "data:text/html;base64,PGh0bWw+PHNjcmlwdD5kb2N1bWVudC5ib2R5LnN0eWxlLmJhY2tncm91bmQ9JyMxYTFhMmUnPC9zY3JpcHQ+PC9odG1sPg==",
     "frontendDist": "../../web/dist"
   },
   "app": {
@@ -21,7 +21,7 @@
         "fullscreen": false,
         "decorations": true,
         "center": true,
-        "visible": false,
+        "visible": true,
         "label": "main"
       }
     ],
@@ -56,9 +56,13 @@
     "category": "Productivity",
     "shortDescription": "AI-native 创作工作台",
     "longDescription": "Nova 是面向创作者的 AI-native 创作工作台：用写作模式管理小说创作，用互动模式推进互动娱乐。",
+    "copyright": "Copyright © 2025 Nova Authors. All rights reserved.",
+    "publisher": "Nova",
     "linux": {
       "deb": {
-        "depends": ["libgtk-3-0", "libwebkit2gtk-4.1-0"]
+        "depends": ["libgtk-3-0", "libwebkit2gtk-4.1-0", "libayatana-appindicator3-1"],
+        "section": "editors",
+        "priority": "optional"
       },
       "appimage": {
         "bundleMediaFramework": true
@@ -66,10 +70,16 @@
     },
     "macOS": {
       "minimumSystemVersion": "10.15",
-      "exceptionDomain": "localhost"
+      "exceptionDomain": "localhost",
+      "frameworks": [],
+      "providerShortName": "Nova",
+      "signingIdentity": null,
+      "entitlements": null
     },
     "windows": {
-      "nsis": {}
+      "nsis": {
+        "installMode": "currentUser"
+      }
     }
   }
 }

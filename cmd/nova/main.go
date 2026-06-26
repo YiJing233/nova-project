@@ -110,7 +110,7 @@ func main() {
 		fmt.Printf("  作品目录: %s\n", application.Workspace())
 		fmt.Printf("  按 Ctrl+C 停止服务\n\n")
 	} else {
-		fmt.Printf("[nova-desktop-ready] port=%s url=%s\n", port, url)
+		log.Printf("[desktop] 启动桌面模式，监听地址=%s", listenHost)
 		go monitorParentProcess()
 	}
 
@@ -125,12 +125,13 @@ func main() {
 		}
 	}
 
-	go func() {
-		if desktop {
+	if desktop {
+		go func() {
 			waitForPortReady(port)
 			fmt.Printf("[nova-desktop-ready] port=%s url=%s\n", port, url)
-		}
-	}()
+			log.Printf("[desktop] 服务已就绪 port=%s", port)
+		}()
+	}
 
 	srv.RunWithHost(listenHost)
 }

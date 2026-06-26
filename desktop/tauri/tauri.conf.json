@@ -1,0 +1,85 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Nova",
+  "version": "0.1.13",
+  "identifier": "app.nova.nova",
+  "build": {
+    "beforeDevCommand": "",
+    "beforeBuildCommand": "",
+    "devUrl": "data:text/html;base64,PGh0bWw+PHNjcmlwdD5kb2N1bWVudC5ib2R5LnN0eWxlLmJhY2tncm91bmQ9JyMxYTFhMmUnPC9zY3JpcHQ+PC9odG1sPg==",
+    "frontendDist": "../../web/dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "Nova",
+        "width": 1400,
+        "height": 900,
+        "minWidth": 900,
+        "minHeight": 600,
+        "resizable": true,
+        "fullscreen": false,
+        "decorations": true,
+        "center": true,
+        "visible": true,
+        "label": "main"
+      }
+    ],
+    "security": {
+      "csp": null
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["deb", "appimage", "nsis", "dmg"],
+    "icon": [
+      "icons/128x128.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "resources": {
+      "binaries/web": "binaries/web",
+      "binaries/skills": "binaries/skills",
+      "binaries/config.toml": "binaries/config.toml"
+    },
+    "externalBin": [
+      "binaries/nova"
+    ],
+    "fileAssociations": [
+      {
+        "ext": ["nova"],
+        "name": "Nova Workspace",
+        "role": "Editor",
+        "description": "Nova 创作工作区"
+      }
+    ],
+    "category": "Productivity",
+    "shortDescription": "AI-native 创作工作台",
+    "longDescription": "Nova 是面向创作者的 AI-native 创作工作台：用写作模式管理小说创作，用互动模式推进互动娱乐。",
+    "copyright": "Copyright © 2025 Nova Authors. All rights reserved.",
+    "publisher": "Nova",
+    "linux": {
+      "deb": {
+        "depends": ["libgtk-3-0", "libwebkit2gtk-4.1-0", "libayatana-appindicator3-1"],
+        "section": "editors",
+        "priority": "optional"
+      },
+      "appimage": {
+        "bundleMediaFramework": true
+      }
+    },
+    "macOS": {
+      "minimumSystemVersion": "10.15",
+      "exceptionDomain": "localhost",
+      "frameworks": [],
+      "providerShortName": "Nova",
+      "signingIdentity": null,
+      "entitlements": null
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  }
+}

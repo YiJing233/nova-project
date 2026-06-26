@@ -1,0 +1,18 @@
+{
+  "name": "nova",
+  "version": "0.1.13",
+  "private": true,
+  "description": "Nova AI Novel Creation Workspace",
+  "scripts": {
+    "tauri": "tauri",
+    "tauri:prebuild": "bash scripts/build-tauri-prebuild.sh",
+    "tauri:dev": "pnpm tauri:prebuild && tauri dev --config desktop/tauri/tauri.conf.json",
+    "tauri:build": "pnpm tauri:prebuild && tauri build --config desktop/tauri/tauri.conf.json",
+    "tauri:build:deb": "pnpm tauri:prebuild && tauri build --config desktop/tauri/tauri.conf.json --bundles deb",
+    "tauri:build:appimage": "pnpm tauri:prebuild && tauri build --config desktop/tauri/tauri.conf.json --bundles appimage",
+    "tauri:icon": "tauri icon web/public/favicon.svg"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.0.0"
+  }
+}

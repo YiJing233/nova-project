@@ -20,8 +20,15 @@ type Server struct {
 
 // NewServer 构造 HTTP 服务。
 func NewServer(application *app.App, port string) *Server {
+	return NewServerWithHost(application, port, "")
+}
+
+// NewServerWithHost 构造 HTTP 服务并指定监听地址。
+func NewServerWithHost(application *app.App, port string, host string) *Server {
 	remoteAccess := application.RemoteAccessConfig()
-	host := config.HTTPListenHost(remoteAccess.AllowLANAccess)
+	if host == "" {
+		host = config.HTTPListenHost(remoteAccess.AllowLANAccess)
+	}
 	s := &Server{
 		app:  application,
 		port: port,
@@ -43,4 +50,9 @@ func NewServer(application *app.App, port string) *Server {
 func (s *Server) Run() {
 	fmt.Printf("Nova HTTP 服务启动: http://%s:%s\n", s.host, s.port)
 	s.engine.Spin()
+}
+
+// RunWithHost 保持兼容性，直接启动。
+func (s *Server) RunWithHost(host string) {
+	s.Run()
 }

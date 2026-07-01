@@ -1,4 +1,4 @@
-module nova
+module denova
 
 go 1.26.1
 
@@ -9,8 +9,10 @@ require (
 	github.com/cloudwego/eino-ext/adk/backend/local v0.2.6
 	github.com/cloudwego/eino-ext/components/model/openai v0.1.13
 	github.com/cloudwego/eino-ext/components/tool/duckduckgo/v2 v2.0.0-20260616080858-ab17b7308bf8
+	github.com/cloudwego/eino-ext/libs/acl/openai v0.1.17
 	github.com/cloudwego/hertz v0.10.5
 	github.com/go-git/go-git/v5 v5.19.1
+	github.com/openai/openai-go/v3 v3.41.0
 	github.com/pelletier/go-toml/v2 v2.4.0
 	golang.org/x/crypto v0.53.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -29,7 +31,6 @@ require (
 	github.com/bytedance/sonic/loader v0.5.1 // indirect
 	github.com/cloudflare/circl v1.6.3 // indirect
 	github.com/cloudwego/base64x v0.1.7 // indirect
-	github.com/cloudwego/eino-ext/libs/acl/openai v0.1.17 // indirect
 	github.com/cloudwego/gopkg v0.2.0 // indirect
 	github.com/cloudwego/netpoll v0.7.3 // indirect
 	github.com/corpix/uarand v0.2.0 // indirect
@@ -63,9 +64,10 @@ require (
 	github.com/skeema/knownhosts v1.3.2 // indirect
 	github.com/slongfield/pyfmt v0.0.0-20220222012616-ea85ff4c361f // indirect
 	github.com/tetratelabs/wazero v1.12.0 // indirect
-	github.com/tidwall/gjson v1.14.4 // indirect
+	github.com/tidwall/gjson v1.18.0 // indirect
 	github.com/tidwall/match v1.1.1 // indirect
-	github.com/tidwall/pretty v1.2.0 // indirect
+	github.com/tidwall/pretty v1.2.1 // indirect
+	github.com/tidwall/sjson v1.2.5 // indirect
 	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
 	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect

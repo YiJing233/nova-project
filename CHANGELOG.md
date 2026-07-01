@@ -6,11 +6,162 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [v0.1.18] - 2026-07-01
+
+### Brief / 简要说明
+
+- 中文：本版本完成 Denova 品牌与分发命名切换，新增新用户引导、消息中心、PWA/移动端主屏体验、可内嵌前端的单文件自托管能力，并大幅补齐移动端写作与游戏模式的输入、弹窗、文件操作、故事记忆和分支导航体验。图像方案、书籍封面生成、互动图像回写、Plan Mode 展示、章节正文隐藏输出和资源保存冲突保护也更稳定。兼容性提示：Release 包不再提供 `nova` / `nova.exe` / `nova-updater` 别名，新安装请直接运行 `denova` / `denova.exe`。
+- English: This release completes the Denova branding and distribution rename, adds onboarding, a message center, PWA/mobile home-screen support, and a self-hosting path where the backend can embed the web app. It also improves mobile Writing and Game Mode input, dialogs, file actions, story memory, and branch navigation. Image presets, cover generation, interactive image writes, Plan Mode rendering, hidden chapter-body streaming, and resource conflict protection are more reliable. Compatibility note: release packages no longer include `nova`, `nova.exe`, or `nova-updater` aliases; new installs should run `denova` / `denova.exe` directly.
+
+### Added
+
+- 游戏模式：剧情页新增宽屏轮次导航，左侧横杠可快速定位每个对话轮次，悬停/聚焦时展示用户输入与 Agent 剧情正文预览；窄屏或舞台空间不足时自动隐藏。
+- WebUI：新增新用户引导，按“配置语言模型 API Key → 新建书籍 → 创作 Agent 预填第一章开头 → 一级模块导览”串联主流程；支持一键跳过、设置页重新打开，状态仅保存在浏览器本地，不写入用户或工作区配置。
+- WebUI：新增全局消息中心，顶部栏铃铛入口可查看 Denova 更新日志；打开某条消息会自动标记为已读，也可一键全部已读。已读状态保存到用户级 Denova 数据目录，不写入作品 workspace。
+- 游戏模式：行动选项默认会在故事输出结束后后台自动生成，用户点击输入框右侧“选择”后再展开；输入框左侧菜单保留“自动生成 / 手动生成”切换。
+- WebUI：新增 PWA manifest、应用图标（apple-touch-icon / 192 / 512 / maskable）与移动端 viewport meta（`viewport-fit=cover`、`theme-color`、`apple-mobile-web-app-capable` 等）。自托管后可在手机主屏“添加到桌面”以独立应用形态打开，并正确延伸到刘海安全区；图标由 `pnpm generate-icons`（sharp）从 `favicon.svg` 复现式生成。
+- 后端：静态资源服务对未知前端路径做 SPA 回退（返回 `index.html`）。手机刷新任意页面或深链打开不再返回 Hertz 默认 404；`/api/*` 路由不受影响。
+- 后端：Denova 二进制现在可内嵌前端（构建标签 `embedweb`），裸二进制无需磁盘 `web/` 目录即可提供前端服务，适合 `go install` / 单文件分发 / 最小化自托管。默认构建行为不变；release 仍附带 `web/` 作为磁盘快速路径与 updater 兼容，内嵌为独立运行的兜底。
+- 文档：README（中/英）新增「自托管与远程访问（手机访问）」章节，覆盖构建前端、开启远程访问、手机使用与 HTTPS 反向代理。
+
+### Fixed
+
+- 文档/更新：修正 README 徽章、Release 下载、源码克隆、Star History 与应用内更新检查使用的 GitHub 仓库标识，改为 `alfredxw/denova`，避免用户跳转或检查到旧 Release 页。
+- 游戏模式：互动图像生成完成后允许把展示事件写回当前分支父链上的继承回合，避免从旧分支接出的剧情线在生成祖先回合图像时误报“展示事件回合不属于当前分支”；图像生成上下文也改用当前快照分支读取故事记忆。
+- Agent：内置 `novel-lite` / `novel-standard` / `novel-heavy` 写作 Skill 明确要求按场景使用 `read_file`、`write_file`、`edit_file`、`task` 等工具，并在写入后检查工具结果与读回关键片段，避免工具失败时误向用户宣称文件已修改。
+- 对话渲染：游戏模式改为用后端落盘增量事件原地合并新回合，并把完整快照刷新降级为静默校准；同时移除通用对话和游戏剧情页在 `done` 事件上的临时“完成 / Done”活动行，并把流式正文改为 `streaming_target_content` 隐藏占位、下一帧再提升为可见 `content` 的两阶段提交，避免输出完成或换行瞬间因消息列表高度变化、live 消息切换到持久化快照而抖动或重新入场。本次为内部渲染行为优化，无用户数据迁移。
+- WebUI：桌面布局根与运行时错误边界由 `h-screen` 改为 `h-dvh`，与移动 shell 一致，避免 iOS Safari 地址栏导致的底部跳动。
+- WebUI：远程访问登录框用户名/密码输入框使用 16px 字号，避免 iOS Safari 聚焦时自动缩放页面（该登录浮层渲染在 app shell 之外，原先不享受 16px 字号覆盖规则）。
+- WebUI：章节版本对比的紧凑模式改用项目统一的 `useIsMobile()` 断点（767px），与移动 shell 及版本对比弹窗的 `max-md` 行为一致，消除 760–767px 区间的断点错位。
+- 移动端：聊天 Agent 与互动故事的浮动输入框现在会随软键盘上移，不再被键盘遮挡（此前在 iOS 上输入框会被键盘盖住）。新增 `useKeyboardInset` hook 基于 `visualViewport` 计算键盘高度，仅在输入聚焦时生效；桌面端与 Android（`dvh` 已自动收缩）不受影响。顺带为输入框加上 `enterKeyHint="send"` 等移动键盘提示。
+- 移动端：文件树每行的操作菜单（新建 / 重命名 / 复制 / 移动 / 删除 / 引用）按钮在触摸下常显（原先仅 hover 可见，手机上无法触达文件操作），并加大行与内联输入框的触摸区、补上 `enterKeyHint`。
+- 移动端：标签页关闭按钮在触摸下常显、当前标签常显（原先仅 hover 可见，手机上无法关闭标签）。
+- 移动端：移动顶栏新增「命令」按钮，没有实体键盘的手机也能打开命令面板（原先仅 ⌘K / Ctrl+K）。
+- 移动端：写作编辑器阅读区在手机上改用更紧凑的横向留白（`px-4`，桌面仍为 `px-10`），避免窄屏正文被两侧大留白挤压。
+- 移动端：聊天消息的助手操作（重新生成 / 切换版本等）与消息元信息在触摸下常显（原先仅 hover 可见，手机上无法触达）。
+- 修复：命令面板（⌘K / Ctrl+K）打开即崩溃（`Cannot read properties of undefined (reading 'subscribe')`，触发前端错误边界白屏）。根因是 `CommandDialog` 未用 cmdk 的 `<Command>` 根包裹内容，导致 `CommandInput`/`CommandList`/`CommandItem` 拿不到 cmdk store；补上 `<Command>` 包裹后面板在桌面与移动端均可正常打开。
+- 移动端（共享原语）：`Dialog` / `AlertDialog` 内容默认限制在视口高度内并可滚动（`max-h-[calc(100dvh-2rem)] overflow-y-auto`），长内容弹窗在手机上不再溢出屏幕；自带 `max-h` / `overflow` 的弹窗不受影响（tailwind-merge 优先消费者值）。
+- 移动端（共享原语）：`Popover` 内容新增 `max-w-[calc(100vw-1rem)]`，窄屏下不再溢出到屏幕外。
+- 移动端（互动模式）：故事记忆（StoryMemory）记录列表在窄屏改用卡片渲染（原先的 `table-fixed` 列表在手机上列宽被挤压到几个字符、内容不可读，且 `overflow-x-hidden` 无法横向滚动）；桌面端仍保持表格。复用 `AdaptiveSurface` 提供的 `isMobile` 与既有字段渲染逻辑。
+- 移动端（互动模式）：剧情分支时间线（BranchTimeline）工作台视图在手机上新增「回到当前节点」按钮（桌面端用缩略导航 MiniMap 定位，移动端 MiniMap 隐藏，故补充此按钮以便手动平移后重新定位到当前剧情线）；分支切换 pills 触摸区在移动端加大。该视图的图本身已可触摸拖拽平移、切换分支自动居中、选中节点后可创建分支，本次补齐移动端导航缺口。
+- 移动端：修复创作 Agent / 互动故事输入框在预填长 prompt（如「和创作 Agent 聊灵感」自动注入的启动 prompt）时 textarea 无限增高、composer 撑满大半屏挤压对话区的问题；移动端将 composer textarea 的最大行数限制为 5（桌面仍为 10），长内容在框内滚动而非顶高整个输入区。
+
+### Changed
+
+- 项目改名：应用名、Go module、命令目录、前端标题、PWA manifest、README、配置模板、内置 Agent 提示、npm 包名和 GitHub Release 产物统一从 Nova/nova 切换为 Denova/denova。新工作区与新配置默认使用 `.denova` / `DENOVA_*`；已有 `.nova` 工作区与 `NOVA_*` 环境变量继续兼容读取。GitHub Release 包不再附带 `nova`、`nova.exe` 或 `nova-updater` 别名，用户新下载后直接运行 `denova` / `denova.exe`。
+- WebUI：Chat 输入框默认以双行展开显示，Plan Mode 不再占用独立按钮，改为放入输入动作菜单；开启 Plan Mode 时在输入区底部工具行显示轻量 `Plan` 状态提示，并保留 `Shift+Tab` 快捷切换。游戏模式输入框保持单行。
+- 移动端：Agent 面板从右侧抽屉改为**底部常驻面板**（与编辑器竖向分割），恢复桌面端「编辑器 + Agent 同屏可见」的核心操作逻辑。使用 `react-resizable-panels` 做竖向分割，可拖拽分隔条调节编辑器/Agent 比例。Agent 不再需要点导航打开；快捷创作按钮始终可达。桌面端不受影响。
+- 设置：新增 `hide_novel_chapter_body_in_live_output` 配置，开启后隐藏章节正文在 Agent 流中的输出，并保留目标路径和已生成字符数；默认关闭以保持原有实时输出行为。
+- Agent 调试：完整 LLM 输入日志默认关闭，即使 `--dev-mode` 启动也需要在开发模式设置页的「调试」分区手动开启；日志写入改为后台异步队列，`provider_request_id` 以独立关联事件追加到 `log/llm-inputs.jsonl`，避免模型请求热路径同步重写大文件。
+
+### Changed
+
+- 方案预设：图像方案升级为可配置注入位置的规则列表，支持分别注入图像 Agent system prompt 和最终图像请求 prompt；旧单段 prompt 会兼容迁移为图像请求规则。
+- WebUI：书籍管理里的“编辑信息”改为独立弹窗，扩大书名、作者、简介和封面生成区域，避免在书架卡片内编辑过于拥挤。
+- WebUI：书籍管理手机端书架改为以封面为主的紧凑自适应网格，iPhone 15 Pro 等窄屏宽度下书卡只展示封面和书名，减少纵向占用。
+- WebUI：图像放大查看器改用 `react-zoom-pan-pinch` 管理缩放、拖拽/触控板滚动平移和触控板 pinch；工具栏按钮保持 25% 步进，手势缩放改为按比例变化。
+
+### Fixed
+
+- Agent：写作模式生成小说章节时，开启 `hide_novel_chapter_body_in_live_output` 后，SSE 推流前 middleware 会在 `write_file` 写入 `chapters/` 或 `drafts/` 时只向前端发送目标文件路径、隐藏提示和已生成字符数，不再输出大量章节正文或省略号占位；字符进度会按增量轻量节流，并在工具结束前用完整参数解码校准最终值，口径与 `wc -m` 保持一致，前端工具卡片会提示章节正文仅在 Agent 流中隐藏、文件仍会正常写入。
+- 书籍管理：编辑书籍信息时可直接选择图像方案并生成书籍封面，生成结果立即写入固定展示路径 `assets/image/cover.png`，旧封面会自动备份到 `assets/image/covers/backups/`。
+- WebUI：书架卡片和当前书籍区域会展示同一固定封面；没有封面时保持简洁书本占位，酒馆角色卡导入的 `assets/image/cover.png` 也会正常展示。
+- WebUI：书架封面即使暂时没有 `cover_updated_at` 版本号，也会尝试读取固定路径 `assets/image/cover.png`，避免本地已有封面却显示占位图。
+- WebUI：设置页、Agents 页和游戏设置页保存时带上资源版本，后端检测到 Agent 或其他页面已更新同一配置/资源时返回冲突错误，避免旧自动保存覆盖新内容。
+- 游戏模式：互动图像重新生成完成并追加新版本后，回合内联预览会自动切到最新图片，不再停留在用户之前手动查看的旧版本。
+- WebUI：将 `react-virtuoso` 锁定到满足 pnpm minimum-release-age 策略的版本，避免 `pnpm --dir web test` 在执行测试前被供应链校验拦截。
+- WebUI：滚动消息列表时同步记录实际 Virtuoso 滚动容器，避免“回到底部”按钮在测试或 ref 变化后无法恢复底部锁定。
+- 写作 Agent：优化 Plan Mode 卡片交互与输出展示。问题卡限制高度并固定操作区，卡片生成、内容增长、题目切换和布局变化会将卡片底部对齐到对话输入框顶部，且不打断后续工具数据的自动跟随；连续多轮 Plan 按当前 run 原地更新；生成中只展示 running 后新变化的 root thinking 预览，停滞后自动隐藏；提交问题答案或选择最终计划操作后隐藏按钮并显示完成态，内部回答/批准协议、卡片前后说明和误触发的 `plan_questions`/`proposed_plan` 协议工具卡不再重复展示；最终计划改用轻量 Markdown 模板并复用聊天 Markdown 样式。
+
+## [v0.1.17] - 2026-06-27
+
+### Added
+
+- 游戏模式：新增“互动图像”，默认手动生成；输入框左侧菜单提供侧边配置，可切换为手动或每 X 轮生成，每个剧情回合操作区提供手动生成/重新生成按钮。
+- Agent：新增通用 `image` Agent，默认仅启用 Skills 和图像生成工具；互动图像通过 `interactive-image` Skill、`purpose=interactive_image` 和专用 System Prompt 复用该通用 Agent。
+- 后端：新增 `POST /api/interactive/stories/:id/images/generate`，互动图像保存到 `assets/interactive/images/<story>/<branch>/<turn>/<timestamp>/`，结果以 `interactive_image.v1` display event 挂到对应回合，不移动分支 head、不写入叙事正文、不进入下一轮模型上下文。
+- 方案预设：新增独立“图像方案”资源和 `GET/POST/PATCH/DELETE /api/image-presets`，内置 `游戏CG`、`写实`、`2D插画` 三种方案，写作 Agent 与游戏互动图像默认使用 `游戏CG`。
+- 写作模式：新增内置 `chapter-illustration` Skill 和通用 `generate_image` Agent 工具，创作 Agent 可基于当前或指定章节生成一张非剧透插画，结果保存到 `assets/illustrations/` 并在工具卡片中预览，用户可手动插入为 Markdown 图像。
+- 后端：新增受保护的 workspace asset 图像读取接口，仅允许读取 `assets/` 下的图像文件，供章节插画和 Markdown 渲染使用。
+
+### Changed
+
+- WebUI：中文界面中 Automation Agent 统一改称“自动化Agent”，包括 Agents 页、自动化模型继承提示和自动化 Agent 内置中文提示。
+- WebUI：顶层“互动模式 / Interactive Mode”更名为“游戏模式 / Game Mode”，强调其定位是互动文字冒险游戏工作台；内部 `interactive` API、配置键和存储目录保持不迁移。
+- WebUI：顶层“叙事编排 / Narrative Direction”更名为“方案预设 / Presets”，内部 `teller` 路由、一级菜单行为和模式切换规则保持不迁移；该页现在并列管理叙事方案和图像方案。
+- Breaking：旧 `Teller.image_prompt` 已下线，不迁移、不读取、不展示、不兜底；图像生成风格改由独立图像方案预设保存到 `image-presets/*.json`。
+- 游戏模式：互动叙事 Agent 不再要求用 XML 标签包裹正文，默认直接输出故事正文；历史或异常输出里的 `<NARRATIVE>` 标签仍会兼容清洗。
+- Agent：通用 General SubAgent 的内置默认范围收窄为仅写作 Agent 和 Automation Agent 启用；互动叙事 Agent 和配置管理 Agent 默认继承关闭，仍可在 Agents 页单独开启。
+- Agent：自定义 SubAgent 的 `parents` 改为显式父 Agent 归属列表，空列表不再表示所有父 Agent 共享；Agents 页新增“仅从当前父 Agent 移除”和“全部删除”两种删除范围。
+- Agent：工具结果默认不再截断，设置页 Agent 分区新增按 KB 配置的工具结果截断上限；设置为 `0` 或留空时不截断。
+- Agent：`read_file` 默认读取窗口固化为从第 1 行开始最多 2000 行，只有显式指定更大的 `limit` 时才读取更多，并同步更新工具描述避免默认使用过小扫描窗口。
+- 游戏模式：`read_interactive_memories` 不再限制最多 6 条、每条 4KB 或总计 12KB；互动记忆入库不再按 12KB 裁剪文本，Agent 显式读取时返回所有可见请求项的完整正文。
+- WebUI：设置页将原“模型”分区改名为“语言模型”，将原“图像 API”分区改名为“图像模型”，并从设置页移除后端/前端端口输入和访问地址端口展示；端口仍可通过环境变量或配置文件在启动时设置。
+- Agent：图像生成工具改为通用 `generate_image`，章节插画 Skill 改用中文流程调用该工具；生成尺寸改为调用时在 2K/3K/4K 预设中选择，设置页不再配置默认图像尺寸，输出格式限制为 `png` 或 `jpeg`。
+
+### Fixed
+
+- WebUI：Agents 页操作 General SubAgent 开关时先按本地草稿即时刷新开关与状态标记，保存继续异步执行，避免点击后等待配置保存才反馈。
+- WebUI：修复设置页语言模型配置点击“添加语言模型”后，新建空模型配置被立即过滤掉、看起来没有反应的问题。
+- 模型配置：修复多语言模型配置中 API Key 留空时不再继承默认模型 API Key 的问题；设置页将 `default` 配置直接标记为“默认模型”。
+
+## [v0.1.16] - 2026-06-27
+
+### Added
+
+- 后端新增统一图像生成 API：支持配置多个 OpenAI 标准 Images API profile，`POST /api/images/generate` 会调用所选图像模型并将结果保存到当前工作区 `assets/image/generated/`。
+- 设置页新增图像 API 配置区，可用 shadcn 表单组件配置默认图像 API、多个 OpenAI 图像 profile、默认尺寸、质量和输出格式。
+
+### Fixed
+
+- WebUI：修复默认模型配置未填写别名时仍继承模板里的 “DeepSeek 写作” 并在输入区出现无效模型选项的问题；默认模型现在始终使用稳定 `default` 配置 ID，未填别名时显示模型名。
+- WebUI：一级菜单默认展开并把默认宽度从 152px 调整到 180px，同时迁移旧默认宽度，让常用菜单文字默认完整展示；用户手动拖拽后的宽度仍会保留。
+
+## [v0.1.15] - 2026-06-27
+
+### Added
+
+- Agent 开发模式 LLM 输入日志会在响应返回后回写 `provider_request_id`，`log/llm-inputs.jsonl` 可直接关联完整请求输入和供应商请求 ID。
+- Agent 模型响应日志新增 `provider_request_id`：当 OpenAI 兼容供应商返回请求 ID 时，后端会打印该 ID，便于向模型 API 供应商提供 debug 信息。
+- 应用内更新新增独立 `nova-updater`：Release 包会携带同平台 updater，设置页先下载暂存更新，再通过“重启并安装”退出当前 Nova、替换主程序和资源目录，并自动启动新版本。
+
+### Changed
+
+- WebUI：一级菜单展开态支持拖拽调整宽度，默认宽度可容纳五字菜单名，最小宽度保留至少两个中文字的可读空间。
+- WebUI：模型配置新增可选别名，模型选择器优先显示别名、未填写时显示模型名；设置页 Temperature 输入框改为 0-1 的紧凑数字框，上下文长度选项改用统一组件样式。
+- WebUI：默认模型改为与其他模型一致的 `model_profiles` 列表配置，默认项使用 `id = "default"`，也支持设置别名。
+- WebUI：底部状态栏右侧不再显示空闲状态和当前模型名，仅在生成中保留运行状态提示。
+- Agent：创作 Agent 不再直接注入默认 Writing Skill 的 SKILL.md 正文，也不再用后端正则判断写作意图；本轮动态提示只说明当前选择的 Writing Skill，涉及正文写作/续写时由模型通过 `skill` 工具自行加载对应 Skill。
+- Agent：默认写作 Skill 从 `novel-standard` 改为 `novel-lite`；用户仍可在创作 Agent 输入菜单或设置页自行切换默认 Skill。
+- Agent：`config.toml` 模板预置 `writer`、`reviewer`、`fixer` 等写作 SubAgent，它们不再由 Go 默认值或内置 Writing Skill 运行时策略控制；用户可在 Agents 页像管理自定义 SubAgent 一样覆盖或关闭。
+- Agent：系统提示词明确限制 SubAgent 委派时机，除非用户主动要求或已加载 Skill 流程要求，否则父 Agent 不应主动拉起 SubAgent。
+- Agent：创作 Agent 的本轮动态上下文会注入前端 IDE 当前聚焦文件和打开文件路径；该状态只包含有界路径信息，不注入文件正文，需要正文时仍必须显式通过工具读取。
+- Agent：默认不限制空闲等待时间；设置页和 `NOVA_AGENT_IDLE_TIMEOUT_SECONDS` 仍可配置正数秒数启用空闲超时，配置为 `0` 表示不限制。
+- Agent：移除独立章节初稿目录和对应设置开关；章节初稿统一写入 `chapters/`，通过章节状态从初稿确认成章。
+
+### Fixed
+
+- Agent：修复真实模型用量明细刷新后只在互动 Agent 可用的问题；创作 Agent、配置管理 Agent 和固定 Agent 会话 API 现在会保留 `agent_kind`、token 统计和 `usage_calls`，并在持久化层按每种 Agent 只保留最近 10 条用量记录，避免历史无限膨胀。
+- Agent：修复运行中配置刷新没有合入根 `config.toml` global 层的问题，避免 Agents 页和实际写作 Agent 只看到用户级/工作区级残留的部分 SubAgent。
+- WebUI：修复编辑 SubAgent 可用父 Agent 时立即写入列表导致弹窗消失的问题；弹窗内改动现在会先保存在本地未提交内容，点击完成后再写回配置。
+- WebUI：Agents 页将工具、Skills、上下文压缩、General SubAgent 和自定义 SubAgent 的启停控件统一为 Switch；自定义 SubAgent 可直接在列表启停，删除继承来的 SubAgent 不再变成关闭/恢复的循环。
+- WebUI：优化创作 Agent 面板标题栏布局，新建会话入口移到视图切换器右侧并简化为加号按钮，同时移除空闲状态和当前会话摘要文字。
+- WebUI：对话消息悬浮元信息改为截图式的消息下方操作行，只出现在用户消息气泡和根 Agent 正文下方，并新增仅图标的一键复制按钮；复制成功后按钮会短暂切换为勾号反馈，历史普通消息会补齐展示时间，SubAgent 小窗和工具卡片不再显示消息时间。
+- WebUI：创作 Agent 的 SubAgent 详情栏支持拖拽调整宽度，关闭后会恢复右侧面板原宽度。
+- WebUI：Agents 页的 SubAgent 列表按当前父 Agent 过滤，预置写作 SubAgent 只显示在写作 Agent 下。
+- WebUI：修复创作 Agent 右侧面板读取旧持久化布局时可能因面板顺序错配导致拖拽宽度方向异常的问题。
+- WebUI：创作 Agent、配置 Agent 和自动化运行对话的消息列表会随底部浮动输入区高度自动预留空间，长输入不再遮住最后一行消息。
+- WebUI：移除写作模式左侧目录顶部的作品名与字数统计摘要，并将“其他设定”折叠入口合并到“书籍设定”标题行，减少重复行占用。
+- WebUI：简化写作模式“章节组细纲”的空状态提示，不再显示内部目录路径。
+
+## [v0.1.14] - 2026-06-26
+
 ### Added
 
 - 写作 Skill Preset：内置 `novel-lite`、`novel-standard`、`novel-heavy` 三种 IDE 写作 Skill，默认使用 `novel-standard`；创作 Agent 输入区可选择当前写作 Skill，也可选择用户/工作区自建的 IDE Skill，运行时按工作区覆盖 > 用户覆盖 > 内置预设解析并注入有效 SKILL.md。
 - 配置管理 Agent：新增 `list_agent_configs` / `write_agent_configs` 专用工具，可在 Agents 页通过对话管理 Agent 模型覆盖、Prompt、工具权限、Skills 可用性、上下文压缩、General SubAgent 和自定义 `sub_agents`；新增 `agent_config_read` / `agent_config_write` 工具权限，默认仅配置管理 Agent 启用。
 - Added SubAgent delegation support with configurable General SubAgent availability, custom `sub_agents`, real-time subagent stream metadata, and compact Agents page management UI.
+- WebUI / Agent：新增会话级 Plan Mode，写作 Agent / IDE Chat 支持 Chat / Plan 状态展示和 `Shift+Tab` 切换；Plan Mode 可一次接收结构化问题集、逐题向用户确认并在全部确认后统一提交答案，也可渲染拟定计划卡；计划卡展示和确认执行上下文都有长度上限，确认计划后再带有界批准计划切回执行模式。
 
 ### Changed
 
@@ -25,6 +176,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Agent：写作模式生成小说章节时，开启 `hide_novel_chapter_body_in_live_output` 后，SSE 推流前 middleware 会在 `write_file` 写入 `chapters/` 或 `drafts/` 时只向前端发送目标文件路径、隐藏提示和已生成字符数，不再输出大量章节正文或省略号占位；字符进度会按增量轻量节流，并在工具结束前用完整参数解码校准最终值，口径与 `wc -m` 保持一致，前端工具卡片会提示章节正文仅在实时输出中隐藏、文件仍会正常写入。
 - WebUI：允许 pnpm 在安装时执行 `msw` 的构建脚本，避免高版本 pnpm 首次安装后因 `ERR_PNPM_IGNORED_BUILDS` 导致前端启动失败。
 - WebUI：修复 Agent 对话、SubAgent 详情栏和工具流式预览在输出增长时不会稳定锁定到底部的问题；现在默认跟随到底部，用户主动上滑后停止自动滚动，重新滚到底部后再恢复跟随。
 - WebUI：修复创作 Agent 输入动作菜单里的写作 Skill 列表需要鼠标悬停后才开始加载、首次展开慢一拍的问题；现在创作 Agent 面板打开时就会预加载写作 Skill 列表和默认选择。
@@ -227,7 +379,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 修复 Agent `edit_file` 在 `old_string` 仅因行尾空格或 Tab 与文件内容不一致时直接失败的问题；现在仅在归一化后仍能唯一定位片段时才会执行替换，避免模糊匹配误改。
 - 修复设置页多模型配置编辑配置 ID 时输入框随 ID 变化反复重建，导致只能逐字输入的问题。
 - 优化互动剧情页和工作台侧栏的数据加载稳定性：切换故事、分支或刷新目录时保留上一份有效内容并显示轻量刷新状态，减少后端响应较慢时的页面抖动。
-- 修复互动模式剧情路线图节点在紧凑字号下标题、摘要或 HEAD 标记挤出卡片的问题。
+- 修复互动模式分支路线节点在紧凑字号下标题、摘要或 HEAD 标记挤出卡片的问题。
 - 修复浅色主题下创作 Agent 对话、互动剧情命令菜单、一级菜单、文件树、全局命令面板、Tooltip、版本差异弹窗和错误提示仍使用暗色硬编码导致文字或图标对比度不足的问题。
 - 调整浅色主题的工作台层级色，统一一级菜单、上下栏、侧栏、对话区和编辑器 IDE 背景，去掉浅色模式下割裂的纯白栏和内容区渐变。
 
@@ -316,7 +468,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 设置页 General Appearance 调整到顶部，语言选项固定展示为 `Follow Browser`、`简体中文` 和 `English`，并支持设置页与 Agents 页修改后自动保存。
 - 创作 Agent 的新书构思前置流程现在会同时读取 `ideas.md` 和 `CREATOR.md`，并在初始化沟通中把阶段性结论、待确认点和取舍理由持续整理到 `ideas.md`；`ideas.md` 不再是一次性归档文件，而是后续生成大纲或重大方向调整时优先参考的有界指引文件。
 - IDE 作品目录中的章节组细纲默认只展示最新一组，历史章节组可折叠展开；章节组生成规则同步收紧为短小可维护，方便作者阅读、评论和后续更新。
-- 扩大 WebUI i18n 覆盖面，补齐会话管理、工具卡片、Agent 配置、互动故事舞台、剧情路线图、场景记忆、字体设置和编辑区浮层等模块内的硬编码界面文案。
+- 扩大 WebUI i18n 覆盖面，补齐会话管理、工具卡片、Agent 配置、互动故事舞台、分支路线、场景记忆、字体设置和编辑区浮层等模块内的硬编码界面文案。
 - WebUI 字号改为按层级从界面字号派生，默认保持 `text-xs`、`text-sm`、`text-[11px]` 和 `text-[10px]` 原有视觉大小，并覆盖创作 Agent 输出、用户消息、菜单、侧栏和子模块小字。
 - 资料库 Agent 和叙事编排 Agent 的消息展示复用创作 Agent 的通用消息列表与工具卡片样式，统一 thinking、工具调用和历史消息呈现。
 - 新建资料库条目的默认 ID 改为基于条目名的可读格式，如 `林川_ab12`；后端继续校验显式 ID 重复并阻止写入。
@@ -379,12 +531,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 讲述者编辑支持自动保存，修改名称、规则、场景风格规则等内容后会防抖写入当前讲述者。
 - IDE 模式新增左侧全局搜索：可在当前书籍 workspace 内搜索 Markdown/TXT 等文本文件内容和路径，结果按文件分组展示，点击后打开文件并联动编辑器高亮关键词。
 - 互动模式故事舞台支持编辑历史输入并从该回合重新生成，也可直接对指定回合重新生成内容，当前分支会回退到被编辑回合前继续推进。
-- 互动模式剧情路线图支持直接切换故事线，每条故事线展示各自独立的剧情路线图。
+- 互动模式分支路线支持直接切换故事线，每条故事线展示各自独立的分支路线。
 - 互动模式故事舞台支持展示并持久化 Agent 工具调用卡片，刷新后保留卡片状态但不保存工具输入输出参数。
 - 风格参考文件移动到用户级 `<nova_dir>/styles/`，不同书籍可复用同一批 `.md` / `.txt` 文风样本。
 - IDE 模式新增章节组细纲工作流：新建书籍会准备 `setting/chapter-groups/`，Agent 可生成下一组细纲，快捷创作增加“下一组细纲 / 按细纲写下一章 / 定稿并同步状态”入口。
 - IDE 模式作品目录支持以轻量导航列表展示大纲、细纲，并按章节目录自动分卷折叠；项目文件支持多选批量移动、复制、删除和拖拽整理。
-- 设置页新增章节创作流程配置，支持配置是否启用草稿流程，以及章节组建议规模范围，默认关闭草稿流程并建议 3-8 章。
+- 设置页新增章节创作配置，支持章节组建议规模范围，默认建议 3-8 章。
 
 ### Changed
 
@@ -403,7 +555,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 更新 README，按当前书籍管理、小说 IDE、创作 Agent、互动工作台、资料库、角色卡导入和版本管理能力重写使用指南，并将新增界面截图改为可折叠展示。
 - 讲述者规则配置页优化交互：规则启用开关移到左侧规则列表，注入位置改为紧凑下拉选择，减少详情区占用并提升操作效率。
 - 创作 Agent 工具卡片统一为暗色面板风格，优化执行中、结果、详情和待办列表的边距、状态图标与展开区域质感。
-- Agent 写作工作流调整为“创作灵感 -> 大纲 -> 下一组细纲 -> 单章草稿/定稿”，细纲只规划接下来一组章节，章节定稿后才同步 progress 与角色状态。
+- Agent 写作工作流调整为“创作灵感 -> 大纲 -> 下一组细纲 -> 章节初稿/成章”，细纲只规划接下来一组章节，章节定稿后才同步 progress 与角色状态。
 - Agent 注入场景化风格规则前会把相对风格名解析为用户级 `<nova_dir>/styles/` 下的绝对路径，IDE 和互动模式都按当前讲述者选择规则。
 - IDE 模式适配结构化资料库和讲述者：写作工作台新增资料库/讲述者入口，创作 Agent 支持引用资料条目，并会按工作区默认讲述者注入写作规则。
 - IDE 模式下资料库和讲述者入口改为覆盖项目目录、编辑区和右侧面板的全工作区管理页。
@@ -447,8 +599,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - 工作台视觉和导航收敛为更紧凑的双层侧栏结构，写作、互动、书籍管理、角色卡导入和设置入口更清晰。
-- 互动模式将资料库、创作者指令、讲述者、剧情舞台、场景记忆和剧情路线图重新组织为更稳定的工作流。
-- 剧情路线图改为左侧导航中的主区视图，支持横向浏览、节点选中、剧情线切换和从节点创建新剧情线。
+- 互动模式将资料库、创作者指令、讲述者、剧情舞台、场景记忆和分支路线重新组织为更稳定的工作流。
+- 分支路线改为左侧导航中的主区视图，支持横向浏览、节点选中、剧情线切换和从节点创建新剧情线。
 - 互动故事生成改为正文生成与状态整理分阶段处理，正文先流式落盘，场景记忆随后同步。
 - 书籍管理和设置改为全局弹窗，IDE 与互动模式下都能打开。
 - 编辑器与互动故事舞台新增字体、字号和行高配置，长文阅读体验更可控。

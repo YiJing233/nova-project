@@ -9,11 +9,11 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 
-	"nova/config"
-	"nova/internal/agent"
-	"nova/internal/book"
-	"nova/internal/interactive"
-	"nova/internal/session"
+	"denova/config"
+	"denova/internal/agent"
+	"denova/internal/book"
+	"denova/internal/interactive"
+	"denova/internal/session"
 )
 
 // WorkspaceRuntimeManager 负责工作区运行时、书籍元信息、本地版本服务与设置等跨领域基础能力。
@@ -150,6 +150,7 @@ func (s *WorkspaceRuntimeManager) Books() []BookRecord {
 			records[i].Name = meta.Title
 		}
 		records[i].Author = meta.Author
+		records[i].CoverUpdatedAt = bookCoverUpdatedAt(records[i].Path)
 	}
 	return records
 }
@@ -422,7 +423,7 @@ func (s *WorkspaceRuntimeManager) Settings() (config.LayeredSettings, error) {
 	}
 	state := a.bookState
 	a.mu.RUnlock()
-	layered, err := config.LoadLayered(novaDir, workspace)
+	layered, err := config.LoadLayeredWithStartupConfig(novaDir, workspace)
 	if err != nil {
 		return config.LayeredSettings{}, err
 	}
@@ -430,6 +431,7 @@ func (s *WorkspaceRuntimeManager) Settings() (config.LayeredSettings, error) {
 		layered.Access.LocalURL = config.LocalHTTPURL(cfg.RuntimeWebPort)
 		layered.Access.LANURL = config.LANHTTPURL(cfg.RuntimeWebPort)
 	}
+	layered.Runtime.DevMode = cfg.DevMode
 	cfg.Workspace = workspace
 	applySettingsLayerToConfig(&cfg, layered.User)
 	applySettingsLayerToConfig(&cfg, layered.Workspace)
@@ -442,11 +444,11 @@ func (s *WorkspaceRuntimeManager) Settings() (config.LayeredSettings, error) {
 }
 
 // UpdateUserSettings 持久化用户级配置并返回最新分层快照。
-func (a *App) UpdateUserSettings(settings config.Settings) (config.LayeredSettings, error) {
-	return a.runtime().UpdateUserSettings(settings)
+func (a *App) UpdateUserSettings(settings config.Settings, baseRevision ...string) (config.LayeredSettings, error) {
+	return a.runtime().UpdateUserSettings(settings, firstRevision(baseRevision))
 }
 
-func (s *WorkspaceRuntimeManager) UpdateUserSettings(settings config.Settings) (config.LayeredSettings, error) {
+func (s *WorkspaceRuntimeManager) UpdateUserSettings(settings config.Settings, baseRevision string) (config.LayeredSettings, error) {
 	a := s.app
 	a.mu.RLock()
 	novaDir := ""
@@ -463,7 +465,7 @@ func (s *WorkspaceRuntimeManager) UpdateUserSettings(settings config.Settings) (
 	if err != nil {
 		return config.LayeredSettings{}, err
 	}
-	if err := config.WriteSettingsFile(path, prepared); err != nil {
+	if err := config.WriteSettingsFileIfRevision(path, prepared, baseRevision); err != nil {
 		return config.LayeredSettings{}, err
 	}
 	log.Printf("[settings] 用户配置已保存 path=%s", path)
@@ -473,16 +475,17 @@ func (s *WorkspaceRuntimeManager) UpdateUserSettings(settings config.Settings) (
 	}
 	a.mu.Lock()
 	applyLayeredSettingsToConfig(a.cfg, layered)
+	syncRuntimeDiagnostics(a.cfg)
 	a.mu.Unlock()
 	return layered, nil
 }
 
 // UpdateWorkspaceSettings 持久化当前工作区配置并返回最新分层快照。
-func (a *App) UpdateWorkspaceSettings(settings config.Settings) (config.LayeredSettings, error) {
-	return a.runtime().UpdateWorkspaceSettings(settings)
+func (a *App) UpdateWorkspaceSettings(settings config.Settings, baseRevision ...string) (config.LayeredSettings, error) {
+	return a.runtime().UpdateWorkspaceSettings(settings, firstRevision(baseRevision))
 }
 
-func (s *WorkspaceRuntimeManager) UpdateWorkspaceSettings(settings config.Settings) (config.LayeredSettings, error) {
+func (s *WorkspaceRuntimeManager) UpdateWorkspaceSettings(settings config.Settings, baseRevision string) (config.LayeredSettings, error) {
 	a := s.app
 	a.mu.RLock()
 	workspace := a.workspace
@@ -490,8 +493,9 @@ func (s *WorkspaceRuntimeManager) UpdateWorkspaceSettings(settings config.Settin
 	if workspace == "" {
 		return config.LayeredSettings{}, fmt.Errorf("当前没有打开的工作区")
 	}
+	settings.LLMInputLogEnabled = nil
 	path := config.WorkspaceConfigPath(workspace)
-	if err := config.WriteSettingsFile(path, settings); err != nil {
+	if err := config.WriteSettingsFileIfRevision(path, settings, baseRevision); err != nil {
 		return config.LayeredSettings{}, err
 	}
 	log.Printf("[settings] 工作区配置已保存 path=%s", path)
@@ -501,8 +505,16 @@ func (s *WorkspaceRuntimeManager) UpdateWorkspaceSettings(settings config.Settin
 	}
 	a.mu.Lock()
 	applyLayeredSettingsToConfig(a.cfg, layered)
+	syncRuntimeDiagnostics(a.cfg)
 	a.mu.Unlock()
 	return layered, nil
+}
+
+func firstRevision(values []string) string {
+	if len(values) == 0 {
+		return ""
+	}
+	return values[0]
 }
 
 func applyLayeredSettingsToConfig(cfg *config.Config, layered config.LayeredSettings) {
@@ -525,6 +537,16 @@ func applyLayeredSettingsToConfig(cfg *config.Config, layered config.LayeredSett
 	if len(effective.ModelProfiles) > 0 {
 		cfg.ModelProfiles = effective.ModelProfiles
 	}
+	if cfg.ImageAPIBaseURL == "" && effective.ImageAPIBaseURL != "" {
+		cfg.ImageAPIBaseURL = effective.ImageAPIBaseURL
+	}
+	if cfg.ImageAPIModel == "" && effective.ImageAPIModel != "" {
+		cfg.ImageAPIModel = effective.ImageAPIModel
+	}
+	if effective.DefaultImageAPIProfileID != "" {
+		cfg.DefaultImageAPIProfileID = effective.DefaultImageAPIProfileID
+	}
+	cfg.ImageAPIProfiles = effective.ImageAPIProfiles
 	cfg.AgentModels = effective.AgentModels
 	cfg.AgentTools = effective.AgentTools
 	cfg.AgentPrompts = effective.AgentPrompts
@@ -555,13 +577,22 @@ func applyLayeredSettingsToConfig(cfg *config.Config, layered config.LayeredSett
 	if cfg.IDEStoryTellerID == "" && effective.IDEStoryTellerID != "" {
 		cfg.IDEStoryTellerID = effective.IDEStoryTellerID
 	}
+	if effective.IDEImagePresetID != "" {
+		cfg.IDEImagePresetID = effective.IDEImagePresetID
+	}
 	cfg.WritingSkillDefault = effective.WritingSkillDefault
 	cfg.MaxIteration = appSettingsInt(effective.MaxIteration, 0)
 	if effective.ModelMaxRetries != nil {
 		cfg.ModelMaxRetries = appSettingsInt(effective.ModelMaxRetries, 5)
 	}
 	if effective.AgentIdleTimeoutSeconds != nil {
-		cfg.AgentIdleTimeoutSeconds = appSettingsInt(effective.AgentIdleTimeoutSeconds, 180)
+		cfg.AgentIdleTimeoutSeconds = appAgentIdleTimeoutSeconds(effective.AgentIdleTimeoutSeconds)
+	}
+	if effective.AgentToolResultLimitKB != nil {
+		cfg.AgentToolResultLimitKB = appAgentToolResultLimitKB(effective.AgentToolResultLimitKB)
+	}
+	if effective.LLMInputLogEnabled != nil {
+		cfg.LLMInputLogEnabled = *effective.LLMInputLogEnabled
 	}
 	if effective.ChapterFilenameFormat != "" {
 		cfg.ChapterFilenameFormat = effective.ChapterFilenameFormat
@@ -569,8 +600,8 @@ func applyLayeredSettingsToConfig(cfg *config.Config, layered config.LayeredSett
 	if effective.VolumeDirFormat != "" {
 		cfg.VolumeDirFormat = effective.VolumeDirFormat
 	}
-	if effective.DraftFlowEnabled != nil {
-		cfg.DraftFlowEnabled = *effective.DraftFlowEnabled
+	if effective.HideChapterBodyLiveOutput != nil {
+		cfg.HideChapterBodyLiveOutput = *effective.HideChapterBodyLiveOutput
 	}
 	if effective.ChapterGroupMin != nil {
 		cfg.ChapterGroupMin = appSettingsInt(effective.ChapterGroupMin, 3)
@@ -608,6 +639,21 @@ func applySettingsLayerToConfig(cfg *config.Config, settings config.Settings) {
 	if len(settings.ModelProfiles) > 0 {
 		cfg.ModelProfiles = config.Merge(config.Settings{ModelProfiles: cfg.ModelProfiles}, config.Settings{ModelProfiles: settings.ModelProfiles}).ModelProfiles
 	}
+	if settings.ImageAPIKey != "" && os.Getenv("OPENAI_IMAGE_API_KEY") == "" {
+		cfg.ImageAPIKey = settings.ImageAPIKey
+	}
+	if settings.ImageAPIBaseURL != "" && os.Getenv("OPENAI_IMAGE_BASE_URL") == "" {
+		cfg.ImageAPIBaseURL = settings.ImageAPIBaseURL
+	}
+	if settings.ImageAPIModel != "" && os.Getenv("OPENAI_IMAGE_MODEL") == "" {
+		cfg.ImageAPIModel = settings.ImageAPIModel
+	}
+	if settings.DefaultImageAPIProfileID != "" {
+		cfg.DefaultImageAPIProfileID = settings.DefaultImageAPIProfileID
+	}
+	if len(settings.ImageAPIProfiles) > 0 {
+		cfg.ImageAPIProfiles = config.Merge(config.Settings{ImageAPIProfiles: cfg.ImageAPIProfiles}, config.Settings{ImageAPIProfiles: settings.ImageAPIProfiles}).ImageAPIProfiles
+	}
 	cfg.AgentModels = config.MergeAgentModelSettings(cfg.AgentModels, settings.AgentModels)
 	cfg.AgentTools = config.MergeAgentToolSettings(cfg.AgentTools, settings.AgentTools)
 	cfg.AgentPrompts = config.MergeAgentPromptSettings(cfg.AgentPrompts, settings.AgentPrompts)
@@ -615,7 +661,7 @@ func applySettingsLayerToConfig(cfg *config.Config, settings config.Settings) {
 	cfg.AgentContexts = config.MergeAgentContextSettings(cfg.AgentContexts, settings.AgentContexts)
 	cfg.GeneralSubAgents = config.MergeAgentGeneralSubAgentSettings(cfg.GeneralSubAgents, settings.GeneralSubAgents)
 	cfg.SubAgents = config.MergeSubAgents(cfg.SubAgents, settings.SubAgents)
-	if settings.SkillsDir != "" && os.Getenv("NOVA_SKILLS_DIR") == "" {
+	if settings.SkillsDir != "" && os.Getenv("DENOVA_SKILLS_DIR") == "" && os.Getenv("NOVA_SKILLS_DIR") == "" {
 		cfg.SkillsDir = settings.SkillsDir
 	}
 	if settings.AllowLANAccess != nil {
@@ -633,6 +679,9 @@ func applySettingsLayerToConfig(cfg *config.Config, settings config.Settings) {
 	if settings.IDEStoryTellerID != "" {
 		cfg.IDEStoryTellerID = settings.IDEStoryTellerID
 	}
+	if settings.IDEImagePresetID != "" {
+		cfg.IDEImagePresetID = settings.IDEImagePresetID
+	}
 	if settings.WritingSkillDefault != "" {
 		cfg.WritingSkillDefault = settings.WritingSkillDefault
 	}
@@ -643,7 +692,13 @@ func applySettingsLayerToConfig(cfg *config.Config, settings config.Settings) {
 		cfg.ModelMaxRetries = appSettingsInt(settings.ModelMaxRetries, 5)
 	}
 	if settings.AgentIdleTimeoutSeconds != nil {
-		cfg.AgentIdleTimeoutSeconds = appSettingsInt(settings.AgentIdleTimeoutSeconds, 180)
+		cfg.AgentIdleTimeoutSeconds = appAgentIdleTimeoutSeconds(settings.AgentIdleTimeoutSeconds)
+	}
+	if settings.AgentToolResultLimitKB != nil {
+		cfg.AgentToolResultLimitKB = appAgentToolResultLimitKB(settings.AgentToolResultLimitKB)
+	}
+	if settings.LLMInputLogEnabled != nil {
+		cfg.LLMInputLogEnabled = *settings.LLMInputLogEnabled
 	}
 	if settings.ChapterFilenameFormat != "" {
 		cfg.ChapterFilenameFormat = settings.ChapterFilenameFormat
@@ -651,8 +706,8 @@ func applySettingsLayerToConfig(cfg *config.Config, settings config.Settings) {
 	if settings.VolumeDirFormat != "" {
 		cfg.VolumeDirFormat = settings.VolumeDirFormat
 	}
-	if settings.DraftFlowEnabled != nil {
-		cfg.DraftFlowEnabled = *settings.DraftFlowEnabled
+	if settings.HideChapterBodyLiveOutput != nil {
+		cfg.HideChapterBodyLiveOutput = *settings.HideChapterBodyLiveOutput
 	}
 	if settings.ChapterGroupMin != nil {
 		cfg.ChapterGroupMin = appSettingsInt(settings.ChapterGroupMin, 3)
@@ -675,6 +730,14 @@ func applySettingsLayerToConfig(cfg *config.Config, settings config.Settings) {
 	if settings.VersionAgentCharThreshold != nil {
 		cfg.VersionAgentCharThreshold = appSettingsInt(settings.VersionAgentCharThreshold, 3000)
 	}
+}
+
+func syncRuntimeDiagnostics(cfg *config.Config) {
+	if cfg == nil {
+		agent.SetModelInputLoggingEnabled(false)
+		return
+	}
+	agent.SetModelInputLoggingEnabled(cfg.DevMode && cfg.LLMInputLogEnabled)
 }
 
 func (s *WorkspaceRuntimeManager) versionService() *book.VersionService {
@@ -705,6 +768,27 @@ func appSettingsInt(v *int, fallback int) int {
 		return fallback
 	}
 	return *v
+}
+
+func appAgentIdleTimeoutSeconds(v *int) int {
+	if v == nil || *v < 0 {
+		return config.DefaultAgentIdleTimeoutSeconds
+	}
+	return *v
+}
+
+func appAgentToolResultLimitKB(v *int) int {
+	if v == nil || *v < 0 {
+		return config.DefaultAgentToolResultLimitKB
+	}
+	return *v
+}
+
+func agentToolResultMaxBytes(cfg config.Config) int {
+	if cfg.AgentToolResultLimitKB <= 0 {
+		return 0
+	}
+	return cfg.AgentToolResultLimitKB * 1024
 }
 
 func applyRequestLocaleToConfig(cfg *config.Config, locale string) {

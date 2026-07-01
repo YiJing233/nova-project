@@ -1,20 +1,24 @@
 import { useEffect, useCallback, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import type { PointerEvent } from 'react'
 import type { Editor } from '@tiptap/react'
 import { useEditor, EditorContent } from '@tiptap/react'
-import { Extension, Node } from '@tiptap/core'
+import { Extension, Node, mergeAttributes } from '@tiptap/core'
 import StarterKit from '@tiptap/starter-kit'
 import Placeholder from '@tiptap/extension-placeholder'
 import { CharacterCount } from '@tiptap/extension-character-count'
+import Image from '@tiptap/extension-image'
 import { Markdown } from '@tiptap/markdown'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, TextSelection as PmTextSelection } from '@tiptap/pm/state'
 import { Decoration, DecorationSet } from '@tiptap/pm/view'
-import { BookOpen, Check, ChevronDown, ChevronUp, MessageSquareQuote, Palette, Rows3, Save, Search, Settings, X } from 'lucide-react'
+import { BookOpen, Check, ChevronDown, ChevronUp, ImagePlus, MessageSquareQuote, Palette, Rows3, Save, Search, Settings, X } from 'lucide-react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
 
-import type { TextSelection as QuoteSelection } from '@/lib/api'
-import type { ChapterSummary, WorkspaceSummary } from '@/lib/api'
+import type { ChapterIllustration, TextSelection as QuoteSelection } from '@/lib/api'
+import type { ChapterSummary } from '@/lib/api'
+import { workspaceAssetURL } from '@/lib/api'
+import { findDialogueHighlightRanges } from '@/lib/dialogue-highlight'
 import { isEditableTarget } from '@/lib/keyboard'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -30,8 +34,10 @@ interface MarkdownEditorProps {
   autoSaveEnabled?: boolean
   autoSaveDelayMs?: number
   chapterSummary?: ChapterSummary
-  workspaceSummary?: WorkspaceSummary | null
   searchIntent?: EditorSearchIntent | null
+  onGenerateIllustration?: (chapterPath: string) => void
+  generateIllustrationDisabled?: boolean
+  illustrationInsertSignal?: { illustration: ChapterIllustration; nonce: number } | null
 }
 
 export interface EditorSearchIntent {
@@ -47,6 +53,7 @@ type PendingSave = { text: string; mode: 'manual' | 'auto' }
 interface EditorSettings {
   lineHeight: number
   theme: EditorTheme
+  dialogueHighlightColor: string
 }
 
 interface SearchState {
@@ -60,32 +67,40 @@ interface SearchMatch {
 }
 
 const searchPluginKey = new PluginKey<DecorationSet>('nova-search-highlight')
+const dialogueHighlightPluginKey = new PluginKey<DecorationSet>('nova-editor-dialogue-highlight')
+const DEFAULT_DIALOGUE_HIGHLIGHT_COLOR = ''
+const COLOR_VALUE_PATTERN = /^#[0-9a-fA-F]{6}$/
+const DEFAULT_PICKER_COLOR = '#ffd166'
 
 const DEFAULT_SETTINGS: EditorSettings = {
   lineHeight: 1.9,
   theme: 'ide',
+  dialogueHighlightColor: DEFAULT_DIALOGUE_HIGHLIGHT_COLOR,
 }
 
 const DEFAULT_AUTO_SAVE_DELAY_MS = 1500
 
-const THEME_STYLES: Record<EditorTheme, { labelKey: string; background: string; color: string; accent: string }> = {
+const THEME_STYLES: Record<EditorTheme, { labelKey: string; background: string; color: string; accent: string; dialogueHighlight: string }> = {
   ide: {
     labelKey: 'editor.theme.ide',
     background: 'var(--nova-editor-ide-bg)',
     color: 'var(--nova-editor-ide-color)',
     accent: 'var(--nova-editor-ide-accent)',
+    dialogueHighlight: 'var(--nova-dialogue-highlight)',
   },
   paper: {
     labelKey: 'editor.theme.paper',
     background: '#f5efe4',
     color: '#252525',
     accent: '#dfd3c2',
+    dialogueHighlight: '#8a3f13',
   },
   sepia: {
     labelKey: 'editor.theme.sepia',
     background: '#efe3cc',
     color: '#2f271f',
     accent: '#d8c6a6',
+    dialogueHighlight: '#75451f',
   },
 }
 
@@ -142,6 +157,30 @@ function isTxtFile(name: string | null): boolean {
   return !!name && name.toLowerCase().endsWith('.txt')
 }
 
+function isMarkdownFile(name: string | null): boolean {
+  return !!name && /\.(md|markdown)$/i.test(name)
+}
+
+function createWorkspaceImageExtension() {
+  return Image.extend({
+    renderHTML({ HTMLAttributes }) {
+      const src = resolveWorkspaceImageSrc(HTMLAttributes.src)
+      return ['img', mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, { src })]
+    },
+  }).configure({
+    inline: false,
+    allowBase64: true,
+  })
+}
+
+function resolveWorkspaceImageSrc(src: unknown) {
+  if (typeof src !== 'string' || src.trim() === '') return src
+  const value = src.trim()
+  if (/^(https?:|data:|blob:|\/)/i.test(value)) return value
+  if (value.startsWith('assets/')) return workspaceAssetURL(value)
+  return value
+}
+
 function normalizeAutoSaveDelayMs(value: number | undefined): number {
   if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
     return DEFAULT_AUTO_SAVE_DELAY_MS
@@ -159,15 +198,16 @@ export function MarkdownEditor({
   autoSaveEnabled = true,
   autoSaveDelayMs,
   chapterSummary,
-  workspaceSummary,
   searchIntent,
+  onGenerateIllustration,
+  generateIllustrationDisabled = false,
+  illustrationInsertSignal,
 }: MarkdownEditorProps) {
   const { t } = useTranslation()
   const [saveStatus, setSaveStatus] = useState<SaveStatus | null>(null)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [settings, setSettings] = useState<EditorSettings>(() => loadEditorSettings())
   const [nativeIndent, setNativeIndent] = useState(false)
-  const [totalCharacters, setTotalCharacters] = useState(0)
   const [selectedCharacters, setSelectedCharacters] = useState(0)
   const [searchOpen, setSearchOpen] = useState(false)
   const [searchQuery, setSearchQuery] = useState('')
@@ -185,9 +225,12 @@ export function MarkdownEditor({
   const saveEditorContentRef = useRef<(mode: 'manual' | 'auto') => Promise<void>>(async () => {})
   const searchInputRef = useRef<HTMLInputElement>(null)
   const lastSaveSignalRef = useRef(saveSignal)
+  const lastIllustrationInsertNonceRef = useRef<number | null>(null)
   const lastSearchIntentNonceRef = useRef<number | null>(null)
   const searchStateRef = useRef<SearchState>({ query: '', index: 0 })
   const searchExtension = useMemo(() => createSearchHighlightExtension(searchStateRef), [])
+  const dialogueHighlightExtension = useMemo(() => createDialogueHighlightExtension(), [])
+  const workspaceImageExtension = useMemo(() => createWorkspaceImageExtension(), [])
   const editorContainerRef = useRef<HTMLDivElement>(null)
   /** 每个文件的滚动位置缓存 */
   const filePositionsRef = useRef<Map<string, { scrollTop: number }>>(new Map())
@@ -227,6 +270,8 @@ export function MarkdownEditor({
         },
       }),
       searchExtension,
+      dialogueHighlightExtension,
+      workspaceImageExtension,
       Markdown.configure({
         markedOptions: {
           gfm: true,
@@ -316,7 +361,7 @@ export function MarkdownEditor({
     } else {
       editor.commands.setContent(content, { emitUpdate: false, contentType: 'markdown' })
     }
-    updateCharacterStats(editor, setTotalCharacters, setSelectedCharacters)
+    updateCharacterStats(editor, setSelectedCharacters)
     updateSearch(searchStateRef.current.query, 0)
 
     // 切换文件后：等待 DOM 渲染完成再恢复位置并显示
@@ -329,11 +374,11 @@ export function MarkdownEditor({
     }
   }, [content, editor, fileName, updateSearch])
 
-  // 监听 TipTap 内容和选区变化，实时更新全文/选区字数。
+  // 监听 TipTap 内容和选区变化，实时更新选区字数。
   useEffect(() => {
     if (!editor) return
 
-    const updateStats = () => updateCharacterStats(editor, setTotalCharacters, setSelectedCharacters)
+    const updateStats = () => updateCharacterStats(editor, setSelectedCharacters)
     updateStats()
     editor.on('update', updateStats)
     editor.on('selectionUpdate', updateStats)
@@ -373,6 +418,39 @@ export function MarkdownEditor({
     updateSearch(searchIntent.query, targetIndex >= 0 ? targetIndex : 0)
   }, [editor, searchIntent, updateSearch])
 
+  useEffect(() => {
+    if (!editor || !illustrationInsertSignal) return
+    if (lastIllustrationInsertNonceRef.current === illustrationInsertSignal.nonce) return
+    lastIllustrationInsertNonceRef.current = illustrationInsertSignal.nonce
+    if (!fileName || isTxtFile(fileName) || !isMarkdownFile(fileName)) {
+      toast.error(t('editor.illustrationMarkdownOnly'))
+      return
+    }
+    const { illustration } = illustrationInsertSignal
+    const imagePath = illustration.image_path
+    if (!imagePath) {
+      toast.error(t('editor.illustrationInsertFailed'))
+      return
+    }
+    const insertAt = Math.max(1, editor.state.selection.from || 1)
+    const ok = editor
+      .chain()
+      .focus()
+      .insertContentAt(insertAt, {
+        type: 'image',
+        attrs: {
+          src: imagePath,
+          alt: illustration.alt_text || t('chat.illustration.previewAlt'),
+          title: illustration.alt_text || undefined,
+        },
+      })
+      .run()
+    if (!ok) {
+      toast.error(t('editor.illustrationInsertFailed'))
+      return
+    }
+  }, [editor, fileName, illustrationInsertSignal, t])
+
   const clearSaveStatusTimer = useCallback(() => {
     if (saveStatusClearTimer.current) {
       window.clearTimeout(saveStatusClearTimer.current)
@@ -397,8 +475,7 @@ export function MarkdownEditor({
     const nextStatus: SaveStatus = ok ? (mode === 'auto' ? 'auto-saved' : 'manual-saved') : 'error'
     setSaveStatus(nextStatus)
     if (mode === 'manual') {
-      if (ok) toast.success(t('editor.saveSuccess'))
-      else toast.error(t('editor.saveFailed'))
+      if (!ok) toast.error(t('editor.saveFailed'))
     }
     scheduleSaveStatusClear(nextStatus, mode === 'auto' ? 1400 : 2000)
   }, [clearSaveStatusTimer, onSave, scheduleSaveStatusClear, t])
@@ -594,6 +671,19 @@ export function MarkdownEditor({
               <span className={saveStatusMeta.subtle ? 'sr-only' : ''}>{saveStatusLabel}</span>
             </span>
           )}
+          {onGenerateIllustration && (
+            <TooltipIconButton
+              label={generateIllustrationDisabled ? t('editor.generateIllustrationDisabled') : t('editor.generateIllustration')}
+              size="icon-xs"
+              className="text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)] disabled:cursor-not-allowed disabled:opacity-45"
+              disabled={generateIllustrationDisabled || !chapterSummary?.path}
+              onClick={() => {
+                if (chapterSummary?.path) onGenerateIllustration(chapterSummary.path)
+              }}
+            >
+              <ImagePlus className="h-3.5 w-3.5" />
+            </TooltipIconButton>
+          )}
           <Button
             type="button"
             onClick={handleSave}
@@ -634,12 +724,13 @@ export function MarkdownEditor({
       {/* 编辑器内容区 */}
       <div
         ref={editorContainerRef}
-        className="relative flex-1 overflow-y-auto px-10 py-8"
+        className="relative flex-1 overflow-y-auto px-4 py-6 md:px-10 md:py-8"
         style={{
           background: themeStyle.background,
           ['--nova-editor-color' as string]: themeStyle.color,
           ['--nova-editor-accent' as string]: themeStyle.accent,
           ['--nova-editor-line-height' as string]: String(settings.lineHeight),
+          ['--nova-editor-dialogue-highlight' as string]: settings.dialogueHighlightColor || themeStyle.dialogueHighlight,
         }}
       >
         {searchOpen && (
@@ -700,8 +791,6 @@ export function MarkdownEditor({
         )}
       </div>
       <div className="nova-editor-statusbar flex h-7 shrink-0 items-center gap-4 border-t px-3 text-[11px] text-[var(--nova-text-faint)]">
-        <span>{t('editor.chapterWords', { count: formatNumber(totalCharacters) })}</span>
-        {workspaceSummary && <span>{t('editor.bookWords', { count: formatNumber(workspaceSummary.total_words) })}</span>}
         {chapterSummary && <span>{t('editor.updatedAt', { time: chapterSummary.updated_at || t('editor.unknownTime') })}</span>}
         {selectedCharacters > 0 && (
           <span className="text-[var(--nova-text-muted)]">{t('editor.selectedWords', { count: formatNumber(selectedCharacters) })}</span>
@@ -762,6 +851,21 @@ function EditorSettingsPanel({
           />
         </label>
 
+        <div className="nova-editor-control block rounded-lg border border-[var(--nova-border)] bg-[var(--nova-surface-2)] p-3">
+          <div className="mb-2 flex items-center justify-between gap-3 text-xs">
+            <span className="flex items-center gap-2 font-medium text-[var(--nova-text-muted)]">
+              <MessageSquareQuote className="h-3.5 w-3.5 text-[var(--nova-text-faint)]" />
+              {t('editor.dialogueHighlightColor')}
+            </span>
+          </div>
+          <DialogueHighlightColorPicker
+            value={settings.dialogueHighlightColor}
+            defaultColor={THEME_STYLES[settings.theme].dialogueHighlight}
+            onChange={(dialogueHighlightColor) => patch({ dialogueHighlightColor })}
+            onReset={() => patch({ dialogueHighlightColor: DEFAULT_DIALOGUE_HIGHLIGHT_COLOR })}
+          />
+        </div>
+
         <div>
           <div className="mb-2 flex items-center justify-between text-xs text-[var(--nova-text-muted)]">
             <span className="font-medium">{t('editor.backgroundTheme')}</span>
@@ -812,10 +916,140 @@ function loadEditorSettings(): EditorSettings {
     return {
       lineHeight: parsed.lineHeight ?? DEFAULT_SETTINGS.lineHeight,
       theme: parsed.theme && parsed.theme in THEME_STYLES ? parsed.theme : DEFAULT_SETTINGS.theme,
+      dialogueHighlightColor: normalizeColorValue(parsed.dialogueHighlightColor) ?? DEFAULT_SETTINGS.dialogueHighlightColor,
     }
   } catch {
     return DEFAULT_SETTINGS
   }
+}
+
+function normalizeColorValue(value: unknown): string | null {
+  if (typeof value !== 'string') return null
+  if (value === DEFAULT_DIALOGUE_HIGHLIGHT_COLOR) return DEFAULT_DIALOGUE_HIGHLIGHT_COLOR
+  return COLOR_VALUE_PATTERN.test(value) ? value : null
+}
+
+function DialogueHighlightColorPicker({ value, defaultColor, onChange, onReset }: { value: string; defaultColor: string; onChange: (value: string) => void; onReset: () => void }) {
+  const { t } = useTranslation()
+  const color = normalizeColorValue(value) || normalizeColorValue(defaultColor) || DEFAULT_PICKER_COLOR
+  const hsv = useMemo(() => hexToHsv(color), [color])
+  const fieldRef = useRef<HTMLButtonElement>(null)
+  const hueRef = useRef<HTMLButtonElement>(null)
+  const hueColor = hsvToHex({ h: hsv.h, s: 1, v: 1 })
+
+  const updateFieldColor = useCallback((clientX: number, clientY: number) => {
+    const rect = fieldRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const s = clampNumber((clientX - rect.left) / rect.width, 0, 1)
+    const v = clampNumber(1 - ((clientY - rect.top) / rect.height), 0, 1)
+    onChange(hsvToHex({ h: hsv.h, s, v }))
+  }, [hsv.h, onChange])
+
+  const updateHueColor = useCallback((clientX: number) => {
+    const rect = hueRef.current?.getBoundingClientRect()
+    if (!rect) return
+    const h = clampNumber((clientX - rect.left) / rect.width, 0, 1) * 360
+    onChange(hsvToHex({ ...hsv, h }))
+  }, [hsv, onChange])
+
+  const handlePointerDrag = (update: (event: PointerEvent<HTMLButtonElement>) => void) => (event: PointerEvent<HTMLButtonElement>) => {
+    event.currentTarget.setPointerCapture(event.pointerId)
+    update(event)
+  }
+
+  const handleHexInput = (raw: string) => {
+    const next = raw.startsWith('#') ? raw : `#${raw}`
+    if (COLOR_VALUE_PATTERN.test(next)) onChange(next)
+  }
+
+  return (
+    <div className="space-y-2">
+      <button
+        ref={fieldRef}
+        type="button"
+        className="relative h-24 w-full overflow-hidden rounded-md border border-[var(--nova-border)]"
+        aria-label={t('editor.dialogueHighlightField')}
+        onPointerDown={handlePointerDrag((event) => updateFieldColor(event.clientX, event.clientY))}
+        onPointerMove={(event) => { if (event.buttons === 1) updateFieldColor(event.clientX, event.clientY) }}
+        style={{
+          background: `linear-gradient(to top, #000, transparent), linear-gradient(to right, #fff, ${hueColor})`,
+        }}
+      >
+        <span
+          className="absolute h-3 w-3 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-white shadow-[0_0_0_1px_rgba(0,0,0,0.55)]"
+          style={{ left: `${hsv.s * 100}%`, top: `${(1 - hsv.v) * 100}%` }}
+        />
+      </button>
+      <button
+        ref={hueRef}
+        type="button"
+        className="relative h-5 w-full rounded-md border border-[var(--nova-border)]"
+        aria-label={t('editor.dialogueHighlightHue')}
+        onPointerDown={handlePointerDrag((event) => updateHueColor(event.clientX))}
+        onPointerMove={(event) => { if (event.buttons === 1) updateHueColor(event.clientX) }}
+        style={{ background: 'linear-gradient(to right, #ef4444, #eab308, #22c55e, #06b6d4, #6366f1, #d946ef, #ef4444)' }}
+      >
+        <span
+          className="absolute top-1/2 h-6 w-2 -translate-x-1/2 -translate-y-1/2 rounded-full border border-white bg-[var(--nova-surface)] shadow-[0_0_0_1px_rgba(0,0,0,0.45)]"
+          style={{ left: `${(hsv.h / 360) * 100}%` }}
+        />
+      </button>
+      <div className="flex items-center gap-2">
+        <span className="h-7 w-7 shrink-0 rounded-md border border-[var(--nova-border)]" style={{ background: color }} />
+        <input
+          value={color}
+          onChange={(event) => handleHexInput(event.target.value)}
+          aria-label={t('editor.dialogueHighlightHex')}
+          className="min-w-0 flex-1 rounded-md border border-[var(--nova-border)] bg-[var(--nova-surface)] px-2 py-1 font-mono text-[11px] text-[var(--nova-text)] outline-none focus:border-[var(--nova-field-focus-border)]"
+        />
+        <button
+          type="button"
+          className="shrink-0 rounded px-2 py-1 text-[11px] text-[var(--nova-text-faint)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]"
+          onClick={onReset}
+        >
+          {t('editor.dialogueHighlightReset')}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value))
+}
+
+function hexToHsv(hex: string) {
+  const normalized = normalizeColorValue(hex) || DEFAULT_PICKER_COLOR
+  const r = parseInt(normalized.slice(1, 3), 16) / 255
+  const g = parseInt(normalized.slice(3, 5), 16) / 255
+  const b = parseInt(normalized.slice(5, 7), 16) / 255
+  const max = Math.max(r, g, b)
+  const min = Math.min(r, g, b)
+  const delta = max - min
+  let h = 0
+  if (delta !== 0) {
+    if (max === r) h = 60 * (((g - b) / delta) % 6)
+    else if (max === g) h = 60 * ((b - r) / delta + 2)
+    else h = 60 * ((r - g) / delta + 4)
+  }
+  if (h < 0) h += 360
+  return { h, s: max === 0 ? 0 : delta / max, v: max }
+}
+
+function hsvToHex({ h, s, v }: { h: number; s: number; v: number }) {
+  const chroma = v * s
+  const x = chroma * (1 - Math.abs(((h / 60) % 2) - 1))
+  const m = v - chroma
+  let r = 0
+  let g = 0
+  let b = 0
+  if (h < 60) [r, g, b] = [chroma, x, 0]
+  else if (h < 120) [r, g, b] = [x, chroma, 0]
+  else if (h < 180) [r, g, b] = [0, chroma, x]
+  else if (h < 240) [r, g, b] = [0, x, chroma]
+  else if (h < 300) [r, g, b] = [x, 0, chroma]
+  else [r, g, b] = [chroma, 0, x]
+  return `#${[r, g, b].map((channel) => Math.round((channel + m) * 255).toString(16).padStart(2, '0')).join('')}`
 }
 
 function normalizeEditorText(text: string): string {
@@ -831,12 +1065,8 @@ function normalizeEditorText(text: string): string {
 
 function updateCharacterStats(
   editor: NonNullable<ReturnType<typeof useEditor>>,
-  setTotal: (value: number) => void,
   setSelected: (value: number) => void,
 ) {
-  const storage = editor.storage.characterCount as { characters?: () => number } | undefined
-  setTotal(storage?.characters?.() ?? countTextCharacters(editor.state.doc.textContent))
-
   const { from, to, empty } = editor.state.selection
   if (empty) {
     setSelected(0)
@@ -878,6 +1108,42 @@ function createSearchHighlightExtension(searchStateRef: { current: SearchState }
       ]
     },
   })
+}
+
+/** 创建编辑器对白高亮扩展，不改变正文内容，仅用 Decoration 标记可视样式。 */
+function createDialogueHighlightExtension() {
+  return Extension.create({
+    name: 'novaEditorDialogueHighlight',
+
+    addProseMirrorPlugins() {
+      return [
+        new Plugin<DecorationSet>({
+          key: dialogueHighlightPluginKey,
+          state: {
+            init: (_, state) => createDialogueDecorations(state.doc),
+            apply: (tr, previousDecorations, _oldState, newState) => {
+              if (tr.docChanged) return createDialogueDecorations(newState.doc)
+              return previousDecorations.map(tr.mapping, tr.doc)
+            },
+          },
+          props: {
+            decorations: (state) => dialogueHighlightPluginKey.getState(state) ?? DecorationSet.empty,
+          },
+        }),
+      ]
+    },
+  })
+}
+
+function createDialogueDecorations(doc: ProseMirrorNode) {
+  const decorations: Decoration[] = []
+  doc.descendants((node, pos) => {
+    if (!node.isText || !node.text) return
+    for (const range of findDialogueHighlightRanges(node.text)) {
+      decorations.push(Decoration.inline(pos + range.from, pos + range.to, { class: 'nova-editor-dialogue-highlight' }))
+    }
+  })
+  return decorations.length > 0 ? DecorationSet.create(doc, decorations) : DecorationSet.empty
 }
 
 function createSearchDecorations(doc: ProseMirrorNode, searchState: SearchState) {

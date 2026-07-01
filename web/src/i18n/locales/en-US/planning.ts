@@ -16,11 +16,11 @@ const planning = {
   'planning.chapterPlans': 'Chapter Group Outlines',
   'planning.chapterPlanCount': '{{count}} groups',
   'planning.chapterPlanHistory': 'Older Groups',
-  'planning.chapterPlansEmpty': 'No outlines under setting/chapter-groups/',
+  'planning.chapterPlansEmpty': 'No outlines yet',
   'planning.volumeChapters': 'Volume Chapters',
   'planning.unvolumed': 'Unvolumed',
   'planning.confirmChapter': 'Confirm as chapter',
-  'planning.markDraft': 'Mark as draft',
+  'planning.markDraft': 'Mark as initial draft',
   'planning.loreDescription': '{{type}} · {{importance}} · {{loadMode}}{{tags}}{{brief}}',
   'planning.loreBrief': ' · Brief: {{brief}}',
 } as const

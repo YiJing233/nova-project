@@ -9,10 +9,10 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 
-	"nova/internal/book"
-	"nova/internal/observability"
-	"nova/internal/prompts"
-	"nova/internal/session"
+	"denova/internal/book"
+	"denova/internal/observability"
+	"denova/internal/prompts"
+	"denova/internal/session"
 )
 
 const (
@@ -33,20 +33,37 @@ type ChatRequest struct {
 	LoreReferences []string           `json:"lore_references"`
 	StyleScenes    []string           `json:"style_scenes"`
 	Selections     []TextSelectionRef `json:"selections"`
+	IDEContext     IDEContextRef      `json:"ide_context,omitempty"`
 	PlanMode       bool               `json:"plan_mode"`
 	WritingSkill   string             `json:"writing_skill"`
+	ImagePresetID  string             `json:"image_preset_id"`
 	Locale         string             `json:"-"`
 
 	// StyleRules 由后端按当前导演配置注入（场景 → 风格内容）。
 	// StyleScenes 非空时只注入用户本轮通过 # 指定的场景；为空时作为场景化建议参与本轮上下文。
 	StyleRules []StyleRule `json:"-"`
 
-	// WritingSkillContext 由后端解析用户本轮选择的有效 Writing Skill 后注入。
-	WritingSkillContext *WritingSkillContext `json:"-"`
+	// ImagePreset is resolved by the app layer from ImagePresetID or workspace settings.
+	ImagePreset ImagePresetContext `json:"-"`
 }
 
 // StyleRule 是 prompts.StyleRule 的镜像，避免调用方直接依赖 prompts 包。
 type StyleRule = prompts.StyleRule
+
+// IDEContextRef carries lightweight, model-visible IDE state for one turn.
+// It must describe UI focus only and must not include editor file content.
+type IDEContextRef struct {
+	CurrentFile string   `json:"current_file,omitempty"`
+	OpenFiles   []string `json:"open_files,omitempty"`
+}
+
+// ImagePresetContext is a bounded visual style preset for image generation only.
+type ImagePresetContext struct {
+	ID                string
+	Name              string
+	AgentSystemPrompt string
+	ToolRequestPrompt string
+}
 
 // TextSelectionRef 表示用户在编辑器中选中的一段文本引用。
 type TextSelectionRef struct {
@@ -294,11 +311,26 @@ func (r *Runtime) Run(
 	events := runner.Run(runCtx, history, runOptions...)
 	var fullContent strings.Builder
 	var fullThinking strings.Builder
+	var planParser *planProtocolParser
+	if req.PlanMode {
+		planMeta := agentEventMetadata{
+			AgentKind:     options.AgentKind,
+			RunID:         runID,
+			AgentName:     options.RootAgentName,
+			RootAgentName: options.RootAgentName,
+		}
+		if options.RootAgentName != "" {
+			planMeta.RunPath = []string{options.RootAgentName}
+		}
+		planParser = newPlanProtocolParser(planMeta, emit)
+	}
 	runLogger.Info("run_started", slog.Int("history", len(history)), slog.Int("message_len", len(req.Message)), slog.Int("agent_message_len", len(agentMessage)), slog.Bool("plan_mode", req.PlanMode), slog.String("writing_skill", req.WritingSkill), slog.Int("style_scenes", len(req.StyleScenes)), slog.Int("style_rules", len(req.StyleRules)))
 
 	for {
 		if err := ctx.Err(); err != nil {
 			runLogger.Warn("run_interrupted", slog.String("reason", "context"), slog.Any("error", err), slog.Int("generated_bytes", fullContent.Len()))
+			flushPlanProtocolParser(planParser, &fullContent, emit)
+			discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
 			generatedBytes := fullContent.Len()
 			appendAssistantIfAny(conversation, &fullContent, &fullThinking)
 			finishRun("aborted", err.Error(), generatedBytes)
@@ -307,6 +339,8 @@ func (r *Runtime) Run(
 		}
 		event, ok, waitErr := waitForRunnerEvent(runCtx, events, options.IdleTimeout)
 		if waitErr != nil {
+			flushPlanProtocolParser(planParser, &fullContent, emit)
+			discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
 			generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
 			if ctx.Err() != nil {
 				runLogger.Warn("run_interrupted", slog.String("reason", "context"), slog.Any("error", ctx.Err()), slog.Int("generated_bytes", len(generated)))
@@ -326,6 +360,8 @@ func (r *Runtime) Run(
 		}
 		if event.Err != nil {
 			runLogger.Error("run_interrupted", slog.String("reason", "runner_error"), slog.Any("error", event.Err), slog.Int("generated_bytes", fullContent.Len()))
+			flushPlanProtocolParser(planParser, &fullContent, emit)
+			discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
 			generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
 			markInterruptionIfNeeded(conversation, resumeInterruption, originalMessage, generated, event.Err.Error())
 			finishRun("error", event.Err.Error(), len(generated))
@@ -339,6 +375,7 @@ func (r *Runtime) Run(
 		}
 
 		eventMeta := subAgentSessions.decorate(metadataForAgentEvent(event, options.RootAgentName))
+		eventMeta.AgentKind = options.AgentKind
 		mv := event.Output.MessageOutput
 		if mv.Role == schema.Tool {
 			if mv.Message == nil {
@@ -346,6 +383,7 @@ func (r *Runtime) Run(
 			}
 			content, drainErr := drainContent(runCtx, mv, options.IdleTimeout)
 			if drainErr != nil {
+				discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
 				generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
 				if ctx.Err() != nil {
 					runLogger.Warn("run_interrupted", slog.String("reason", "context"), slog.Any("error", ctx.Err()), slog.Int("generated_bytes", len(generated)))
@@ -364,9 +402,6 @@ func (r *Runtime) Run(
 			if content == "" {
 				content = "(无返回内容)"
 			}
-			if len(content) > 300 {
-				content = content[:300] + "..."
-			}
 			logToolResult(mv.Message.ToolName, mv.Message.ToolCallID, content)
 			usageCollector.NoteToolResult(mv.Message.ToolName)
 			data := eventMeta.appendTo(map[string]interface{}{
@@ -378,6 +413,19 @@ func (r *Runtime) Run(
 				data["item_ids"] = itemIDs
 				data["deleted_ids"] = deletedIDs
 			}
+			if illustrationResult, parseErr := parseChapterIllustrationToolResult(mv.Message.ToolName, fullToolContent); parseErr != nil {
+				runLogger.Warn("parse_chapter_illustration_result_failed", slog.String("tool", mv.Message.ToolName), slog.Any("error", parseErr))
+			} else if illustrationResult != nil {
+				data["illustration"] = illustrationResult
+				data["target"] = illustrationResult.MetaPath
+			} else if interactiveImageResult, parseErr := parseInteractiveImageToolResult(mv.Message.ToolName, fullToolContent); parseErr != nil {
+				runLogger.Warn("parse_interactive_image_result_failed", slog.String("tool", mv.Message.ToolName), slog.Any("error", parseErr))
+			} else if interactiveImageResult != nil {
+				data["interactive_image"] = interactiveImageResult
+				data["target"] = interactiveImageResult.MetaPath
+			} else if target := parseGeneratedImageToolTarget(mv.Message.ToolName, fullToolContent); target != "" {
+				data["target"] = target
+			}
 			emit(Event{Type: "tool_result", Data: data})
 			continue
 		}
@@ -386,9 +434,11 @@ func (r *Runtime) Run(
 			continue
 		}
 		if mv.IsStreaming && mv.MessageStream != nil {
-			msg, streamErr := processStreamingEvent(runCtx, mv, &fullContent, &fullThinking, options.IdleTimeout, eventMeta, emit)
+			msg, streamErr := processStreamingEvent(runCtx, mv, &fullContent, &fullThinking, options.IdleTimeout, options.ToolResultMaxBytes, eventMeta, planParser, emit)
 			usageCollector.AddMessage(msg)
 			if streamErr != nil {
+				flushPlanProtocolParser(planParser, &fullContent, emit)
+				discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
 				generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
 				if ctx.Err() != nil {
 					runLogger.Warn("run_interrupted", slog.String("reason", "context"), slog.Any("error", ctx.Err()), slog.Int("generated_bytes", len(generated)))
@@ -401,14 +451,24 @@ func (r *Runtime) Run(
 				finishRun("error", streamErr.Error(), len(generated))
 				return
 			}
+			if req.PlanMode && planParser != nil && planParser.HasSuccessfulBlock() {
+				cancelRun()
+				break
+			}
 			continue
 		}
 		if mv.Message != nil {
-			processNonStreamingEvent(mv, &fullContent, &fullThinking, eventMeta, emit)
+			processNonStreamingEvent(mv, &fullContent, &fullThinking, options.ToolResultMaxBytes, eventMeta, planParser, emit)
 			usageCollector.AddMessage(mv.Message)
+			if req.PlanMode && planParser != nil && planParser.HasSuccessfulBlock() {
+				cancelRun()
+				break
+			}
 		}
 	}
 
+	flushPlanProtocolParser(planParser, &fullContent, emit)
+	discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
 	generatedBytes := fullContent.Len()
 	appendAssistantIfAny(conversation, &fullContent, &fullThinking)
 	if resumeInterruption != nil {

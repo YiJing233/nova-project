@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"nova/config"
+	"denova/config"
 )
 
 func TestProtectedSystemInstructionOrdersContractUserAndBuiltIn(t *testing.T) {
@@ -15,7 +15,7 @@ func TestProtectedSystemInstructionOrdersContractUserAndBuiltIn(t *testing.T) {
 	}
 	instruction := protectedSystemInstruction(cfg, config.AgentKindIDE, "BUILT IN PROMPT")
 
-	contractIndex := strings.Index(instruction, "Nova 运行时契约")
+	contractIndex := strings.Index(instruction, "Denova 运行时契约")
 	flowIndex := strings.Index(instruction, "USER FLOW PROMPT")
 	userIndex := strings.Index(instruction, "USER CUSTOM PROMPT")
 	builtInIndex := strings.Index(instruction, "BUILT IN PROMPT")
@@ -65,6 +65,9 @@ func TestDeepAgentParentRuntimeContractsIncludeSubAgentDelegationProtocol(t *tes
 			instruction := protectedSystemInstruction(&config.Config{}, agentKind, "BUILT IN PROMPT")
 			for _, required := range []string{
 				"SubAgent 委派协议",
+				"默认不要主动拉起 SubAgent",
+				"用户明确要求委派/拉起子 Agent",
+				"Skill 流程明确要求使用 SubAgent",
 				"用户目标、必要上下文、已知约束、文件路径或资源 ID、期望输出",
 				"不要复制大段正文、完整日志、完整历史或其他无界内容",
 				"父 Agent 必须自行核对结果",
@@ -80,13 +83,14 @@ func TestDeepAgentParentRuntimeContractsIncludeSubAgentDelegationProtocol(t *tes
 func TestRuntimeContractsCoverAllAgentKinds(t *testing.T) {
 	tests := map[string]string{
 		config.AgentKindIDE:                   "CREATOR.md",
-		config.AgentKindInteractiveStory:      "<NARRATIVE>",
+		config.AgentKindInteractiveStory:      "只输出本回合可展示在故事舞台上的故事正文",
+		config.AgentKindImage:                 "图像 Agent",
 		config.AgentKindConfigManager:         "配置管理 Agent",
 		config.AgentKindInteractiveState:      "互动记忆 Agent",
 		config.AgentKindInteractiveHotChoices: "快捷选项 Agent",
 		config.AgentKindVersionSummary:        "版本说明 Agent",
 		config.AgentKindToolAgent:             "model-only",
-		config.AgentKindAutomation:            "Automation Agent",
+		config.AgentKindAutomation:            "自动化Agent",
 		config.AgentKindContextCompaction:     "上下文压缩 Agent",
 	}
 	for _, definition := range config.AgentKindDefinitions() {

@@ -10,7 +10,7 @@ import (
 	"github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/schema"
 
-	"nova/config"
+	"denova/config"
 )
 
 type chapterSplitRegexPayload struct {
@@ -64,7 +64,7 @@ func generateChapterSplitRegex(ctx context.Context, cfg *config.Config, modelCfg
 		schema.SystemMessage(protectedSystemInstruction(cfg, config.AgentKindToolAgent, chapterSplitRegexSystemInstruction())),
 		schema.UserMessage(instruction),
 	}
-	logFullModelInput(modelInputLogOptions{
+	callID := logFullModelInput(modelInputLogOptions{
 		AgentKind: config.AgentKindToolAgent,
 		Source:    "tool_agent_chapter_split_regex",
 		Mode:      "generate_" + attempt,
@@ -80,6 +80,7 @@ func generateChapterSplitRegex(ctx context.Context, cfg *config.Config, modelCfg
 		log.Printf("[tool-agent] infer chapter split regex nil response attempt=%s", attempt)
 		return "", fmt.Errorf("工具 Agent 返回为空")
 	}
+	logModelProviderRequestIDForCall(callID, config.AgentKindToolAgent, "tool_agent_chapter_split_regex", "generate_"+attempt, modelCfg.Model, "", 0, msg)
 	log.Printf("[tool-agent] infer chapter split regex raw output attempt=%s content=%s reasoning=%s", attempt, promptPartSummary(msg.Content), promptPartSummary(msg.ReasoningContent))
 	regex, reason, err := parseChapterSplitRegexContent(msg.Content)
 	if err != nil && strings.TrimSpace(msg.Content) == "" && strings.TrimSpace(msg.ReasoningContent) != "" {
@@ -123,7 +124,7 @@ func valueOrZero(v *int) int {
 
 func chapterSplitRegexSystemInstruction() string {
 	return strings.Join([]string{
-		"你负责为 Nova 小说导入识别章节和分卷标题行。",
+		"你负责为 Denova 小说导入识别章节和分卷标题行。",
 		"只输出 JSON object，schema 为 {\"split_regex\":\"...\",\"reason\":\"...\"}。",
 		"split_regex 必须是 Go regexp，可用于逐行匹配章节标题行和分卷标题行；不要使用跨行匹配。",
 		"如果标题里有编号前缀和正文标题，优先用第 1 个捕获组捕获完整章节标题；否则不使用捕获组也可以。",

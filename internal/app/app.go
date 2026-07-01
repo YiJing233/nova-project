@@ -8,11 +8,11 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 
-	"nova/config"
-	"nova/internal/agent"
-	"nova/internal/book"
-	"nova/internal/interactive"
-	"nova/internal/session"
+	"denova/config"
+	"denova/internal/agent"
+	"denova/internal/book"
+	"denova/internal/interactive"
+	"denova/internal/session"
 )
 
 // App 是 API 层使用的应用门面；具体业务由领域应用服务承接。
@@ -43,6 +43,7 @@ type App struct {
 	configApp      *ConfigManagerAppService
 	automationApp  *AutomationAppService
 	skillsApp      *SkillsAppService
+	imageApp       *ImageAppService
 	servicesOnce   sync.Once
 
 	mu sync.RWMutex
@@ -98,6 +99,7 @@ func (a *App) ensureServices() {
 		a.configApp = &ConfigManagerAppService{app: a}
 		a.automationApp = &AutomationAppService{app: a}
 		a.skillsApp = &SkillsAppService{app: a}
+		a.imageApp = &ImageAppService{app: a}
 	})
 }
 
@@ -119,6 +121,11 @@ func (a *App) interactiveService() *InteractiveAppService {
 func (a *App) lore() *LoreAppService {
 	a.ensureServices()
 	return a.loreApp
+}
+
+func (a *App) images() *ImageAppService {
+	a.ensureServices()
+	return a.imageApp
 }
 
 func (a *App) configManager() *ConfigManagerAppService {
@@ -170,4 +177,12 @@ func (a *App) RemoteAccessConfig() config.RemoteAccessConfig {
 		return config.RemoteAccessConfig{}
 	}
 	return a.cfg.RemoteAccessConfig()
+}
+
+// HideChapterBodyLiveOutput reports whether real-time SSE output should
+// hide novel chapter body content while preserving tool execution internally.
+func (a *App) HideChapterBodyLiveOutput() bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.cfg != nil && a.cfg.HideChapterBodyLiveOutput
 }

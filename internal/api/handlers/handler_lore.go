@@ -2,11 +2,12 @@ package handlers
 
 import (
 	"context"
+	"errors"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
-	"nova/internal/book"
+	"denova/internal/book"
 )
 
 func (h *Handlers) HandleLoreItems(ctx context.Context, c *app.RequestContext) {
@@ -49,6 +50,10 @@ func (h *Handlers) HandleLoreItemUpdate(ctx context.Context, c *app.RequestConte
 	}
 	item, err := h.app.UpdateLoreItem(c.Param("id"), body)
 	if err != nil {
+		if errors.Is(err, book.ErrLoreRevisionConflict) {
+			writeErrorKey(c, consts.StatusConflict, "api.resource.revisionConflict")
+			return
+		}
 		writeError(c, consts.StatusBadRequest, err.Error())
 		return
 	}

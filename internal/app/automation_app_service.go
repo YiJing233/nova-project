@@ -10,11 +10,11 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	"nova/config"
-	"nova/internal/agent"
-	"nova/internal/automation"
-	"nova/internal/book"
-	"nova/internal/session"
+	"denova/config"
+	"denova/internal/agent"
+	"denova/internal/automation"
+	"denova/internal/book"
+	"denova/internal/session"
 )
 
 type AutomationAppService struct {
@@ -372,6 +372,7 @@ func (s *AutomationAppService) runAutomation(ctx context.Context, task automatio
 		Workspace:           run.Workspace,
 		Mode:                "automation",
 		IdleTimeout:         agentIdleTimeout(runtimeCfg),
+		ToolResultMaxBytes:  agentToolResultMaxBytes(runtimeCfg),
 		OnMutationsVerified: s.app.automationMutationCallback("automation_agent_post_run"),
 	}, forward)
 	if ctx.Err() != nil {
@@ -450,6 +451,7 @@ func (s *AutomationAppService) runAutomationFollowUp(ctx context.Context, task a
 		Workspace:           run.Workspace,
 		Mode:                "automation",
 		IdleTimeout:         agentIdleTimeout(runtimeCfg),
+		ToolResultMaxBytes:  agentToolResultMaxBytes(runtimeCfg),
 		OnMutationsVerified: s.app.automationMutationCallback("automation_agent_post_run"),
 	}, emit)
 	log.Printf("[automation] follow-up end task_id=%s run_id=%s", task.ID, run.ID)
@@ -687,7 +689,7 @@ func (s *AutomationAppService) runtimeConfig() config.Config {
 	novaDir := runtimeCfg.NovaDir
 	a.mu.RUnlock()
 	runtimeCfg.Workspace = workspace
-	if layered, err := config.LoadLayered(novaDir, workspace); err == nil {
+	if layered, err := config.LoadLayeredWithStartupConfig(novaDir, workspace); err == nil {
 		applyLayeredSettingsToConfig(&runtimeCfg, layered)
 	} else {
 		log.Printf("[automation] load layered settings failed workspace=%s err=%v", workspace, err)
@@ -852,7 +854,7 @@ func eventMessage(data interface{}) string {
 
 func (s *AutomationAppService) buildAutomationUserMessage(task automation.Task, run automation.RunRecord, writeMode, writeScope string) string {
 	var sb strings.Builder
-	sb.WriteString("执行 Nova 自动化任务。\n\n")
+	sb.WriteString("执行 Denova 自动化任务。\n\n")
 	sb.WriteString(fmt.Sprintf("任务名称：%s\n", task.Name))
 	sb.WriteString(fmt.Sprintf("触发来源：%s\n", run.Trigger))
 	sb.WriteString(fmt.Sprintf("执行模式：%s\n", writeMode))

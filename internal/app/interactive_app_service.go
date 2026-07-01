@@ -6,10 +6,11 @@ import (
 	"log"
 	"strings"
 
-	"nova/config"
-	"nova/internal/agent"
-	"nova/internal/interactive"
-	"nova/internal/session"
+	"denova/config"
+	"denova/internal/agent"
+	"denova/internal/imagepreset"
+	"denova/internal/interactive"
+	"denova/internal/session"
 )
 
 // InteractiveAppService 负责互动故事、剧情分支、导演和互动 Agent 任务。
@@ -23,6 +24,20 @@ const (
 )
 
 var generateInteractiveStateForStoryMemory = agent.GenerateInteractiveState
+
+// InteractiveTurnPersistedEvent is emitted after a game-mode turn is durably
+// appended, allowing the UI to merge the new turn without a blocking snapshot
+// reload.
+type InteractiveTurnPersistedEvent struct {
+	StoryID                  string                                     `json:"story_id"`
+	BranchID                 string                                     `json:"branch_id"`
+	Turn                     interactive.TurnEvent                      `json:"turn"`
+	State                    map[string]any                             `json:"state"`
+	Graph                    interactive.StoryGraph                     `json:"graph"`
+	Branches                 []interactive.BranchSummary                `json:"branches"`
+	ContextCompaction        *interactive.ContextCompactionEvent        `json:"context_compaction,omitempty"`
+	ContextCompactionRemoval *interactive.ContextCompactionRemovalEvent `json:"context_compaction_removal,omitempty"`
+}
 
 func (a *App) InteractiveStories() (interactive.Index, error) {
 	return a.interactiveService().InteractiveStories()
@@ -453,7 +468,7 @@ func (s *InteractiveAppService) AppendInteractiveTurn(storyID, branchID, user, n
 	})
 }
 
-// StartInteractiveTask 启动互动模式 Agent 任务，输出写回 interactive/story。
+// StartInteractiveTask 启动游戏模式 Agent 任务，输出写回 interactive/story。
 func (a *App) StartInteractiveTask(storyID, branchID, message string, styleScenes []string, locale string) *Task {
 	return a.interactiveService().StartInteractiveTask(storyID, branchID, message, styleScenes, locale)
 }
@@ -490,7 +505,7 @@ func (s *InteractiveAppService) AnalyzeInteractiveContext(storyID, branchID, mes
 	novaDir := runtimeCfg.NovaDir
 	a.mu.RUnlock()
 
-	if layered, err := config.LoadLayered(novaDir, workspace); err == nil {
+	if layered, err := config.LoadLayeredWithStartupConfig(novaDir, workspace); err == nil {
 		applyLayeredSettingsToConfig(&runtimeCfg, layered)
 	} else {
 		log.Printf("[interactive-agent-analysis] load interactive settings failed workspace=%s err=%v", workspace, err)
@@ -622,7 +637,7 @@ func (s *InteractiveAppService) startInteractiveTask(storyID, branchID, message 
 	novaDir := runtimeCfg.NovaDir
 	a.mu.Unlock()
 
-	if layered, err := config.LoadLayered(novaDir, workspace); err == nil {
+	if layered, err := config.LoadLayeredWithStartupConfig(novaDir, workspace); err == nil {
 		applyLayeredSettingsToConfig(&runtimeCfg, layered)
 		log.Printf("[interactive-agent-task] load interactive settings workspace=%s", workspace)
 	} else {
@@ -675,15 +690,24 @@ func (s *InteractiveAppService) startInteractiveTask(storyID, branchID, message 
 	conversation := newInteractiveConversation(store, novaDir, workspace, storyID, branchID, message, runtimeCfg.InteractiveReplyTargetChars, &runtimeCfg)
 	task := NewTask(func(ctx context.Context, task *Task, emit func(agent.Event)) {
 		log.Printf("[interactive-agent-task] run begin id=%s story_id=%s branch_id=%s rewind_turn_id=%s message_len=%d style_scenes=%d", task.ID(), storyID, branchID, rewindTurnID, len(message), len(styleScenes))
+		persistedEmitted := false
+		interactiveEmit := func(event agent.Event) {
+			if event.Type == "done" && !persistedEmitted && ctx.Err() == nil {
+				persistedEmitted = true
+				emitInteractiveTurnPersisted(store, storyID, conversation, emit)
+			}
+			emit(event)
+		}
 		chatService.RunWithOptions(ctx, runner, conversation, bookService, req, agent.RunOptions{
 			AgentKind:           agent.AgentKindInteractiveStory,
 			TaskID:              task.ID(),
 			Workspace:           workspace,
 			Mode:                "interactive",
 			IdleTimeout:         agentIdleTimeout(runtimeCfg),
+			ToolResultMaxBytes:  agentToolResultMaxBytes(runtimeCfg),
 			SystemPromptLog:     agent.BuildInteractiveStoryInstructionComposition(&runtimeCfg, state, tellerSystemInput),
 			OnMutationsVerified: a.automationMutationCallback("interactive_agent_post_run"),
-		}, emit)
+		}, interactiveEmit)
 		if turn, stateReady, ok := conversation.LastTurnForState(); ok && !stateReady && ctx.Err() == nil {
 			shouldGenerate, nextAuto, err := store.ShouldGenerateStoryMemory(storyID, turn.BranchID)
 			if err != nil {
@@ -706,6 +730,40 @@ func (s *InteractiveAppService) startInteractiveTask(storyID, branchID, message 
 	a.mu.Unlock()
 
 	return task
+}
+
+func emitInteractiveTurnPersisted(store *interactive.Store, storyID string, conversation *interactiveConversation, emit func(agent.Event)) {
+	if store == nil || conversation == nil || emit == nil {
+		return
+	}
+	turn, _, ok := conversation.LastTurnForState()
+	if !ok || strings.TrimSpace(turn.ID) == "" {
+		return
+	}
+	snapshot, err := store.Snapshot(storyID, turn.BranchID)
+	if err != nil {
+		log.Printf("[interactive-agent-task] load persisted turn snapshot failed story_id=%s branch_id=%s turn_id=%s err=%v", storyID, turn.BranchID, turn.ID, err)
+		return
+	}
+	persistedTurn := turn
+	for _, snapshotTurn := range snapshot.Turns {
+		if snapshotTurn.ID == turn.ID {
+			persistedTurn = snapshotTurn
+			break
+		}
+	}
+	event := InteractiveTurnPersistedEvent{
+		StoryID:                  storyID,
+		BranchID:                 snapshot.BranchID,
+		Turn:                     persistedTurn,
+		State:                    snapshot.State,
+		Graph:                    snapshot.Graph,
+		Branches:                 snapshot.Graph.Branches,
+		ContextCompaction:        snapshot.ContextCompaction,
+		ContextCompactionRemoval: snapshot.ContextCompactionRemoval,
+	}
+	emit(agent.Event{Type: "interactive_turn_persisted", Data: event})
+	log.Printf("[interactive-agent-task] emitted persisted turn story_id=%s branch_id=%s turn_id=%s", storyID, snapshot.BranchID, persistedTurn.ID)
 }
 
 func (a *App) InteractiveTellers() ([]interactive.Teller, error) {
@@ -744,16 +802,16 @@ func (s *InteractiveAppService) CreateInteractiveTeller(teller interactive.Telle
 	return interactive.NewTellerLibrary(cfg.NovaDir).Create(teller)
 }
 
-func (a *App) UpdateInteractiveTeller(id string, teller interactive.Teller) (interactive.Teller, error) {
-	return a.interactiveService().UpdateInteractiveTeller(id, teller)
+func (a *App) UpdateInteractiveTeller(id string, teller interactive.Teller, baseRevision ...string) (interactive.Teller, error) {
+	return a.interactiveService().UpdateInteractiveTeller(id, teller, firstRevision(baseRevision))
 }
 
-func (s *InteractiveAppService) UpdateInteractiveTeller(id string, teller interactive.Teller) (interactive.Teller, error) {
+func (s *InteractiveAppService) UpdateInteractiveTeller(id string, teller interactive.Teller, baseRevision string) (interactive.Teller, error) {
 	cfg := s.cfg()
 	if cfg == nil || cfg.NovaDir == "" {
 		return interactive.Teller{}, ErrNoWorkspace
 	}
-	return interactive.NewTellerLibrary(cfg.NovaDir).Update(id, teller)
+	return interactive.NewTellerLibrary(cfg.NovaDir).Update(id, teller, baseRevision)
 }
 
 func (a *App) DeleteInteractiveTeller(id string) error {
@@ -768,7 +826,67 @@ func (s *InteractiveAppService) DeleteInteractiveTeller(id string) error {
 	return interactive.NewTellerLibrary(cfg.NovaDir).Delete(id)
 }
 
-// ActiveInteractiveTask 返回当前互动模式活跃任务（可能为 nil）。
+func (a *App) ImagePresets() ([]imagepreset.Preset, error) {
+	return a.interactiveService().ImagePresets()
+}
+
+func (s *InteractiveAppService) ImagePresets() ([]imagepreset.Preset, error) {
+	cfg := s.cfg()
+	if cfg == nil || cfg.NovaDir == "" {
+		return nil, ErrNoWorkspace
+	}
+	return imagepreset.NewLibrary(cfg.NovaDir).List()
+}
+
+func (a *App) ImagePreset(id string) (imagepreset.Preset, error) {
+	return a.interactiveService().ImagePreset(id)
+}
+
+func (s *InteractiveAppService) ImagePreset(id string) (imagepreset.Preset, error) {
+	cfg := s.cfg()
+	if cfg == nil || cfg.NovaDir == "" {
+		return imagepreset.Preset{}, ErrNoWorkspace
+	}
+	return imagepreset.NewLibrary(cfg.NovaDir).Get(id)
+}
+
+func (a *App) CreateImagePreset(preset imagepreset.Preset) (imagepreset.Preset, error) {
+	return a.interactiveService().CreateImagePreset(preset)
+}
+
+func (s *InteractiveAppService) CreateImagePreset(preset imagepreset.Preset) (imagepreset.Preset, error) {
+	cfg := s.cfg()
+	if cfg == nil || cfg.NovaDir == "" {
+		return imagepreset.Preset{}, ErrNoWorkspace
+	}
+	return imagepreset.NewLibrary(cfg.NovaDir).Create(preset)
+}
+
+func (a *App) UpdateImagePreset(id string, preset imagepreset.Preset, baseRevision ...string) (imagepreset.Preset, error) {
+	return a.interactiveService().UpdateImagePreset(id, preset, firstRevision(baseRevision))
+}
+
+func (s *InteractiveAppService) UpdateImagePreset(id string, preset imagepreset.Preset, baseRevision string) (imagepreset.Preset, error) {
+	cfg := s.cfg()
+	if cfg == nil || cfg.NovaDir == "" {
+		return imagepreset.Preset{}, ErrNoWorkspace
+	}
+	return imagepreset.NewLibrary(cfg.NovaDir).Update(id, preset, baseRevision)
+}
+
+func (a *App) DeleteImagePreset(id string) error {
+	return a.interactiveService().DeleteImagePreset(id)
+}
+
+func (s *InteractiveAppService) DeleteImagePreset(id string) error {
+	cfg := s.cfg()
+	if cfg == nil || cfg.NovaDir == "" {
+		return ErrNoWorkspace
+	}
+	return imagepreset.NewLibrary(cfg.NovaDir).Delete(id)
+}
+
+// ActiveInteractiveTask 返回当前游戏模式活跃任务（可能为 nil）。
 func (a *App) ActiveInteractiveTask() *Task {
 	return a.interactiveService().ActiveInteractiveTask()
 }
@@ -780,7 +898,7 @@ func (s *InteractiveAppService) ActiveInteractiveTask() *Task {
 	return a.activeInteractiveTask
 }
 
-// AbortInteractiveTask 终止当前互动模式活跃任务。
+// AbortInteractiveTask 终止当前游戏模式活跃任务。
 func (a *App) AbortInteractiveTask() {
 	a.interactiveService().AbortInteractiveTask()
 }
@@ -816,7 +934,7 @@ func (s *InteractiveAppService) interactiveRuntimeConfig() (*interactive.Store, 
 	novaDir := runtimeCfg.NovaDir
 	a.mu.RUnlock()
 
-	if layered, err := config.LoadLayered(novaDir, workspace); err == nil {
+	if layered, err := config.LoadLayeredWithStartupConfig(novaDir, workspace); err == nil {
 		applyLayeredSettingsToConfig(&runtimeCfg, layered)
 	} else {
 		log.Printf("[interactive-agent] load layered settings failed workspace=%s err=%v", workspace, err)

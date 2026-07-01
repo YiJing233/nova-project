@@ -1,20 +1,20 @@
 import { useEffect, useMemo, useState } from 'react'
-import { useQuery } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { BookOpen, Bot, Clock3, Database, History, MessageSquareText, NotebookText, PanelLeft, PenLine, Settings, SlidersHorizontal, Sparkles, X } from 'lucide-react'
+import { Group, Panel, Separator } from 'react-resizable-panels'
+import { BookOpen, Bot, Clock3, Database, History, MessageSquareText, NotebookText, PanelLeft, PenLine, Search, Settings, SlidersHorizontal, Sparkles, X } from 'lucide-react'
 import { AnimatePresence, LayoutGroup, motion } from 'motion/react'
 import { WorkspaceLayout } from '@/components/layout/workspace-layout'
 import { WorkspaceMobileLayout, type MobileNavItem } from '@/components/layout/workspace-mobile-layout'
 import { TooltipIconButton } from '@/components/common/tooltip-icon-button'
 import { novaSpring } from '@/features/motion/motion-tokens'
+import { MessageCenterButton } from '@/features/messages/MessageCenter'
 import { useIsMobile } from '@/hooks/useIsMobile'
 import { getAutomationInbox, type ChapterSummary, type WorkspaceSummary } from '@/lib/api'
-import { fetchSettings } from '@/features/settings/api'
-import type { RightPanel, WorkspaceMode } from '@/stores/workspace-store'
+import { useWorkspaceStore, type RightPanel, type WorkspaceMode } from '@/stores/workspace-store'
 import type { InteractiveSubmode } from '@/features/interactive/types'
 import { formatNumber } from './workbench-utils'
 
@@ -35,6 +35,7 @@ interface WorkbenchShellProps {
   sidebar: ReactNode
   main: ReactNode
   rightPanelContent: ReactNode
+  rightPanelWide?: boolean
   updateNotice?: { latestVersion: string } | null
   onSetMode: (mode: WorkspaceMode) => void
   onToggleActivityBarExpanded: () => void
@@ -68,6 +69,24 @@ const ACTIVITY_ORDER_STORAGE_KEYS: Record<ActivityOrderScope, string> = {
 }
 const DEFAULT_IDE_ACTIVITY_ORDER: ActivityItemId[] = ['writing', 'lore', 'teller', 'versions', 'books', 'skills', 'agents', 'automations']
 const DEFAULT_INTERACTIVE_ACTIVITY_ORDER: ActivityItemId[] = ['story', 'timeline', 'memory', 'lore', 'teller', 'versions', 'books', 'skills', 'agents', 'automations']
+const ACTIVITY_BAR_WIDTH_STORAGE_KEY = 'nova.layout.activityBarWidth'
+const ACTIVITY_BAR_COLLAPSED_WIDTH = 64
+const ACTIVITY_BAR_MIN_WIDTH = 112
+const ACTIVITY_BAR_LEGACY_DEFAULT_WIDTH = 152
+const ACTIVITY_BAR_DEFAULT_WIDTH = 180
+const ACTIVITY_BAR_MAX_WIDTH = 280
+const ACTIVITY_BAR_WIDTH_KEYBOARD_STEP = 8
+
+function NovaBrandIcon() {
+  return (
+    <img
+      src="/favicon.svg"
+      alt="Denova"
+      className="h-6 w-6 shrink-0 rounded-[7px]"
+      draggable={false}
+    />
+  )
+}
 
 export function WorkbenchShell({
   mode,
@@ -86,6 +105,7 @@ export function WorkbenchShell({
   sidebar,
   main,
   rightPanelContent,
+  rightPanelWide = false,
   updateNotice,
   onSetMode,
   onToggleActivityBarExpanded,
@@ -97,10 +117,9 @@ export function WorkbenchShell({
 }: WorkbenchShellProps) {
   const { t } = useTranslation()
   const isMobile = useIsMobile()
-  // 状态栏展示当前配置的实际模型名（此前被硬编码为 "DeepSeek"，与实际模型无关）
-  const { data: layeredSettings } = useQuery({ queryKey: ['settings'], queryFn: fetchSettings, staleTime: 60_000 })
-  const modelName = layeredSettings?.effective?.openai_model?.trim() || ''
+  const setCommandOpen = useWorkspaceStore((state) => state.setCommandOpen)
   const [activityOrders, setActivityOrders] = useState<Record<ActivityOrderScope, ActivityItemId[]>>(readStoredActivityOrders)
+  const [activityBarWidth, setActivityBarWidth] = useState(readStoredActivityBarWidth)
   const [automationInboxUnread, setAutomationInboxUnread] = useState(0)
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -111,6 +130,10 @@ export function WorkbenchShell({
     cleanupLegacyActivityOrderStorage()
     setActivityOrders(readStoredActivityOrders())
   }, [])
+
+  useEffect(() => {
+    storeActivityBarWidth(activityBarWidth)
+  }, [activityBarWidth])
 
   useEffect(() => {
     let cancelled = false
@@ -356,15 +379,53 @@ export function WorkbenchShell({
     storeActivityOrder(activityOrderScope, nextOrder)
   }
 
+  const resizeActivityBar = (nextWidth: number) => {
+    setActivityBarWidth(clampActivityBarWidth(nextWidth))
+  }
+
+  const handleActivityBarResizePointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
+    if (!activityBarExpanded) return
+    event.preventDefault()
+    const startX = event.clientX
+    const startWidth = activityBarWidth
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      resizeActivityBar(startWidth + moveEvent.clientX - startX)
+    }
+    const handlePointerUp = () => {
+      window.removeEventListener('pointermove', handlePointerMove)
+      window.removeEventListener('pointerup', handlePointerUp)
+    }
+    window.addEventListener('pointermove', handlePointerMove)
+    window.addEventListener('pointerup', handlePointerUp, { once: true })
+  }
+
+  const handleActivityBarResizeKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!activityBarExpanded) return
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault()
+      resizeActivityBar(activityBarWidth - ACTIVITY_BAR_WIDTH_KEYBOARD_STEP)
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault()
+      resizeActivityBar(activityBarWidth + ACTIVITY_BAR_WIDTH_KEYBOARD_STEP)
+    } else if (event.key === 'Home') {
+      event.preventDefault()
+      resizeActivityBar(ACTIVITY_BAR_MIN_WIDTH)
+    } else if (event.key === 'End') {
+      event.preventDefault()
+      resizeActivityBar(ACTIVITY_BAR_MAX_WIDTH)
+    }
+  }
+
   const topBar = (
     <header className="nova-topbar grid h-10 shrink-0 grid-cols-[auto_1fr_auto] items-center border-b px-3 text-xs">
       <div className="flex items-center gap-3">
-        <div className="font-semibold text-[var(--nova-text)]">Nova</div>
+        <NovaBrandIcon />
         <LayoutGroup id="workbench-mode-switch">
         <div className="flex h-7 items-center rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] p-0.5" aria-label={t('workbench.modeSwitch')}>
           <button
             type="button"
             onClick={() => switchNavigationMode('ide')}
+            data-onboarding-anchor="mode-ide"
             className={`relative overflow-hidden rounded-[6px] px-2.5 py-0.5 text-[11px] transition-colors ${navigationMode === 'ide' ? 'bg-[var(--nova-active)] text-[var(--nova-text)]' : 'text-[var(--nova-text-faint)] hover:text-[var(--nova-text-muted)]'}`}
           >
             {navigationMode === 'ide' && <motion.span layoutId="workbench-mode-active" className="absolute inset-0 rounded-[6px] bg-[var(--nova-active)]" transition={novaSpring} />}
@@ -373,6 +434,7 @@ export function WorkbenchShell({
           <button
             type="button"
             onClick={() => switchNavigationMode('interactive')}
+            data-onboarding-anchor="mode-interactive"
             className={`relative overflow-hidden rounded-[6px] px-2.5 py-0.5 text-[11px] transition-colors ${navigationMode === 'interactive' ? 'bg-[var(--nova-active)] text-[var(--nova-text)]' : 'text-[var(--nova-text-faint)] hover:text-[var(--nova-text-muted)]'}`}
           >
             {navigationMode === 'interactive' && <motion.span layoutId="workbench-mode-active" className="absolute inset-0 rounded-[6px] bg-[var(--nova-active)]" transition={novaSpring} />}
@@ -386,6 +448,7 @@ export function WorkbenchShell({
         <span className="truncate font-medium text-[var(--nova-text)]">{currentBookName}</span>
       </div>
       <div className="nova-ui-compact flex items-center justify-end gap-2 text-[var(--nova-text-faint)]">
+        <MessageCenterButton className="h-7 w-7" />
         <span>{modeLabel}</span>
       </div>
     </header>
@@ -394,7 +457,10 @@ export function WorkbenchShell({
   const activityBar = (
     <LayoutGroup id="workbench-activity-bar">
     <DndContext key={activityOrderScope} sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleActivityDragEnd}>
-    <aside className={`nova-activity-bar flex shrink-0 flex-col gap-2 border-r p-3 transition-[width] duration-500 ease-[var(--nova-ease)] ${activityBarExpanded ? 'is-expanded w-48 items-stretch' : 'w-16 items-center'}`}>
+    <aside
+      className={`nova-activity-bar relative flex shrink-0 flex-col gap-2 border-r p-3 transition-[width] duration-500 ease-[var(--nova-ease)] ${activityBarExpanded ? 'is-expanded items-stretch' : 'items-center'}`}
+      style={{ width: activityBarExpanded ? activityBarWidth : ACTIVITY_BAR_COLLAPSED_WIDTH }}
+    >
       <SortableContext key={activityOrderScope} items={activityItems.map((item) => toSortableActivityId(activityOrderScope, item.id))} strategy={verticalListSortingStrategy}>
         {activityItems.map((item) => (
           <SortableActivityButton
@@ -434,11 +500,26 @@ export function WorkbenchShell({
           label={t('workbench.activity.settings')}
           onClick={onToggleSettings}
           active={settingsOpen}
+          data-onboarding-anchor="activity-settings"
           className="nova-icon-button"
         >
           <Settings className="h-4 w-4" />
         </ActivityButton>
       </div>
+      {activityBarExpanded && (
+        <div
+          role="separator"
+          tabIndex={0}
+          aria-label={t('layout.resize.activityBar')}
+          aria-orientation="vertical"
+          aria-valuemin={ACTIVITY_BAR_MIN_WIDTH}
+          aria-valuemax={ACTIVITY_BAR_MAX_WIDTH}
+          aria-valuenow={Math.round(activityBarWidth)}
+          className="nova-activity-bar-resize-handle"
+          onPointerDown={handleActivityBarResizePointerDown}
+          onKeyDown={handleActivityBarResizeKeyDown}
+        />
+      )}
     </aside>
     </DndContext>
     </LayoutGroup>
@@ -446,14 +527,14 @@ export function WorkbenchShell({
 
   const statusBar = (
     <div className="nova-statusbar nova-topbar flex h-6 shrink-0 items-center border-t px-3">
-      <span>Nova v{appVersion}</span>
+      <span>Denova v{appVersion}</span>
       {mode === 'ide' && summary && (
         <span className="ml-4">{t('workbench.status.summary', { title: summary.title || t('workbench.untitled'), chapters: formatNumber(summary.chapter_count), words: formatNumber(summary.total_words) })}</span>
       )}
       {mode === 'ide' && currentChapter && (
         <span className="ml-4">{t('workbench.status.currentChapter', { title: currentChapter.display_title, words: formatNumber(currentChapter.words), status: currentChapter.status })}</span>
       )}
-      <span className="ml-auto">{isStreaming ? t('workbench.status.streaming') : t('workbench.status.idle')}{modelName ? ` · ${modelName}` : ''}</span>
+      {isStreaming && <span className="ml-auto">{t('workbench.status.streaming')}</span>}
     </div>
   )
 
@@ -463,17 +544,29 @@ export function WorkbenchShell({
       <header className="nova-mobile-topbar nova-topbar shrink-0 border-b border-[var(--nova-border)] py-2 pl-3 pr-3" title={workspace || currentBookName}>
         <div className="flex min-w-0 items-center justify-between gap-2">
           <div className="flex min-w-0 flex-1 items-center gap-2">
-            <div className="shrink-0 font-semibold text-[var(--nova-text)]">Nova</div>
+            <NovaBrandIcon />
             <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--nova-text-faint)]">
               <BookOpen className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-muted)]" />
               <span className="min-w-0 truncate font-medium text-[var(--nova-text-muted)]">{currentBookName}</span>
             </div>
           </div>
-          <LayoutGroup id="workbench-mobile-mode-switch">
+          <div className="flex shrink-0 items-center gap-1.5">
+            <MessageCenterButton className="h-8 w-8" />
+            <button
+              type="button"
+              onClick={() => setCommandOpen(true)}
+              className="nova-icon-button flex h-8 w-8 items-center justify-center rounded-[var(--nova-radius)] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]"
+              aria-label={t('command.openButton')}
+              title={t('command.openButton')}
+            >
+              <Search className="h-4 w-4" />
+            </button>
+            <LayoutGroup id="workbench-mobile-mode-switch">
             <div className="flex h-8 shrink-0 items-center rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] p-0.5" aria-label={t('workbench.modeSwitch')}>
               <button
                 type="button"
                 onClick={() => switchNavigationMode('ide')}
+                data-onboarding-anchor="mode-ide"
                 className={`relative min-w-0 overflow-hidden rounded-[6px] px-2 py-1 text-[11px] transition-colors ${navigationMode === 'ide' ? 'bg-[var(--nova-active)] text-[var(--nova-text)]' : 'text-[var(--nova-text-faint)] hover:text-[var(--nova-text-muted)]'}`}
               >
                 {navigationMode === 'ide' && <motion.span layoutId="workbench-mobile-mode-active" className="absolute inset-0 rounded-[6px] bg-[var(--nova-active)]" transition={novaSpring} />}
@@ -482,6 +575,7 @@ export function WorkbenchShell({
               <button
                 type="button"
                 onClick={() => switchNavigationMode('interactive')}
+                data-onboarding-anchor="mode-interactive"
                 className={`relative min-w-0 overflow-hidden rounded-[6px] px-2 py-1 text-[11px] transition-colors ${navigationMode === 'interactive' ? 'bg-[var(--nova-active)] text-[var(--nova-text)]' : 'text-[var(--nova-text-faint)] hover:text-[var(--nova-text-muted)]'}`}
               >
                 {navigationMode === 'interactive' && <motion.span layoutId="workbench-mobile-mode-active" className="absolute inset-0 rounded-[6px] bg-[var(--nova-active)]" transition={novaSpring} />}
@@ -489,6 +583,7 @@ export function WorkbenchShell({
               </button>
             </div>
           </LayoutGroup>
+          </div>
         </div>
         {updateNotice && (
           <div className="mt-2 flex justify-end">
@@ -502,39 +597,66 @@ export function WorkbenchShell({
         )}
       </header>
     )
-    const mobileActivityItems: MobileNavItem[] = activityItems.map((item) => ({
-      id: item.id,
-      label: item.label,
-      icon: item.icon,
-      active: item.active,
-      onClick: item.onClick,
-    }))
-    const mobileProjectDrawer = mode === 'ide' && !fullWorkspacePanelVisible && sidebar ? {
+    const mobileActivityItems: MobileNavItem[] = [
+      ...(navigationMode === 'interactive' ? interactiveActivityItems : ideActivityItems),
+      ...sharedActivityItems,
+    ]
+      .filter((item) => item.id !== 'writing')
+      .map((item) => ({
+        id: item.id,
+        label: item.label,
+        icon: item.icon,
+        active: item.active,
+        onClick: item.onClick,
+      }))
+    const mobileProjectDrawer = sidebar ? {
       id: 'project' as const,
       title: t('workbench.mobile.project'),
       icon: <PanelLeft className="h-4 w-4" />,
       side: 'left' as const,
       content: sidebar,
     } : undefined
-    const mobileAgentDrawer = mode === 'ide' && !fullWorkspacePanelVisible ? {
-      id: 'agent' as const,
-      title: t('workbench.mobile.agent'),
-      icon: <Bot className="h-4 w-4" />,
-      side: 'right' as const,
-      content: rightPanelContent,
-      onOpen: () => onSetRightPanel('ai'),
-      onClose: () => {
-        if (rightPanel === 'ai') onSetRightPanel(null)
-      },
-    } : undefined
+    // Direction B: editor + Agent in a vertical split (Agent docked at bottom,
+    // always visible) instead of Agent hidden in a right drawer. Only when the
+    // Agent panel is active and no full-workspace panel covers the screen.
+    const mobileAgentDocked = mode === 'ide' && !fullWorkspacePanelVisible && Boolean(rightPanelContent)
+    const mobileMain = (
+      <div className="relative flex h-full min-h-0 flex-col">
+        {mobileAgentDocked ? (
+          <Group
+            orientation="vertical"
+            resizeTargetMinimumSize={{ coarse: 16, fine: 1 }}
+            className="flex min-h-0 flex-1 flex-col"
+          >
+            <Panel id="nova-mobile-editor" minSize="30%" className="min-h-0">
+              {main}
+            </Panel>
+            <Separator aria-label={t('layout.resize.bottom')} className="nova-resize-handle h-2.5 shrink-0 cursor-row-resize border-y border-[var(--nova-border)] bg-[var(--nova-surface-2)] transition-colors" />
+            <Panel id="nova-mobile-agent" defaultSize="38%" minSize="20%" className="min-h-0">
+              {rightPanelContent}
+            </Panel>
+          </Group>
+        ) : main}
+        {/* Floating button to reopen the Agent dock when it's hidden */}
+        {mode === 'ide' && !fullWorkspacePanelVisible && !mobileAgentDocked && (
+          <button
+            type="button"
+            className="absolute bottom-3 right-3 z-30 flex h-12 w-12 items-center justify-center rounded-full border border-[var(--nova-border)] bg-[var(--nova-active)] text-[var(--nova-text)] shadow-lg hover:bg-[var(--nova-hover)]"
+            onClick={() => onSetRightPanel('ai')}
+            aria-label={t('chat.agent')}
+          >
+            <Bot className="h-5 w-5" />
+          </button>
+        )}
+      </div>
+    )
 
     return (
       <WorkspaceMobileLayout
         topBar={mobileTopBar}
-        main={main}
+        main={mobileMain}
         activityItems={mobileActivityItems}
         projectDrawer={mobileProjectDrawer}
-        agentDrawer={mobileAgentDrawer}
         settingsItem={{
           id: 'settings',
           label: t('workbench.activity.settings'),
@@ -559,6 +681,7 @@ export function WorkbenchShell({
       main={main}
       rightPanel={rightPanelContent}
       rightPanelVisible={mode === 'ide' && !fullWorkspacePanelVisible && Boolean(rightPanelContent)}
+      rightPanelWide={rightPanelWide && mode === 'ide' && rightPanel === 'ai' && !fullWorkspacePanelVisible}
       statusBar={statusBar}
     />
   )
@@ -588,6 +711,7 @@ function SortableActivityButton({
     <div ref={setNodeRef} style={style} className={isDragging ? 'relative z-20 opacity-80' : undefined}>
       <ActivityButton
         data-activity-id={activityId}
+        data-onboarding-anchor={`activity-${activityId}`}
         {...(dragDisabled ? {} : attributes)}
         {...(dragDisabled ? {} : listeners)}
         {...props}
@@ -614,7 +738,7 @@ function ActivityButton({
     <TooltipIconButton
       label={label}
       showTooltip={!expanded}
-      className={`${className || ''} relative overflow-hidden ${expanded ? 'gap-3 px-3' : ''} ${active ? 'is-active' : ''}`}
+      className={`${className || ''} relative overflow-hidden ${expanded ? 'w-full gap-3 px-3' : ''} ${active ? 'is-active' : ''}`}
       {...props}
     >
       {active && <motion.span layoutId="workbench-activity-active" className="absolute inset-0 rounded-[var(--nova-radius)] bg-[var(--nova-active)]" transition={novaSpring} />}
@@ -627,7 +751,7 @@ function ActivityButton({
             animate={{ opacity: 1, x: 0 }}
             exit={{ opacity: 0, x: -4 }}
             transition={{ duration: 0.16 }}
-            className="relative z-10 min-w-0 truncate text-xs font-medium"
+            className="relative z-10 min-w-0 truncate text-left text-xs font-medium"
           >
             {label}
           </motion.span>
@@ -743,6 +867,24 @@ function storeActivityOrder(scope: ActivityOrderScope, order: ActivityItemId[]) 
   if (typeof window === 'undefined') return
   window.localStorage.setItem(ACTIVITY_ORDER_STORAGE_KEYS[scope], JSON.stringify(order))
   cleanupLegacyActivityOrderStorage()
+}
+
+export function readStoredActivityBarWidth() {
+  if (typeof window === 'undefined') return ACTIVITY_BAR_DEFAULT_WIDTH
+  const raw = window.localStorage.getItem(ACTIVITY_BAR_WIDTH_STORAGE_KEY)
+  if (raw === null) return ACTIVITY_BAR_DEFAULT_WIDTH
+  const value = Number(raw)
+  if (value === ACTIVITY_BAR_LEGACY_DEFAULT_WIDTH) return ACTIVITY_BAR_DEFAULT_WIDTH
+  return Number.isFinite(value) ? clampActivityBarWidth(value) : ACTIVITY_BAR_DEFAULT_WIDTH
+}
+
+function storeActivityBarWidth(width: number) {
+  if (typeof window === 'undefined') return
+  window.localStorage.setItem(ACTIVITY_BAR_WIDTH_STORAGE_KEY, String(clampActivityBarWidth(width)))
+}
+
+function clampActivityBarWidth(width: number) {
+  return Math.min(ACTIVITY_BAR_MAX_WIDTH, Math.max(ACTIVITY_BAR_MIN_WIDTH, Math.round(width)))
 }
 
 function cleanupLegacyActivityOrderStorage() {

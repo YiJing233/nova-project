@@ -22,6 +22,7 @@ const (
 	displayToolArgsPersistBytes  = 4 * 1024
 	displayToolArgsPreviewBytes  = 32 * 1024
 	displayToolArgsTruncatedHint = "\n...\n[session preview truncated / 会话预览已截断]"
+	maxTokenUsageDisplayEvents   = 10
 	historyTypeMessage           = "message"
 	historyTypeDisplay           = "display"
 	historyTypeClear             = "clear"
@@ -35,16 +36,17 @@ const (
 
 // HistoryEntry 表示用于前端展示的会话历史记录。
 type HistoryEntry struct {
-	Type      string          `json:"type"`
-	ID        string          `json:"id,omitempty"`
-	Role      string          `json:"role,omitempty"`
-	Content   string          `json:"content,omitempty"`
-	Name      string          `json:"name,omitempty"`
-	Args      string          `json:"args,omitempty"`
-	Status    string          `json:"status,omitempty"`
-	Result    string          `json:"result,omitempty"`
-	Message   *schema.Message `json:"-"`
-	CreatedAt time.Time       `json:"created_at,omitempty"`
+	Type         string               `json:"type"`
+	ID           string               `json:"id,omitempty"`
+	Role         string               `json:"role,omitempty"`
+	Content      string               `json:"content,omitempty"`
+	Name         string               `json:"name,omitempty"`
+	Args         string               `json:"args,omitempty"`
+	Status       string               `json:"status,omitempty"`
+	Result       string               `json:"result,omitempty"`
+	Illustration *ChapterIllustration `json:"illustration,omitempty"`
+	Message      *schema.Message      `json:"-"`
+	CreatedAt    time.Time            `json:"created_at,omitempty"`
 
 	RunID                string           `json:"run_id,omitempty"`
 	AgentKind            string           `json:"agent_kind,omitempty"`
@@ -78,16 +80,23 @@ type historyRecord struct {
 	displayArgsPersistedBytes int
 }
 
+type messageRecord struct {
+	Type      string         `json:"type"`
+	CreatedAt time.Time      `json:"created_at,omitempty"`
+	Message   schema.Message `json:"message"`
+}
+
 // DisplayEvent 表示只用于前端展示的非上下文事件，例如 thinking 和工具卡片。
 type DisplayEvent struct {
-	ID        string    `json:"id,omitempty"`
-	Role      string    `json:"role"`
-	Content   string    `json:"content,omitempty"`
-	Name      string    `json:"name,omitempty"`
-	Args      string    `json:"args,omitempty"`
-	Status    string    `json:"status,omitempty"`
-	Result    string    `json:"result,omitempty"`
-	CreatedAt time.Time `json:"created_at,omitempty"`
+	ID           string               `json:"id,omitempty"`
+	Role         string               `json:"role"`
+	Content      string               `json:"content,omitempty"`
+	Name         string               `json:"name,omitempty"`
+	Args         string               `json:"args,omitempty"`
+	Status       string               `json:"status,omitempty"`
+	Result       string               `json:"result,omitempty"`
+	Illustration *ChapterIllustration `json:"illustration,omitempty"`
+	CreatedAt    time.Time            `json:"created_at,omitempty"`
 
 	RunID                string           `json:"run_id,omitempty"`
 	AgentKind            string           `json:"agent_kind,omitempty"`
@@ -107,6 +116,25 @@ type DisplayEvent struct {
 	ModelCalls           int              `json:"model_calls,omitempty"`
 	GeneratedBytes       int              `json:"generated_bytes,omitempty"`
 	UsageCalls           []TokenUsageCall `json:"usage_calls,omitempty"`
+}
+
+type ChapterIllustration struct {
+	Schema        string `json:"schema"`
+	ChapterPath   string `json:"chapter_path"`
+	ImagePath     string `json:"image_path"`
+	MetaPath      string `json:"meta_path"`
+	Markdown      string `json:"markdown"`
+	AltText       string `json:"alt_text"`
+	ProfileID     string `json:"profile_id"`
+	Provider      string `json:"provider"`
+	Model         string `json:"model"`
+	Size          string `json:"size,omitempty"`
+	Quality       string `json:"quality,omitempty"`
+	OutputFormat  string `json:"output_format,omitempty"`
+	CreatedAt     string `json:"created_at,omitempty"`
+	RevisedPrompt string `json:"revised_prompt,omitempty"`
+	MIMEType      string `json:"mime_type,omitempty"`
+	SizeBytes     int    `json:"size_bytes,omitempty"`
 }
 
 type TokenUsageCall struct {
@@ -189,9 +217,10 @@ func (s *Session) Append(msg *schema.Message) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	now := time.Now().UTC()
 	s.messages = append(s.messages, msg)
-	s.records = append(s.records, historyRecord{kind: historyTypeMessage, message: msg})
-	s.touchLocked()
+	s.records = append(s.records, historyRecord{kind: historyTypeMessage, message: msg, createdAt: now})
+	s.UpdatedAt = now
 	if s.title == defaultSessionTitle && msg.Role == schema.User && strings.TrimSpace(msg.Content) != "" {
 		s.title = deriveTitle(msg.Content)
 	}
@@ -216,8 +245,45 @@ func (s *Session) AppendDisplayEvent(event DisplayEvent) error {
 		createdAt:                 event.CreatedAt,
 		displayArgsPersistedBytes: len(event.Args),
 	})
+	if event.Role == "token_usage" {
+		s.trimTokenUsageDisplayEventsLocked(event.AgentKind)
+	}
 	s.UpdatedAt = event.CreatedAt
 	return s.persistLocked()
+}
+
+func (s *Session) trimTokenUsageDisplayEventsLocked(agentKind string) {
+	s.records = trimTokenUsageDisplayEvents(s.records, agentKind)
+}
+
+func trimTokenUsageDisplayEvents(records []historyRecord, agentKind string) []historyRecord {
+	target := strings.TrimSpace(agentKind)
+	counts := make(map[string]int)
+	kept := records
+	for i := len(kept) - 1; i >= 0; i-- {
+		record := kept[i]
+		if record.kind != historyTypeDisplay || record.display == nil || record.display.Role != "token_usage" {
+			continue
+		}
+		key := tokenUsageAgentKey(record.display.AgentKind)
+		if target != "" && key != tokenUsageAgentKey(target) {
+			continue
+		}
+		counts[key]++
+		if counts[key] <= maxTokenUsageDisplayEvents {
+			continue
+		}
+		kept = append(kept[:i], kept[i+1:]...)
+	}
+	return kept
+}
+
+func tokenUsageAgentKey(agentKind string) string {
+	agentKind = strings.TrimSpace(agentKind)
+	if agentKind == "" {
+		return "__unknown__"
+	}
+	return agentKind
 }
 
 // UpdateDisplayToolStatus 更新已持久化工具卡片的执行状态，不保存工具参数或输出。
@@ -323,6 +389,23 @@ func (s *Session) UpdateDisplayToolResult(id, name, status, result string) error
 	if index := findDisplayToolRecordIndex(s.records, id, name); index >= 0 {
 		s.records[index].display.Status = status
 		s.records[index].display.Result = result
+		s.UpdatedAt = time.Now().UTC()
+		return s.persistLocked()
+	}
+	return nil
+}
+
+func (s *Session) UpdateDisplayToolIllustration(id, name string, illustration *ChapterIllustration) error {
+	if illustration == nil {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	id = strings.TrimSpace(id)
+	name = strings.TrimSpace(name)
+	if index := findDisplayToolRecordIndex(s.records, id, name); index >= 0 {
+		s.records[index].display.Illustration = cloneChapterIllustration(illustration)
 		s.UpdatedAt = time.Now().UTC()
 		return s.persistLocked()
 	}
@@ -636,10 +719,11 @@ func (s *Session) History() []HistoryEntry {
 				continue
 			}
 			result = append(result, HistoryEntry{
-				Type:    historyTypeMessage,
-				Role:    string(record.message.Role),
-				Content: record.message.Content,
-				Message: record.message,
+				Type:      historyTypeMessage,
+				Role:      string(record.message.Role),
+				Content:   record.message.Content,
+				Message:   record.message,
+				CreatedAt: record.createdAt,
 			})
 		case historyTypeDisplay:
 			if record.display == nil {
@@ -654,6 +738,7 @@ func (s *Session) History() []HistoryEntry {
 				Args:                 record.display.Args,
 				Status:               record.display.Status,
 				Result:               record.display.Result,
+				Illustration:         cloneChapterIllustration(record.display.Illustration),
 				CreatedAt:            record.display.CreatedAt,
 				RunID:                record.display.RunID,
 				AgentKind:            record.display.AgentKind,
@@ -690,6 +775,14 @@ func cloneTokenUsageCalls(calls []TokenUsageCall) []TokenUsageCall {
 		result[i].AfterTools = append([]string(nil), result[i].AfterTools...)
 	}
 	return result
+}
+
+func cloneChapterIllustration(value *ChapterIllustration) *ChapterIllustration {
+	if value == nil {
+		return nil
+	}
+	clone := *value
+	return &clone
 }
 
 // Clear 兼容旧调用语义：追加 clear 标记，不物理删除消息。
@@ -787,7 +880,8 @@ func (s *Session) persistLocked() error {
 			if record.message == nil {
 				continue
 			}
-			if err := writeJSONLine(&sb, record.message); err != nil {
+			message := messageRecord{Type: historyTypeMessage, CreatedAt: record.createdAt, Message: *record.message}
+			if err := writeJSONLine(&sb, message); err != nil {
 				return err
 			}
 		}
@@ -914,7 +1008,7 @@ func (s *Store) List(activeID string) ([]SessionMeta, error) {
 	return result, nil
 }
 
-// ListByPrefix 返回 ID 匹配指定前缀的会话摘要，用于互动模式按子模式筛选会话。
+// ListByPrefix 返回 ID 匹配指定前缀的会话摘要，用于游戏模式按子模式筛选会话。
 func (s *Store) ListByPrefix(prefix string) ([]SessionMeta, error) {
 	if err := validateSessionID(prefix); err != nil {
 		return nil, err
@@ -1217,6 +1311,7 @@ func loadSession(filePath string) (*Session, error) {
 	if sess.UpdatedAt.IsZero() {
 		sess.UpdatedAt = sess.CreatedAt
 	}
+	sess.trimTokenUsageDisplayEventsLocked("")
 	return sess, nil
 }
 
@@ -1314,7 +1409,31 @@ func appendRecordLine(sess *Session, line string) error {
 		}
 		return nil
 	}
+	if typed.Type == historyTypeMessage {
+		return appendMessageRecordLine(sess, line)
+	}
 	return appendMessageLine(sess, line)
+}
+
+func appendMessageRecordLine(sess *Session, line string) error {
+	var record messageRecord
+	if err := json.Unmarshal([]byte(line), &record); err != nil {
+		return err
+	}
+	if record.Message.Role == "" && record.Message.Content == "" {
+		return nil
+	}
+	createdAt := record.CreatedAt
+	if createdAt.IsZero() {
+		createdAt = nextLegacyMessageCreatedAt(sess)
+	}
+	msg := record.Message
+	sess.messages = append(sess.messages, &msg)
+	sess.records = append(sess.records, historyRecord{kind: historyTypeMessage, message: &msg, createdAt: createdAt})
+	if createdAt.After(sess.UpdatedAt) {
+		sess.UpdatedAt = createdAt
+	}
+	return nil
 }
 
 func appendMessageLine(sess *Session, line string) error {
@@ -1325,9 +1444,24 @@ func appendMessageLine(sess *Session, line string) error {
 	if msg.Role == "" && msg.Content == "" {
 		return nil
 	}
+	createdAt := nextLegacyMessageCreatedAt(sess)
 	sess.messages = append(sess.messages, &msg)
-	sess.records = append(sess.records, historyRecord{kind: historyTypeMessage, message: &msg})
+	sess.records = append(sess.records, historyRecord{kind: historyTypeMessage, message: &msg, createdAt: createdAt})
+	if createdAt.After(sess.UpdatedAt) {
+		sess.UpdatedAt = createdAt
+	}
 	return nil
+}
+
+func nextLegacyMessageCreatedAt(sess *Session) time.Time {
+	base := sess.UpdatedAt
+	if base.IsZero() {
+		base = sess.CreatedAt
+	}
+	if base.IsZero() {
+		base = time.Now().UTC()
+	}
+	return base.Add(time.Duration(len(sess.records)+1) * time.Millisecond)
 }
 
 func (s *Session) nextCompactionEpochLocked(agentKind string) int {

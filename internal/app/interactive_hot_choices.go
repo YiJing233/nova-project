@@ -6,11 +6,11 @@ import (
 	"log"
 	"strings"
 
-	"nova/config"
-	"nova/internal/agent"
-	"nova/internal/book"
-	"nova/internal/interactive"
-	"nova/internal/prompts"
+	"denova/config"
+	"denova/internal/agent"
+	"denova/internal/book"
+	"denova/internal/interactive"
+	"denova/internal/prompts"
 )
 
 type InteractiveHotChoicesResult struct {
@@ -36,7 +36,7 @@ func (s *InteractiveAppService) GenerateInteractiveHotChoices(ctx context.Contex
 
 	runtimeCfg := *cfg
 	runtimeCfg.Workspace = workspace
-	if layered, err := config.LoadLayered(runtimeCfg.NovaDir, workspace); err == nil {
+	if layered, err := config.LoadLayeredWithStartupConfig(runtimeCfg.NovaDir, workspace); err == nil {
 		applyLayeredSettingsToConfig(&runtimeCfg, layered)
 	} else {
 		log.Printf("[interactive-hot-choices] load settings failed workspace=%s err=%v", workspace, err)

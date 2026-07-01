@@ -3,8 +3,8 @@ package app
 import (
 	"context"
 
-	"nova/internal/agent"
-	"nova/internal/update"
+	"denova/internal/agent"
+	"denova/internal/update"
 )
 
 func (a *App) CheckUpdate(ctx context.Context) (update.CheckResult, error) {
@@ -13,6 +13,10 @@ func (a *App) CheckUpdate(ctx context.Context) (update.CheckResult, error) {
 
 func (a *App) InstallUpdate(ctx context.Context) (update.InstallResult, error) {
 	return update.NewService().Install(ctx)
+}
+
+func (a *App) ApplyUpdate(ctx context.Context) (update.ApplyResult, error) {
+	return update.NewService().Apply(ctx)
 }
 
 func (a *App) StartInstallUpdateTask() *Task {

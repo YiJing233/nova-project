@@ -395,6 +395,78 @@ func TestSnapshotOrdersTokenUsageEventsByCreatedAt(t *testing.T) {
 	}
 }
 
+func TestAppendTokenUsageEventCapsRecentEventsPerBranchAndAgent(t *testing.T) {
+	store := NewStore(t.TempDir())
+	story, err := store.CreateStory(CreateStoryRequest{
+		Title:         "用量裁剪",
+		StoryTellerID: "classic",
+	})
+	if err != nil {
+		t.Fatalf("CreateStory failed: %v", err)
+	}
+	turn, err := store.AppendTurn(story.ID, AppendTurnRequest{
+		BranchID:  "main",
+		User:      "开始",
+		Narrative: "故事开始。",
+	})
+	if err != nil {
+		t.Fatalf("AppendTurn failed: %v", err)
+	}
+	branch, err := store.CreateBranch(story.ID, CreateBranchRequest{ParentEventID: turn.ID, Title: "支线"})
+	if err != nil {
+		t.Fatalf("CreateBranch failed: %v", err)
+	}
+
+	for i := 1; i <= 12; i++ {
+		err := store.AppendTokenUsageEvent(story.ID, TokenUsageEvent{
+			ID:           fmt.Sprintf("usage-%02d", i),
+			BranchID:     "main",
+			CreatedAt:    fmt.Sprintf("2026-06-22T10:%02d:00Z", i),
+			RunID:        fmt.Sprintf("run-%02d", i),
+			AgentKind:    "interactive_story",
+			PromptTokens: i,
+			TotalTokens:  i,
+			ModelCalls:   1,
+		})
+		if err != nil {
+			t.Fatalf("AppendTokenUsageEvent main %d failed: %v", i, err)
+		}
+	}
+	for i := 1; i <= 2; i++ {
+		err := store.AppendTokenUsageEvent(story.ID, TokenUsageEvent{
+			ID:           fmt.Sprintf("branch-usage-%02d", i),
+			BranchID:     branch.ID,
+			CreatedAt:    fmt.Sprintf("2026-06-22T11:%02d:00Z", i),
+			RunID:        fmt.Sprintf("branch-run-%02d", i),
+			AgentKind:    "interactive_story",
+			PromptTokens: i,
+			TotalTokens:  i,
+			ModelCalls:   1,
+		})
+		if err != nil {
+			t.Fatalf("AppendTokenUsageEvent branch %d failed: %v", i, err)
+		}
+	}
+
+	snapshot, err := store.Snapshot(story.ID, "main")
+	if err != nil {
+		t.Fatalf("Snapshot main failed: %v", err)
+	}
+	if len(snapshot.TokenUsageEvents) != 10 {
+		t.Fatalf("main branch should keep latest 10 usage events: %#v", snapshot.TokenUsageEvents)
+	}
+	if snapshot.TokenUsageEvents[0].RunID != "run-03" || snapshot.TokenUsageEvents[9].RunID != "run-12" {
+		t.Fatalf("main branch usage should keep newest records by created_at: %#v", snapshot.TokenUsageEvents)
+	}
+	branchSnapshot, err := store.Snapshot(story.ID, branch.ID)
+	if err != nil {
+		t.Fatalf("Snapshot branch failed: %v", err)
+	}
+	if len(branchSnapshot.TokenUsageEvents) != 2 {
+		t.Fatalf("branch usage should be capped independently: %#v", branchSnapshot.TokenUsageEvents)
+	}
+}
+
 func TestAppendTurnWithStatePersistsTurnAndDeltaAtomically(t *testing.T) {
 	store := NewStore(t.TempDir())
 	story, err := store.CreateStory(CreateStoryRequest{
@@ -802,6 +874,63 @@ func TestBranchSnapshotFollowsParentChain(t *testing.T) {
 	}
 }
 
+func TestAppendTurnDisplayEventAllowsAncestorTurnOnCurrentBranchPath(t *testing.T) {
+	store := NewStore(t.TempDir())
+	story, err := store.CreateStory(CreateStoryRequest{Title: "祖先回合展示事件", StoryTellerID: "classic"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := store.AppendTurn(story.ID, AppendTurnRequest{BranchID: "main", User: "进入密林", Narrative: "树影吞没了来路。"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := store.AppendTurn(story.ID, AppendTurnRequest{BranchID: "main", User: "继续深入", Narrative: "前方出现断桥。"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch, err := store.CreateBranch(story.ID, CreateBranchRequest{ParentEventID: first.ID, Title: "折返路线"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	branchTurn, err := store.AppendTurn(story.ID, AppendTurnRequest{BranchID: branch.ID, User: "折返回营地", Narrative: "你在旧营地发现脚印。"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.AppendTurnDisplayEvent(story.ID, branch.ID, first.ID, DisplayEvent{
+		ID:     "interactive-image-ancestor",
+		Role:   "tool_call",
+		Name:   "generate_interactive_image",
+		Status: "success",
+		Result: `{"schema":"interactive_image.v1","image_path":"assets/interactive/images/ancestor.png"}`,
+	}); err != nil {
+		t.Fatalf("display event should append to current branch ancestor turn: %v", err)
+	}
+	if err := store.AppendTurnDisplayEvent(story.ID, branch.ID, second.ID, DisplayEvent{
+		ID:     "interactive-image-sibling",
+		Role:   "tool_call",
+		Name:   "generate_interactive_image",
+		Status: "success",
+	}); err == nil || !strings.Contains(err.Error(), "不属于当前分支路径") {
+		t.Fatalf("display event should reject sibling branch turn, got err=%v", err)
+	}
+
+	snapshot, err := store.Snapshot(story.ID, branch.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Turns) != 2 || snapshot.Turns[0].ID != first.ID || snapshot.Turns[1].ID != branchTurn.ID {
+		t.Fatalf("unexpected branch path after display event append: %#v", snapshot.Turns)
+	}
+	if snapshot.CurrentTurn == nil || snapshot.CurrentTurn.ID != branchTurn.ID {
+		t.Fatalf("display event append should not move branch head: %#v", snapshot.CurrentTurn)
+	}
+	events := snapshot.Turns[0].DisplayEvents
+	if len(events) != 1 || events[0].ID != "interactive-image-ancestor" || events[0].Status != "success" {
+		t.Fatalf("ancestor display event was not persisted: %#v", events)
+	}
+}
+
 func TestSwitchTurnVersionKeepsLaterCanonicalPath(t *testing.T) {
 	store := NewStore(t.TempDir())
 	story, err := store.CreateStory(CreateStoryRequest{Title: "回合版本", StoryTellerID: "classic"})
@@ -956,6 +1085,17 @@ func TestUpdateAndDeleteStory(t *testing.T) {
 	}
 	if updated.Title != "新标题" || updated.StoryTellerID != "grimdark" || updated.ReplyTargetChars != 900 {
 		t.Fatalf("unexpected updated story: %#v", updated)
+	}
+	if updated.ImageSettings.Mode != StoryImageModeManual || updated.ImageSettings.IntervalTurns != 3 || updated.ImageSettings.PresetID != "game-cg" {
+		t.Fatalf("default image settings = %#v, want manual interval 3", updated.ImageSettings)
+	}
+	imageSettings := StoryImageSettings{Mode: StoryImageModeInterval, IntervalTurns: 5, PresetID: "realistic"}
+	updated, err = store.UpdateStory(story.ID, UpdateStoryRequest{ImageSettings: &imageSettings})
+	if err != nil {
+		t.Fatalf("UpdateStory image settings failed: %v", err)
+	}
+	if updated.ImageSettings.Mode != StoryImageModeInterval || updated.ImageSettings.IntervalTurns != 5 || updated.ImageSettings.PresetID != "realistic" {
+		t.Fatalf("unexpected image settings: %#v", updated.ImageSettings)
 	}
 	invalidTarget := 0
 	if _, err := store.UpdateStory(story.ID, UpdateStoryRequest{ReplyTargetChars: &invalidTarget}); err == nil {

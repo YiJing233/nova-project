@@ -36,7 +36,7 @@ import {
 import { useSkillCommands } from '@/hooks/useSkillCommands'
 import { fetchSettings } from '@/features/settings/api'
 import type { Settings, ModelProfileSettings } from '@/features/settings/types'
-import { modelProfileID, modelProfileLabel } from '@/features/settings/model-profiles'
+import { modelProfileID, modelProfileLabel, modelProfilesWithDefault } from '@/features/settings/model-profiles'
 import { useAutomationRunStream } from './useAutomationRunStream'
 import { InboxPanel } from './AutomationInboxPanel'
 import { TriggerEditor, defaultScheduleTrigger } from './AutomationTriggerEditor'
@@ -57,6 +57,7 @@ export function AutomationsView({ workspace, onClose }: { workspace: string; onC
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [deleteTarget, setDeleteTarget] = useState<{ id: string; name: string; scope: AutomationTask['scope'] } | null>(null)
+  const [runInputAreaHeight, setRunInputAreaHeight] = useState(0)
 
   const load = useCallback(async () => {
     try {
@@ -82,6 +83,7 @@ export function AutomationsView({ workspace, onClose }: { workspace: string; onC
   const { resume: resumeAutomationRun } = runStream
   const running = runStream.isStreaming
   const skillCommands = useSkillCommands({ agentKey: 'automation', workspace, fallbackEnabled: true })
+  const runMessageListBottomPadding = runInputAreaHeight > 0 ? runInputAreaHeight + 20 : undefined
 
   useEffect(() => { void load() }, [load])
 
@@ -298,7 +300,7 @@ export function AutomationsView({ workspace, onClose }: { workspace: string; onC
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-[var(--nova-bg)] text-[var(--nova-text)]">
-      <div className="nova-topbar flex h-10 shrink-0 flex-nowrap items-center gap-2 overflow-x-auto border-b px-3 py-1 text-xs sm:px-4">
+      <div className="nova-topbar flex h-10 shrink-0 flex-nowrap max-md:flex-wrap items-center gap-2 overflow-x-auto max-md:overflow-x-hidden border-b px-3 py-1 text-xs sm:px-4">
         <Clock3 className="h-3.5 w-3.5 text-[var(--nova-text-muted)]" />
         <span className="shrink-0 font-medium">{t('automations.title')}</span>
         <div className="flex shrink-0 gap-1 border-l border-[var(--nova-border)] pl-2 sm:ml-3 sm:pl-3">
@@ -505,6 +507,7 @@ export function AutomationsView({ workspace, onClose }: { workspace: string; onC
                   scrollResetKey={runStream.activeRun?.id || activeId || 'automation'}
                   collapseTraceBeforeAssistant
                   bottomPaddingClassName="pb-36"
+                  bottomPaddingPx={runMessageListBottomPadding}
                 />
               </div>
               {runStream.activeRun ? (
@@ -517,6 +520,7 @@ export function AutomationsView({ workspace, onClose }: { workspace: string; onC
                   agentKey="automation"
                   workspace={workspace}
                   floating
+                  onHeightChange={setRunInputAreaHeight}
                 />
               ) : (
                 <div className="border-t border-[var(--nova-border)] px-4 py-3 text-[11px] text-[var(--nova-text-faint)]">
@@ -710,13 +714,13 @@ function inheritedAutomationProfileLabel(settings: Settings | null, t: (key: str
 
 function modelProfileLabels(settings: Settings | null, t: (key: string, options?: Record<string, unknown>) => string) {
   const profiles = new Map<string, string>()
-  profiles.set('default', settings?.openai_model || t('automations.model.defaultModel'))
   const add = (profile?: ModelProfileSettings) => {
     const id = modelProfileID(profile)
     if (!id) return
     profiles.set(id, modelProfileLabel(profile))
   }
-  ;(settings?.model_profiles ?? []).forEach(add)
+  modelProfilesWithDefault(settings ?? undefined).forEach(add)
+  if (!profiles.has('default')) profiles.set('default', t('automations.model.defaultModel'))
   return profiles
 }
 

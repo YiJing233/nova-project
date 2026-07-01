@@ -1,5 +1,5 @@
 import { fetchAPI, jsonHeaders, parseSSEStream, requestJSON } from './client'
-import type { AgentRunTrace, AgentRunTraceSummary, ChatMessage, ContextAnalysis, SSEEvent, SessionSummary, TextSelection } from './types'
+import type { AgentRunTrace, AgentRunTraceSummary, ChatMessage, ContextAnalysis, IDEContext, SSEEvent, SessionSummary, TextSelection } from './types'
 
 export async function sendMessage(
   message: string,
@@ -10,6 +10,8 @@ export async function sendMessage(
   signal?: AbortSignal,
   planMode?: boolean,
   writingSkill?: string,
+  ideContext?: IDEContext,
+  imagePresetId?: string,
 ): Promise<ReadableStream<SSEEvent>> {
   const res = await fetchAPI('/api/chat', {
     method: 'POST',
@@ -25,8 +27,10 @@ export async function sendMessage(
         end_line: s.endLine,
         content: s.content,
       })),
+      ide_context: normalizeIDEContext(ideContext),
       plan_mode: planMode || false,
       writing_skill: writingSkill || undefined,
+      image_preset_id: imagePresetId || undefined,
     }),
     signal,
   })
@@ -45,6 +49,8 @@ export async function analyzeChatContext(
   textSelections: TextSelection[] = [],
   planMode?: boolean,
   writingSkill?: string,
+  ideContext?: IDEContext,
+  imagePresetId?: string,
 ): Promise<ContextAnalysis> {
   return requestJSON('/api/chat/context-analysis', {
     method: 'POST',
@@ -60,10 +66,20 @@ export async function analyzeChatContext(
         end_line: s.endLine,
         content: s.content,
       })),
+      ide_context: normalizeIDEContext(ideContext),
       plan_mode: planMode || false,
       writing_skill: writingSkill || undefined,
+      image_preset_id: imagePresetId || undefined,
     }),
   })
+}
+
+function normalizeIDEContext(context?: IDEContext) {
+  if (!context?.currentFile && !context?.openFiles?.length) return undefined
+  return {
+    current_file: context.currentFile || undefined,
+    open_files: context.openFiles?.length ? context.openFiles : undefined,
+  }
 }
 
 export async function compactChatContext(): Promise<void> {

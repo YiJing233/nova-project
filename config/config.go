@@ -4,17 +4,25 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
+
+	"denova/internal/workspacepath"
 )
 
-// Config 保存 Nova 的全局配置
+// Config 保存 Denova 的全局配置。
 type Config struct {
 	OpenAIAPIKey                string                       `toml:"openai_api_key"`
 	OpenAIBaseURL               string                       `toml:"openai_base_url"`
 	OpenAIModel                 string                       `toml:"openai_model"`
 	OpenAIContextWindowTokens   int                          `toml:"openai_context_window_tokens"`
 	ModelProfiles               []ModelProfileSettings       `toml:"model_profiles"`
+	ImageAPIKey                 string                       `toml:"image_api_key"`
+	ImageAPIBaseURL             string                       `toml:"image_api_base_url"`
+	ImageAPIModel               string                       `toml:"image_api_model"`
+	DefaultImageAPIProfileID    string                       `toml:"default_image_api_profile_id"`
+	ImageAPIProfiles            []ImageAPIProfileSettings    `toml:"image_api_profiles"`
 	AgentModels                 AgentModelSettings           `toml:"agent_models"`
 	AgentTools                  AgentToolSettings            `toml:"agent_tools"`
 	AgentPrompts                AgentPromptSettings          `toml:"agent_prompts"`
@@ -29,17 +37,23 @@ type Config struct {
 	RemoteAccessUsername        string                       `toml:"remote_access_username"`
 	RemoteAccessPasswordHash    string                       `toml:"remote_access_password_hash"`
 	Language                    string                       `toml:"language"`
+	DenovaDir                   string                       `toml:"denova_dir"`
 	NovaDir                     string                       `toml:"nova_dir"`
 	Workspace                   string                       `toml:"workspace"`
 	RuntimeWebPort              int                          `toml:"-"`
+	DevMode                     bool                         `toml:"-"`
+	LLMInputLogEnabled          bool                         `toml:"llm_input_log_enabled"`
 	IDEStoryTellerID            string                       `toml:"-"`
+	IDEImagePresetID            string                       `toml:"-"`
+	ImagePresetToolPrompt       string                       `toml:"-"`
 	WritingSkillDefault         string                       `toml:"writing_skill_default"`
 	MaxIteration                int                          `toml:"max_iteration"`
 	ModelMaxRetries             int                          `toml:"model_max_retries"`
 	AgentIdleTimeoutSeconds     int                          `toml:"agent_idle_timeout_seconds"`
+	AgentToolResultLimitKB      int                          `toml:"agent_tool_result_limit_kb"`
 	ChapterFilenameFormat       string                       `toml:"-"`
 	VolumeDirFormat             string                       `toml:"-"`
-	DraftFlowEnabled            bool                         `toml:"-"`
+	HideChapterBodyLiveOutput   bool                         `toml:"-"`
 	ChapterGroupMin             int                          `toml:"-"`
 	ChapterGroupMax             int                          `toml:"-"`
 	VersionTimedEnabled         bool                         `toml:"-"`
@@ -54,23 +68,8 @@ type Config struct {
 
 // LoadWithWorkspace 在已知 workspace 时读取分层配置（默认 < 用户级 < 工作区级 < 环境变量）。
 func LoadWithWorkspace(workspace string) (*Config, LayeredSettings, error) {
-	global := loadGlobalConfig()
-	novaDir := global.NovaDir
-	if novaDir == "" {
-		novaDir = defaultNovaDir()
-	}
-	if v := os.Getenv("NOVA_DIR"); v != "" {
-		novaDir = v
-	}
-	if novaDir == "" {
-		novaDir = defaultNovaDir()
-	}
-	novaDir = normalizePath(novaDir)
-
-	globalSettings := settingsFromConfig(global)
-	globalSettings.NovaDir = novaDir
-
-	layered, err := LoadLayeredWithGlobal(novaDir, workspace, globalSettings)
+	novaDir := startupNovaDir()
+	layered, err := LoadLayeredWithStartupConfig(novaDir, workspace)
 	if err != nil {
 		return nil, LayeredSettings{}, err
 	}
@@ -82,6 +81,11 @@ func LoadWithWorkspace(workspace string) (*Config, LayeredSettings, error) {
 		OpenAIModel:                 s.OpenAIModel,
 		OpenAIContextWindowTokens:   settingsInt(s.OpenAIContextWindowTokens, DefaultContextWindowTokens),
 		ModelProfiles:               s.ModelProfiles,
+		ImageAPIKey:                 s.ImageAPIKey,
+		ImageAPIBaseURL:             s.ImageAPIBaseURL,
+		ImageAPIModel:               s.ImageAPIModel,
+		DefaultImageAPIProfileID:    s.DefaultImageAPIProfileID,
+		ImageAPIProfiles:            s.ImageAPIProfiles,
 		AgentModels:                 s.AgentModels,
 		AgentTools:                  s.AgentTools,
 		AgentPrompts:                s.AgentPrompts,
@@ -96,16 +100,20 @@ func LoadWithWorkspace(workspace string) (*Config, LayeredSettings, error) {
 		RemoteAccessUsername:        s.RemoteAccessUsername,
 		RemoteAccessPasswordHash:    s.RemoteAccessPasswordHash,
 		Language:                    s.Language,
+		DenovaDir:                   novaDir,
 		NovaDir:                     novaDir,
 		Workspace:                   workspace,
 		IDEStoryTellerID:            s.IDEStoryTellerID,
+		IDEImagePresetID:            s.IDEImagePresetID,
 		WritingSkillDefault:         s.WritingSkillDefault,
 		MaxIteration:                settingsInt(s.MaxIteration, 0),
 		ModelMaxRetries:             settingsInt(s.ModelMaxRetries, 5),
-		AgentIdleTimeoutSeconds:     settingsInt(s.AgentIdleTimeoutSeconds, 180),
+		AgentIdleTimeoutSeconds:     settingsAgentIdleTimeoutSeconds(s.AgentIdleTimeoutSeconds),
+		AgentToolResultLimitKB:      settingsAgentToolResultLimitKB(s.AgentToolResultLimitKB),
+		LLMInputLogEnabled:          settingsBool(s.LLMInputLogEnabled, false),
 		ChapterFilenameFormat:       s.ChapterFilenameFormat,
 		VolumeDirFormat:             s.VolumeDirFormat,
-		DraftFlowEnabled:            settingsBool(s.DraftFlowEnabled, false),
+		HideChapterBodyLiveOutput:   settingsBool(s.HideChapterBodyLiveOutput, false),
 		ChapterGroupMin:             settingsInt(s.ChapterGroupMin, 3),
 		ChapterGroupMax:             settingsInt(s.ChapterGroupMax, 8),
 		VersionTimedEnabled:         settingsBool(s.VersionTimedEnabled, true),
@@ -129,16 +137,41 @@ func LoadWithWorkspace(workspace string) (*Config, LayeredSettings, error) {
 	if cfg.SkillsDir != "" {
 		cfg.SkillsDir = normalizePath(cfg.SkillsDir)
 	}
-	if cfg.NovaDir == "" {
-		cfg.NovaDir = normalizePath(defaultNovaDir())
-	} else {
-		cfg.NovaDir = normalizePath(cfg.NovaDir)
-	}
+	normalizeConfigDataDir(cfg)
 	return cfg, layered, nil
 }
 
+// LoadLayeredWithStartupConfig reads layered settings with the same global
+// startup config layer used by LoadWithWorkspace.
+func LoadLayeredWithStartupConfig(novaDir, workspace string) (LayeredSettings, error) {
+	if strings.TrimSpace(novaDir) == "" {
+		novaDir = startupNovaDir()
+	} else {
+		novaDir = normalizePath(novaDir)
+	}
+	globalSettings := settingsFromConfig(loadGlobalConfig())
+	globalSettings.DenovaDir = novaDir
+	globalSettings.NovaDir = novaDir
+	return LoadLayeredWithGlobal(novaDir, workspace, globalSettings)
+}
+
+func startupNovaDir() string {
+	global := loadGlobalConfig()
+	novaDir := firstNonEmpty(global.DenovaDir, global.NovaDir)
+	if novaDir == "" {
+		novaDir = defaultNovaDir()
+	}
+	if v := envCompat("DENOVA_DIR", "NOVA_DIR"); v != "" {
+		novaDir = v
+	}
+	if novaDir == "" {
+		novaDir = defaultNovaDir()
+	}
+	return normalizePath(novaDir)
+}
+
 func loadGlobalConfig() *Config {
-	cfg := &Config{}
+	cfg := &Config{AgentIdleTimeoutSeconds: -1, AgentToolResultLimitKB: -1}
 	for _, path := range globalConfigCandidates() {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -161,6 +194,11 @@ func settingsFromConfig(cfg *Config) Settings {
 		OpenAIBaseURL:            cfg.OpenAIBaseURL,
 		OpenAIModel:              cfg.OpenAIModel,
 		ModelProfiles:            cfg.ModelProfiles,
+		ImageAPIKey:              cfg.ImageAPIKey,
+		ImageAPIBaseURL:          cfg.ImageAPIBaseURL,
+		ImageAPIModel:            cfg.ImageAPIModel,
+		DefaultImageAPIProfileID: cfg.DefaultImageAPIProfileID,
+		ImageAPIProfiles:         cfg.ImageAPIProfiles,
 		AgentModels:              cfg.AgentModels,
 		AgentTools:               cfg.AgentTools,
 		AgentPrompts:             cfg.AgentPrompts,
@@ -169,13 +207,18 @@ func settingsFromConfig(cfg *Config) Settings {
 		GeneralSubAgents:         cfg.GeneralSubAgents,
 		SubAgents:                cfg.SubAgents,
 		SkillsDir:                cfg.SkillsDir,
-		NovaDir:                  cfg.NovaDir,
+		DenovaDir:                firstNonEmpty(cfg.DenovaDir, cfg.NovaDir),
+		NovaDir:                  firstNonEmpty(cfg.DenovaDir, cfg.NovaDir),
 		RemoteAccessUsername:     cfg.RemoteAccessUsername,
 		RemoteAccessPasswordHash: cfg.RemoteAccessPasswordHash,
 		Language:                 cfg.Language,
 		ChapterFilenameFormat:    cfg.ChapterFilenameFormat,
 		VolumeDirFormat:          cfg.VolumeDirFormat,
+		IDEImagePresetID:         cfg.IDEImagePresetID,
 		WritingSkillDefault:      cfg.WritingSkillDefault,
+	}
+	if cfg.HideChapterBodyLiveOutput {
+		settings.HideChapterBodyLiveOutput = &cfg.HideChapterBodyLiveOutput
 	}
 	if cfg.BackendPort > 0 {
 		settings.BackendPort = &cfg.BackendPort
@@ -190,8 +233,14 @@ func settingsFromConfig(cfg *Config) Settings {
 	if cfg.ModelMaxRetries > 0 {
 		settings.ModelMaxRetries = &cfg.ModelMaxRetries
 	}
-	if cfg.AgentIdleTimeoutSeconds > 0 {
+	if cfg.AgentIdleTimeoutSeconds >= 0 {
 		settings.AgentIdleTimeoutSeconds = &cfg.AgentIdleTimeoutSeconds
+	}
+	if cfg.AgentToolResultLimitKB >= 0 {
+		settings.AgentToolResultLimitKB = &cfg.AgentToolResultLimitKB
+	}
+	if cfg.LLMInputLogEnabled {
+		settings.LLMInputLogEnabled = &cfg.LLMInputLogEnabled
 	}
 	if cfg.OpenAIContextWindowTokens > 0 {
 		settings.OpenAIContextWindowTokens = &cfg.OpenAIContextWindowTokens
@@ -218,6 +267,11 @@ func Load() *Config {
 			OpenAIModel:                 d.OpenAIModel,
 			OpenAIContextWindowTokens:   settingsInt(d.OpenAIContextWindowTokens, DefaultContextWindowTokens),
 			ModelProfiles:               d.ModelProfiles,
+			ImageAPIKey:                 d.ImageAPIKey,
+			ImageAPIBaseURL:             d.ImageAPIBaseURL,
+			ImageAPIModel:               d.ImageAPIModel,
+			DefaultImageAPIProfileID:    d.DefaultImageAPIProfileID,
+			ImageAPIProfiles:            d.ImageAPIProfiles,
 			AgentModels:                 d.AgentModels,
 			AgentTools:                  d.AgentTools,
 			AgentPrompts:                d.AgentPrompts,
@@ -232,15 +286,19 @@ func Load() *Config {
 			RemoteAccessUsername:        d.RemoteAccessUsername,
 			RemoteAccessPasswordHash:    d.RemoteAccessPasswordHash,
 			Language:                    d.Language,
+			DenovaDir:                   normalizePath(d.DenovaDir),
 			NovaDir:                     normalizePath(d.NovaDir),
 			IDEStoryTellerID:            d.IDEStoryTellerID,
+			IDEImagePresetID:            d.IDEImagePresetID,
 			WritingSkillDefault:         d.WritingSkillDefault,
 			MaxIteration:                settingsInt(d.MaxIteration, 0),
 			ModelMaxRetries:             settingsInt(d.ModelMaxRetries, 5),
-			AgentIdleTimeoutSeconds:     settingsInt(d.AgentIdleTimeoutSeconds, 180),
+			AgentIdleTimeoutSeconds:     settingsAgentIdleTimeoutSeconds(d.AgentIdleTimeoutSeconds),
+			AgentToolResultLimitKB:      settingsAgentToolResultLimitKB(d.AgentToolResultLimitKB),
+			LLMInputLogEnabled:          settingsBool(d.LLMInputLogEnabled, false),
 			ChapterFilenameFormat:       d.ChapterFilenameFormat,
 			VolumeDirFormat:             d.VolumeDirFormat,
-			DraftFlowEnabled:            settingsBool(d.DraftFlowEnabled, false),
+			HideChapterBodyLiveOutput:   settingsBool(d.HideChapterBodyLiveOutput, false),
 			ChapterGroupMin:             settingsInt(d.ChapterGroupMin, 3),
 			ChapterGroupMax:             settingsInt(d.ChapterGroupMax, 8),
 			VersionTimedEnabled:         settingsBool(d.VersionTimedEnabled, true),
@@ -261,6 +319,7 @@ func Load() *Config {
 		if cfg.SkillsDir != "" {
 			cfg.SkillsDir = normalizePath(cfg.SkillsDir)
 		}
+		normalizeConfigDataDir(cfg)
 	}
 	return cfg
 }
@@ -268,6 +327,20 @@ func Load() *Config {
 func settingsInt(v *int, fallback int) int {
 	if v == nil || *v <= 0 {
 		return fallback
+	}
+	return *v
+}
+
+func settingsAgentIdleTimeoutSeconds(v *int) int {
+	if v == nil || *v < 0 {
+		return DefaultAgentIdleTimeoutSeconds
+	}
+	return *v
+}
+
+func settingsAgentToolResultLimitKB(v *int) int {
+	if v == nil || *v < 0 {
+		return DefaultAgentToolResultLimitKB
 	}
 	return *v
 }
@@ -305,27 +378,37 @@ func overrideFromEnv(cfg *Config) {
 	if v := os.Getenv("OPENAI_MODEL"); v != "" {
 		cfg.OpenAIModel = v
 	}
-	if v := os.Getenv("NOVA_SKILLS_DIR"); v != "" {
+	if v := os.Getenv("OPENAI_IMAGE_API_KEY"); v != "" {
+		cfg.ImageAPIKey = v
+	}
+	if v := os.Getenv("OPENAI_IMAGE_BASE_URL"); v != "" {
+		cfg.ImageAPIBaseURL = v
+	}
+	if v := os.Getenv("OPENAI_IMAGE_MODEL"); v != "" {
+		cfg.ImageAPIModel = v
+	}
+	if v := envCompat("DENOVA_SKILLS_DIR", "NOVA_SKILLS_DIR"); v != "" {
 		cfg.SkillsDir = v
 	}
-	if v := os.Getenv("NOVA_DIR"); v != "" {
+	if v := envCompat("DENOVA_DIR", "NOVA_DIR"); v != "" {
+		cfg.DenovaDir = v
 		cfg.NovaDir = v
 	}
-	if v := os.Getenv("NOVA_WORKSPACE"); v != "" {
+	if v := envCompat("DENOVA_WORKSPACE", "NOVA_WORKSPACE"); v != "" {
 		cfg.Workspace = v
 	}
-	if v := os.Getenv("NOVA_BACKEND_PORT"); v != "" {
+	if v := envCompat("DENOVA_BACKEND_PORT", "NOVA_BACKEND_PORT"); v != "" {
 		if port, err := strconv.Atoi(v); err == nil && port >= 1 && port <= 65535 {
 			cfg.BackendPort = port
 		}
 	}
-	if v := os.Getenv("NOVA_FRONTEND_PORT"); v != "" {
+	if v := envCompat("DENOVA_FRONTEND_PORT", "NOVA_FRONTEND_PORT"); v != "" {
 		if port, err := strconv.Atoi(v); err == nil && port >= 1 && port <= 65535 {
 			cfg.FrontendPort = port
 		}
 	}
-	if v := os.Getenv("NOVA_AGENT_IDLE_TIMEOUT_SECONDS"); v != "" {
-		if seconds, err := strconv.Atoi(v); err == nil && seconds > 0 {
+	if v := envCompat("DENOVA_AGENT_IDLE_TIMEOUT_SECONDS", "NOVA_AGENT_IDLE_TIMEOUT_SECONDS"); v != "" {
+		if seconds, err := strconv.Atoi(v); err == nil && seconds >= 0 {
 			cfg.AgentIdleTimeoutSeconds = seconds
 		}
 	}
@@ -343,7 +426,44 @@ func (cfg *Config) RemoteAccessConfig() RemoteAccessConfig {
 }
 
 func defaultNovaDir() string {
-	return "./.nova"
+	if dirExists(workspacepath.LegacyDataDirName) && !dirExists(workspacepath.DataDirName) {
+		return "./" + workspacepath.LegacyDataDirName
+	}
+	return "./" + workspacepath.DataDirName
+}
+
+func normalizeConfigDataDir(cfg *Config) {
+	if cfg == nil {
+		return
+	}
+	dataDir := firstNonEmpty(cfg.DenovaDir, cfg.NovaDir)
+	if dataDir == "" {
+		dataDir = defaultNovaDir()
+	}
+	dataDir = normalizePath(dataDir)
+	cfg.DenovaDir = dataDir
+	cfg.NovaDir = dataDir
+}
+
+func envCompat(current, legacy string) string {
+	if v := os.Getenv(current); v != "" {
+		return v
+	}
+	return os.Getenv(legacy)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
+}
+
+func dirExists(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && info.IsDir()
 }
 
 func normalizePath(path string) string {

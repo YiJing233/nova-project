@@ -7,11 +7,12 @@ import { InlineErrorNotice } from '@/components/common/inline-error-notice'
 import { AdaptiveSurface } from '@/components/layout/adaptive-surface'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { fetchSettings, updateUserSettings, updateWorkspaceSettings } from '@/features/settings/api'
 import type { AgentContextOverride, AgentModelOverride, AgentPromptBlocks, AgentPromptOverride, AgentPromptSource, AgentSkillOverride, AgentToolOverride, LayeredSettings, ModelProfileSettings, Settings, SettingsLayer, SubAgentConfig } from '@/features/settings/types'
-import { modelProfileID, modelProfileLabel } from '@/features/settings/model-profiles'
-import { settingsForLayer, useAutoSaveSettings } from '@/features/settings/use-auto-save-settings'
+import { modelProfileID, modelProfileLabel, modelProfilesWithDefault } from '@/features/settings/model-profiles'
+import { settingsForLayer, settingsRevisionForLayer, useAutoSaveSettings } from '@/features/settings/use-auto-save-settings'
 import { getSkills } from '@/lib/api'
 import type { SkillSummary } from '@/lib/api'
 import { AGENTS, DEEP_AGENT_PARENT_KEYS, FALLBACK_AGENT_TOOL_VALUES, TOOL_ROWS, resolveEffectiveTools, skillAgentFieldMatches, skillAvailableForAgent } from './agent-registry'
@@ -100,7 +101,7 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
   const contextValue = draft.agent_context?.[activeAgent] ?? {}
   const inheritedContext = mergeAgentContextOverride(effective.agent_context?.default ?? {}, effective.agent_context?.[activeAgent] ?? {})
   const generalSubAgents = draft.general_sub_agents ?? {}
-  const effectiveGeneralSubAgents = effective.general_sub_agents ?? {}
+  const previewGeneralSubAgents = useMemo(() => previewGeneralSubAgentSettings(layered, activeLayer, draft), [activeLayer, draft, layered])
   const subAgents = draft.sub_agents ?? []
   const configManagerWorkspaceKey = layered?.paths.workspace_config || layered?.paths.user_config || 'agents'
   const configManagerContext = useMemo(() => ({
@@ -111,9 +112,9 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
     write_scope_hint: activeLayer,
   }), [activeAgent, activeLayer, selected.titleKey, t])
 
-  const saveDraft = useCallback(async (settings: Settings) => {
+  const saveDraft = useCallback(async (settings: Settings, baseRevision?: string) => {
     const updater = activeLayer === 'user' ? updateUserSettings : updateWorkspaceSettings
-    return updater(settings)
+    return baseRevision ? updater(settings, baseRevision) : updater(settings)
   }, [activeLayer])
 
   const applySavedSettings = useCallback((next: LayeredSettings) => {
@@ -127,7 +128,7 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
     setSaving(true)
     setError(null)
     try {
-      const next = await saveDraft(draft)
+      const next = await saveDraft(draft, settingsRevisionForLayer(layered, activeLayer))
       applySavedSettings(next)
     } catch (e) {
       setError((e as Error).message)
@@ -216,6 +217,7 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
   useAutoSaveSettings({
     draft,
     saved: layered ? settingsForLayer(layered, activeLayer) : {},
+    baseRevision: settingsRevisionForLayer(layered, activeLayer),
     ready: Boolean(layered),
     save: saveDraft,
     onSavingChange: setSaving,
@@ -225,7 +227,7 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
 
   return (
     <div className="flex h-full min-h-0 w-full flex-col bg-[var(--nova-bg)] text-[var(--nova-text)]">
-      <div className="nova-topbar flex min-h-10 shrink-0 flex-nowrap items-center gap-2 overflow-x-auto border-b px-3 py-1.5 text-xs sm:px-4">
+      <div className="nova-topbar flex min-h-10 shrink-0 flex-nowrap max-md:flex-wrap items-center gap-2 overflow-x-auto max-md:overflow-x-hidden border-b px-3 py-1.5 text-xs sm:px-4">
         <Bot className="h-3.5 w-3.5 text-[var(--nova-text-muted)]" />
         <span className="shrink-0 font-medium">Agents</span>
         <div className="flex shrink-0 gap-1 border-l border-[var(--nova-border)] pl-2 sm:ml-3 sm:pl-3">
@@ -346,9 +348,11 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
                   {isDeepAgentParent(activeAgent) && (
                     <AgentSubAgentSection
                       agent={activeAgent}
+                      inheritedModel={inheritedModel}
                       generalSettings={generalSubAgents}
-                      effectiveGeneralSettings={effectiveGeneralSubAgents}
+                      effectiveGeneralSettings={previewGeneralSubAgents}
                       subAgents={subAgents}
+                      effectiveSubAgents={effective.sub_agents ?? []}
                       profiles={profileOptions}
                       onGeneralChange={setGeneralSubAgent}
                       onChange={setSubAgents}
@@ -472,16 +476,15 @@ function AgentModelSection({ value, inherited, profiles, onChange }: {
             className={fieldCls}
           />
         </Field>
-        <Field label={t('agents.field.thinking')} inherited={!hasThinking} onReset={hasThinking ? () => onChange({ enable_thinking: null }) : undefined}>
-          <select
-            value={effectiveThinking === null || effectiveThinking === undefined ? '' : String(effectiveThinking)}
-            onChange={(e) => onChange({ enable_thinking: e.target.value === '' ? null : e.target.value === 'true' })}
-            className={fieldCls}
-          >
-            <option value="">{t('agents.option.noSend')}</option>
-            <option value="true">{t('agents.option.on')}</option>
-            <option value="false">{t('agents.option.off')}</option>
-          </select>
+        <Field label={t('agents.field.thinking')}>
+          <SwitchWithInheritance
+            checked={thinkingDisplayValue(effectiveThinking)}
+            onChange={(checked) => onChange({ enable_thinking: checked })}
+            ariaLabel={t('agents.field.thinking')}
+            statusLabel={thinkingStatusLabel(t, effectiveThinking)}
+            inherited={!hasThinking}
+            onReset={hasThinking ? () => onChange({ enable_thinking: null }) : undefined}
+          />
         </Field>
         <Field label={t('agents.field.reasoningEffort')} inherited={!hasEffort} onReset={hasEffort ? () => onChange({ reasoning_effort: '' }) : undefined}>
           <select value={effectiveEffort} onChange={(e) => onChange({ reasoning_effort: e.target.value })} className={fieldCls}>
@@ -591,19 +594,19 @@ function fallbackPromptSources(blocks?: AgentPromptBlocks, builtin?: string): Ag
     blocks?.runtime_contract ? {
       id: 'runtime_contract',
       title: 'Runtime Contract',
-      source: 'Nova runtime',
+      source: 'Denova runtime',
       content: blocks.runtime_contract,
     } : null,
     blocks?.output_protocol ? {
       id: 'output_protocol',
       title: 'Output Format',
-      source: 'Nova runtime',
+      source: 'Denova runtime',
       content: blocks.output_protocol,
     } : null,
     {
       id: 'flow',
       title: 'Flow Rules',
-      source: 'Nova built-in',
+      source: 'Denova built-in',
       content: blocks?.editable_system_prompt || builtin || '',
       editable: true,
       field: 'flow_prompt' as const,
@@ -643,15 +646,14 @@ function AgentRuntimeContextSection({ agent, value, inherited, onChange }: {
       <div className="grid gap-3 md:grid-cols-2">
         {!isCompactionAgent && (
           <>
-            <Field label={t('agents.field.compactionEnabled')} inherited={!hasCompactionEnabled} onReset={hasCompactionEnabled ? () => onChange({ compaction_enabled: null }) : undefined}>
-              <select
-                value={String(effectiveCompactionEnabled)}
-                onChange={(e) => onChange({ compaction_enabled: e.target.value === 'true' })}
-                className={fieldCls}
-              >
-                <option value="true">{t('agents.option.on')}</option>
-                <option value="false">{t('agents.option.off')}</option>
-              </select>
+            <Field label={t('agents.field.compactionEnabled')}>
+              <SwitchWithInheritance
+                checked={Boolean(effectiveCompactionEnabled)}
+                onChange={(checked) => onChange({ compaction_enabled: checked })}
+                ariaLabel={t('agents.field.compactionEnabled')}
+                inherited={!hasCompactionEnabled}
+                onReset={hasCompactionEnabled ? () => onChange({ compaction_enabled: null }) : undefined}
+              />
             </Field>
             <Field label={t('agents.field.compactionThreshold')} inherited={!hasCompactionThreshold} onReset={hasCompactionThreshold ? () => onChange({ compaction_threshold: null }) : undefined}>
               <input
@@ -743,15 +745,13 @@ function AgentToolSection({ agent, value, effective, onChange }: {
                   {t(toolSubtitleKey(tool, agent))}
                 </div>
               </div>
-              <select
-                value={String(current)}
-                onChange={(e) => onChange(tool.key, e.target.value === '' ? null : e.target.value === 'true')}
-                className={`${fieldCls} shrink-0 disabled:cursor-not-allowed disabled:opacity-60 sm:max-w-32`}
-              >
-                <option value="true">{t('agents.option.on')}</option>
-                <option value="false">{t('agents.option.off')}</option>
-              </select>
-              <InheritanceBadge inherited={inherited} onReset={!inherited ? () => onChange(tool.key, null) : undefined} />
+              <SwitchWithInheritance
+                checked={Boolean(current)}
+                onChange={(checked) => onChange(tool.key, checked)}
+                ariaLabel={t(tool.titleKey)}
+                inherited={inherited}
+                onReset={!inherited ? () => onChange(tool.key, null) : undefined}
+              />
             </div>
           )
         })}
@@ -772,54 +772,97 @@ function toolRowsForAgent(agent: VisibleAgentKey) {
   return TOOL_ROWS.filter((tool) => tool.key !== 'agent_config_read' && tool.key !== 'agent_config_write')
 }
 
-function AgentSubAgentSection({ agent, generalSettings, effectiveGeneralSettings, subAgents, profiles, onGeneralChange, onChange }: {
+function AgentSubAgentSection({ agent, inheritedModel, generalSettings, effectiveGeneralSettings, subAgents, effectiveSubAgents, profiles, onGeneralChange, onChange }: {
   agent: DeepAgentParentKey
+  inheritedModel: AgentModelOverride
   generalSettings: Settings['general_sub_agents']
   effectiveGeneralSettings: Settings['general_sub_agents']
   subAgents: SubAgentConfig[]
+  effectiveSubAgents: SubAgentConfig[]
   profiles: Array<{ id: string; label: string }>
   onGeneralChange: (agent: DeepAgentParentKey, value: boolean | null) => void
   onChange: (updater: (current: SubAgentConfig[]) => SubAgentConfig[]) => void
 }) {
   const { t } = useTranslation()
-  const [deleteIndex, setDeleteIndex] = useState<number | null>(null)
-  const [editIndex, setEditIndex] = useState<number | null>(null)
-  const visibleSubAgents = subAgents
+  const [deleteTarget, setDeleteTarget] = useState<SubAgentConfig | null>(null)
+  const [editingSubAgent, setEditingSubAgent] = useState<{ id: string; value: SubAgentConfig } | null>(null)
+  const visibleSubAgents = useMemo(() => mergeVisibleSubAgents(effectiveSubAgents, subAgents)
+    .filter((subAgent) => effectiveSubAgentParents(subAgent).includes(agent)), [agent, effectiveSubAgents, subAgents])
   const generalExplicit = generalSettings?.[agent]
   const generalEnabled = resolveGeneralSubAgentEnabled(effectiveGeneralSettings, agent)
   const addSubAgent = () => {
-    let nextEditIndex = 0
-    onChange((current) => {
-      const nextID = nextSubAgentID(current)
-      nextEditIndex = current.length
-      return [
-        ...current,
-        {
-          id: nextID,
-          name: t('agents.subAgents.newName'),
-          description: t('agents.subAgents.newDescription'),
-          system_prompt: t('agents.subAgents.newPrompt'),
-          enabled: true,
-          parents: [agent],
-          model: {},
-          tools: {},
-        },
-      ]
+    const nextID = nextSubAgentID(mergeVisibleSubAgents(effectiveSubAgents, subAgents))
+    setEditingSubAgent({
+      id: nextID,
+      value: {
+        id: nextID,
+        name: t('agents.subAgents.newName'),
+        description: t('agents.subAgents.newDescription'),
+        system_prompt: t('agents.subAgents.newPrompt'),
+        enabled: true,
+        parents: [agent],
+        model: {},
+        tools: {},
+      },
     })
-    setEditIndex(nextEditIndex)
   }
-  const updateSubAgent = (index: number, patch: Partial<SubAgentConfig>) => {
-    onChange((current) => current.map((subAgent, currentIndex) => (
-      currentIndex === index ? normalizeSubAgentConfig({ ...subAgent, ...patch }) : subAgent
-    )))
+  const updateSubAgent = (id: string, patch: Partial<SubAgentConfig>) => {
+    const base = visibleSubAgents.find((subAgent) => normalizeSubAgentID(subAgent.id || '') === id)
+    if (!base) return
+    onChange((current) => upsertSubAgentOverride(current, normalizeSubAgentConfig({ ...base, ...patch }), id))
   }
-  const deleteSubAgent = () => {
-    if (deleteIndex === null) return
-    onChange((current) => current.filter((_, index) => index !== deleteIndex))
-    if (editIndex === deleteIndex) setEditIndex(null)
-    setDeleteIndex(null)
+  const setSubAgentAvailableForCurrent = (subAgent: SubAgentConfig, available: boolean) => {
+    const id = normalizeSubAgentID(subAgent.id || '')
+    if (!id) return
+    const currentParents = effectiveSubAgentParents(subAgent)
+    const nextParents = available
+      ? DEEP_AGENT_PARENT_KEYS.filter((parent) => parent === agent || currentParents.includes(parent))
+      : currentParents.filter((parent) => parent !== agent)
+    updateSubAgent(id, { parents: nextParents, enabled: true })
   }
-  const editingSubAgent = editIndex === null ? undefined : visibleSubAgents[editIndex]
+  const editSubAgent = (subAgent: SubAgentConfig) => {
+    const id = normalizeSubAgentID(subAgent.id || '')
+    if (!id) return
+    setEditingSubAgent({ id, value: normalizeSubAgentConfig(subAgent) })
+  }
+  const updateEditingSubAgent = (id: string, patch: Partial<SubAgentConfig>) => {
+    setEditingSubAgent((current) => {
+      if (!current || current.id !== id) return current
+      return { ...current, value: normalizeSubAgentConfig({ ...current.value, ...patch }) }
+    })
+  }
+  const finishEditingSubAgent = () => {
+    if (!editingSubAgent) return
+    const next = normalizeSubAgentConfig(editingSubAgent.value)
+    onChange((current) => upsertSubAgentOverride(current, next, editingSubAgent.id))
+    setEditingSubAgent(null)
+  }
+  const deleteSubAgentForCurrentParent = () => {
+    if (!deleteTarget) return
+    const deleteID = normalizeSubAgentID(deleteTarget.id || '')
+    if (!deleteID) return
+    const base = visibleSubAgents.find((subAgent) => normalizeSubAgentID(subAgent.id || '') === deleteID) ?? deleteTarget
+    onChange((current) => {
+      return upsertSubAgentOverride(current, normalizeSubAgentConfig({ ...base, enabled: true, parents: subAgentParentsWithout(base, agent) }), deleteID)
+    })
+    if (editingSubAgent?.id === deleteID) setEditingSubAgent(null)
+    setDeleteTarget(null)
+  }
+  const deleteSubAgentEverywhere = () => {
+    if (!deleteTarget) return
+    const deleteID = normalizeSubAgentID(deleteTarget.id || '')
+    if (!deleteID) return
+    const base = visibleSubAgents.find((subAgent) => normalizeSubAgentID(subAgent.id || '') === deleteID) ?? deleteTarget
+    onChange((current) => {
+      const currentHasID = current.some((subAgent) => normalizeSubAgentID(subAgent.id || '') === deleteID)
+      if (!currentHasID) {
+        return upsertSubAgentOverride(current, normalizeSubAgentConfig({ ...base, enabled: false, parents: [] }), deleteID)
+      }
+      return current.filter((subAgent) => normalizeSubAgentID(subAgent.id || '') !== deleteID)
+    })
+    if (editingSubAgent?.id === deleteID) setEditingSubAgent(null)
+    setDeleteTarget(null)
+  }
 
   return (
     <section className="space-y-3 border-b border-[var(--nova-border)] pb-5">
@@ -846,16 +889,13 @@ function AgentSubAgentSection({ agent, generalSettings, effectiveGeneralSettings
             </div>
             <div className="mt-1 text-[11px] leading-5 text-[var(--nova-text-faint)]">{t('agents.subAgents.general.description')}</div>
           </div>
-          <select
-            value={generalExplicit === undefined || generalExplicit === null ? '' : String(generalExplicit)}
-            onChange={(e) => onGeneralChange(agent, e.target.value === '' ? null : e.target.value === 'true')}
-            className={`${fieldCls} max-w-28 shrink-0`}
-            aria-label={t('agents.subAgents.general.enabled')}
-          >
-            <option value="">{t('agents.option.inherit')}</option>
-            <option value="true">{t('agents.option.on')}</option>
-            <option value="false">{t('agents.option.off')}</option>
-          </select>
+          <SwitchWithInheritance
+            checked={Boolean(generalEnabled)}
+            onChange={(checked) => onGeneralChange(agent, checked)}
+            ariaLabel={t('agents.subAgents.general.enabled')}
+            inherited={generalExplicit === undefined || generalExplicit === null}
+            onReset={generalExplicit !== undefined && generalExplicit !== null ? () => onGeneralChange(agent, null) : undefined}
+          />
         </div>
       </div>
       {visibleSubAgents.length === 0 ? (
@@ -869,8 +909,9 @@ function AgentSubAgentSection({ agent, generalSettings, effectiveGeneralSettings
               key={`${subAgent.id || 'subagent'}:${index}`}
               agent={agent}
               subAgent={subAgent}
-              onEdit={() => setEditIndex(index)}
-              onDelete={() => setDeleteIndex(index)}
+              onToggle={(enabled) => setSubAgentAvailableForCurrent(subAgent, enabled)}
+              onEdit={() => editSubAgent(subAgent)}
+              onDelete={() => setDeleteTarget(subAgent)}
             />
           ))}
         </div>
@@ -878,35 +919,36 @@ function AgentSubAgentSection({ agent, generalSettings, effectiveGeneralSettings
       <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-[11px] leading-5 text-[var(--nova-text-faint)]">
         {t('agents.subAgents.note')}
       </div>
-      <Dialog open={Boolean(editingSubAgent)} onOpenChange={(open) => { if (!open) setEditIndex(null) }}>
-        {editingSubAgent && editIndex !== null && (
+      <Dialog open={Boolean(editingSubAgent)} onOpenChange={(open) => { if (!open) setEditingSubAgent(null) }}>
+        {editingSubAgent && (
           <DialogContent
             className="nova-panel flex max-h-[min(760px,calc(100vh-2rem))] flex-col overflow-hidden rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] p-0 text-[var(--nova-text)] shadow-[var(--nova-shadow)]"
           >
             <DialogHeader className="shrink-0 gap-1 border-b border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-4 py-3 text-left">
-              <DialogTitle className="text-sm">{editingSubAgent.name || editingSubAgent.id || t('agents.subAgents.untitled')}</DialogTitle>
+              <DialogTitle className="text-sm">{editingSubAgent.value.name || editingSubAgent.value.id || t('agents.subAgents.untitled')}</DialogTitle>
               <DialogDescription className="text-[11px] leading-5 text-[var(--nova-text-faint)]">
                 {t('agents.subAgents.dialogDescription')}
               </DialogDescription>
             </DialogHeader>
             <div className="min-h-0 flex-1 overflow-y-auto px-4 py-4">
               <SubAgentEditor
-                index={editIndex}
+                id={editingSubAgent.id}
                 agent={agent}
-                subAgent={editingSubAgent}
+                subAgent={editingSubAgent.value}
+                inheritedModel={inheritedModel}
                 profiles={profiles}
-                onChange={updateSubAgent}
+                onChange={updateEditingSubAgent}
               />
             </div>
-            <DialogFooter className="shrink-0 border-t border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-4 py-3">
-              <button type="button" onClick={() => setEditIndex(null)} className="nova-nav-item rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] px-3 py-1.5 text-xs text-[var(--nova-text)] hover:bg-[var(--nova-hover)]">
+            <DialogFooter className="mx-0 mb-0 shrink-0 border-t border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-4 py-3">
+              <button type="button" onClick={finishEditingSubAgent} className="nova-nav-item rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] px-3 py-1.5 text-xs text-[var(--nova-text)] hover:bg-[var(--nova-hover)]">
                 {t('agents.subAgents.done')}
               </button>
             </DialogFooter>
           </DialogContent>
         )}
       </Dialog>
-      <AlertDialog open={deleteIndex !== null} onOpenChange={(open) => { if (!open) setDeleteIndex(null) }}>
+      <AlertDialog open={deleteTarget !== null} onOpenChange={(open) => { if (!open) setDeleteTarget(null) }}>
         <AlertDialogContent size="sm" className="border-[var(--nova-border)] bg-[var(--nova-surface)] text-[var(--nova-text)] shadow-[var(--nova-shadow)]">
           <AlertDialogHeader>
             <AlertDialogTitle>{t('agents.subAgents.deleteTitle')}</AlertDialogTitle>
@@ -914,7 +956,10 @@ function AgentSubAgentSection({ agent, generalSettings, effectiveGeneralSettings
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>{t('common.cancel')}</AlertDialogCancel>
-            <AlertDialogAction variant="destructive" onClick={deleteSubAgent}>{t('common.delete')}</AlertDialogAction>
+            <button type="button" onClick={deleteSubAgentForCurrentParent} className="nova-nav-item rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-1.5 text-xs text-[var(--nova-text)] hover:bg-[var(--nova-hover)]">
+              {t('agents.subAgents.deleteCurrentParent')}
+            </button>
+            <AlertDialogAction variant="destructive" onClick={deleteSubAgentEverywhere}>{t('agents.subAgents.deleteEverywhere')}</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
@@ -922,23 +967,24 @@ function AgentSubAgentSection({ agent, generalSettings, effectiveGeneralSettings
   )
 }
 
-function SubAgentRow({ agent, subAgent, onEdit, onDelete }: {
+function SubAgentRow({ agent, subAgent, onToggle, onEdit, onDelete }: {
   agent: DeepAgentParentKey
   subAgent: SubAgentConfig
+  onToggle: (enabled: boolean) => void
   onEdit: () => void
   onDelete: () => void
 }) {
   const { t } = useTranslation()
-  const enabled = subAgent.enabled ?? true
   const parents = effectiveSubAgentParents(subAgent)
   const availableForCurrent = parents.includes(agent)
+  const enabled = (subAgent.enabled ?? true) && availableForCurrent
   return (
     <div className="flex min-w-0 items-center gap-2 rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] px-3 py-2">
       <Bot className="h-4 w-4 shrink-0 text-[var(--nova-text-muted)]" />
       <div className="min-w-0 flex-1">
         <div className="flex min-w-0 items-center gap-2">
           <span className="min-w-0 truncate font-medium">{subAgent.name || subAgent.id || t('agents.subAgents.untitled')}</span>
-          <span className={`shrink-0 rounded px-1.5 py-0.5 text-[10px] ${enabled ? 'bg-[var(--nova-success-bg)] text-[var(--nova-success)]' : 'bg-[var(--nova-danger-bg)] text-[var(--nova-danger)]'}`}>
+          <span className={`shrink-0 rounded-[var(--nova-radius)] border px-1.5 py-0.5 text-[10px] ${enabled ? 'border-[var(--nova-success)]/30 bg-[var(--nova-success-bg)] text-[var(--nova-success)]' : 'border-[var(--nova-danger)]/30 bg-[var(--nova-danger-bg)] text-[var(--nova-danger)]'}`}>
             {enabled ? t('agents.option.on') : t('agents.option.off')}
           </span>
           {!availableForCurrent && (
@@ -951,6 +997,11 @@ function SubAgentRow({ agent, subAgent, onEdit, onDelete }: {
           <span>{subAgentToolSummary(t, subAgent.tools)}</span>
         </div>
       </div>
+      <ToggleSwitch
+        checked={enabled}
+        onChange={onToggle}
+        ariaLabel={t('agents.subAgents.enabled')}
+      />
       <button type="button" onClick={onEdit} className="nova-icon-button flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--nova-radius)] border border-[var(--nova-border)] text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]" aria-label={t('agents.subAgents.edit')}>
         <Edit3 className="h-3.5 w-3.5" />
       </button>
@@ -961,26 +1012,28 @@ function SubAgentRow({ agent, subAgent, onEdit, onDelete }: {
   )
 }
 
-function SubAgentEditor({ index, agent, subAgent, profiles, onChange }: {
-  index: number
+function SubAgentEditor({ id, agent, subAgent, inheritedModel, profiles, onChange }: {
+  id: string
   agent: DeepAgentParentKey
   subAgent: SubAgentConfig
+  inheritedModel: AgentModelOverride
   profiles: Array<{ id: string; label: string }>
-  onChange: (index: number, patch: Partial<SubAgentConfig>) => void
+  onChange: (id: string, patch: Partial<SubAgentConfig>) => void
 }) {
   const { t } = useTranslation()
-  const enabled = subAgent.enabled ?? true
   const parents = effectiveSubAgentParents(subAgent)
   const parentSet = new Set(parents)
   const tools = subAgent.tools ?? {}
   const rows = toolRowsForAgent(agent)
   const model = subAgent.model ?? {}
+  const hasThinking = model.enable_thinking !== undefined && model.enable_thinking !== null
+  const effectiveThinking = hasThinking ? model.enable_thinking : inheritedModel.enable_thinking
 
-  const setModel = (patch: Partial<AgentModelOverride>) => onChange(index, { model: { ...model, ...patch } })
+  const setModel = (patch: Partial<AgentModelOverride>) => onChange(id, { model: { ...model, ...patch } })
   const setTool = (key: ToolKey, value: boolean | null) => {
     const nextTools = { ...tools, [key]: value }
     if (value === null) delete nextTools[key]
-    onChange(index, { tools: nextTools })
+    onChange(id, { tools: nextTools })
   }
   const setParent = (parent: DeepAgentParentKey, checked: boolean) => {
     const current = effectiveSubAgentParents(subAgent)
@@ -988,33 +1041,22 @@ function SubAgentEditor({ index, agent, subAgent, profiles, onChange }: {
     if (checked) next.add(parent)
     else next.delete(parent)
     const ordered = DEEP_AGENT_PARENT_KEYS.filter((key) => next.has(key))
-    onChange(index, { parents: ordered.length === DEEP_AGENT_PARENT_KEYS.length ? [] : ordered })
+    onChange(id, { parents: ordered })
   }
 
   return (
     <div className="space-y-3">
-      <div className="grid gap-3 md:grid-cols-3">
-        <Field label={t('agents.subAgents.enabled')}>
-          <select
-            value={String(enabled)}
-            onChange={(e) => onChange(index, { enabled: e.target.value === 'true' })}
-            className={fieldCls}
-            aria-label={t('agents.subAgents.enabled')}
-          >
-            <option value="true">{t('agents.option.on')}</option>
-            <option value="false">{t('agents.option.off')}</option>
-          </select>
-        </Field>
+      <div className="grid gap-3 md:grid-cols-2">
         <Field label={t('agents.subAgents.id')}>
-          <input value={subAgent.id ?? ''} onChange={(e) => onChange(index, { id: normalizeSubAgentID(e.target.value) })} className={fieldCls} />
+          <input value={subAgent.id ?? ''} onChange={(e) => onChange(id, { id: normalizeSubAgentID(e.target.value) })} className={fieldCls} />
         </Field>
         <Field label={t('agents.subAgents.name')}>
-          <input value={subAgent.name ?? ''} onChange={(e) => onChange(index, { name: e.target.value })} className={fieldCls} />
+          <input value={subAgent.name ?? ''} onChange={(e) => onChange(id, { name: e.target.value })} className={fieldCls} />
         </Field>
       </div>
       <div className="grid gap-3 md:grid-cols-2">
         <Field label={t('agents.subAgents.description')}>
-          <input value={subAgent.description ?? ''} onChange={(e) => onChange(index, { description: e.target.value })} className={fieldCls} />
+          <input value={subAgent.description ?? ''} onChange={(e) => onChange(id, { description: e.target.value })} className={fieldCls} />
         </Field>
         <Field label={t('agents.field.modelProfile')}>
           <select value={model.profile_id || ''} onChange={(e) => setModel({ profile_id: e.target.value })} className={fieldCls}>
@@ -1027,7 +1069,7 @@ function SubAgentEditor({ index, agent, subAgent, profiles, onChange }: {
         <Textarea
           autoResize
           value={subAgent.system_prompt ?? ''}
-          onChange={(e) => onChange(index, { system_prompt: e.target.value })}
+          onChange={(e) => onChange(id, { system_prompt: e.target.value })}
           placeholder={t('agents.subAgents.promptPlaceholder')}
           className={`${fieldCls} min-h-28 resize-y leading-5 shadow-none focus-visible:ring-0`}
         />
@@ -1046,11 +1088,14 @@ function SubAgentEditor({ index, agent, subAgent, profiles, onChange }: {
           />
         </Field>
         <Field label={t('agents.field.thinking')}>
-          <select value={model.enable_thinking === undefined || model.enable_thinking === null ? '' : String(model.enable_thinking)} onChange={(e) => setModel({ enable_thinking: e.target.value === '' ? null : e.target.value === 'true' })} className={fieldCls}>
-            <option value="">{t('agents.option.inherit')}</option>
-            <option value="true">{t('agents.option.on')}</option>
-            <option value="false">{t('agents.option.off')}</option>
-          </select>
+          <SwitchWithInheritance
+            checked={thinkingDisplayValue(effectiveThinking)}
+            onChange={(checked) => setModel({ enable_thinking: checked })}
+            ariaLabel={t('agents.field.thinking')}
+            statusLabel={thinkingStatusLabel(t, effectiveThinking)}
+            inherited={!hasThinking}
+            onReset={hasThinking ? () => setModel({ enable_thinking: null }) : undefined}
+          />
         </Field>
         <Field label={t('agents.field.reasoningEffort')}>
           <select value={model.reasoning_effort || ''} onChange={(e) => setModel({ reasoning_effort: e.target.value })} className={fieldCls}>
@@ -1081,11 +1126,13 @@ function SubAgentEditor({ index, agent, subAgent, profiles, onChange }: {
           {rows.map((tool) => (
             <div key={tool.key} className="flex min-w-0 items-center gap-2 rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-2 py-1.5">
               <span className="min-w-0 flex-1 truncate text-[11px]">{t(tool.titleKey)}</span>
-              <select value={tools[tool.key] === undefined || tools[tool.key] === null ? '' : String(tools[tool.key])} onChange={(e) => setTool(tool.key, e.target.value === '' ? null : e.target.value === 'true')} className={`${fieldCls} max-w-28 shrink-0`}>
-                <option value="">{t('agents.option.inherit')}</option>
-                <option value="true">{t('agents.option.on')}</option>
-                <option value="false">{t('agents.option.off')}</option>
-              </select>
+              <SwitchWithInheritance
+                checked={tools[tool.key] ?? true}
+                onChange={(checked) => setTool(tool.key, checked)}
+                ariaLabel={t(tool.titleKey)}
+                inherited={tools[tool.key] === undefined || tools[tool.key] === null}
+                onReset={tools[tool.key] !== undefined && tools[tool.key] !== null ? () => setTool(tool.key, null) : undefined}
+              />
             </div>
           ))}
         </div>
@@ -1132,15 +1179,13 @@ function AgentSkillSection({ agent, skills, value, effective, onChange }: {
                     {skill.agent ? ` · ${skill.agent}` : ''}
                   </div>
                 </div>
-                <select
-                  value={inherited ? '' : String(explicit)}
-                  onChange={(event) => onChange(skill.name, event.target.value === '' ? null : event.target.value === 'true')}
-                  className={`${fieldCls} shrink-0 sm:max-w-32`}
-                >
-                  <option value="">{t('agents.option.inherit')}</option>
-                  <option value="true">{t('agents.option.on')}</option>
-                  <option value="false">{t('agents.option.off')}</option>
-                </select>
+                <SwitchWithInheritance
+                  checked={Boolean(current)}
+                  onChange={(checked) => onChange(skill.name, checked)}
+                  ariaLabel={`/${skill.name}`}
+                  inherited={inherited}
+                  onReset={!inherited ? () => onChange(skill.name, null) : undefined}
+                />
               </div>
             )
           })}
@@ -1228,6 +1273,51 @@ function Field({ label, inherited, onReset, children }: { label: string; inherit
   )
 }
 
+function ToggleSwitch({ checked, onChange, ariaLabel, statusLabel }: { checked: boolean; onChange: (checked: boolean) => void; ariaLabel: string; statusLabel?: string }) {
+  const { t } = useTranslation()
+  const label = statusLabel || (checked ? t('agents.option.on') : t('agents.option.off'))
+  const dotClass = statusDotClass(label, checked, t)
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5" title={`${ariaLabel}: ${label}`}>
+      <Switch
+        checked={checked}
+        onCheckedChange={onChange}
+        aria-label={ariaLabel}
+        title={`${ariaLabel}: ${label}`}
+      />
+      <span aria-hidden="true" className={`size-1.5 shrink-0 rounded-full ${dotClass}`} />
+    </span>
+  )
+}
+
+function SwitchWithInheritance({ checked, onChange, ariaLabel, statusLabel, inherited, onReset }: {
+  checked: boolean
+  onChange: (checked: boolean) => void
+  ariaLabel: string
+  statusLabel?: string
+  inherited: boolean
+  onReset?: () => void
+}) {
+  return (
+    <span className="inline-flex shrink-0 items-center gap-1.5">
+      <ToggleSwitch checked={checked} onChange={onChange} ariaLabel={ariaLabel} statusLabel={statusLabel} />
+      <InheritanceText inherited={inherited} onReset={onReset} />
+    </span>
+  )
+}
+
+function InheritanceText({ inherited, onReset }: { inherited: boolean; onReset?: () => void }) {
+  const { t } = useTranslation()
+  if (inherited) {
+    return <span className="w-7 text-center text-[10px] leading-none text-[var(--nova-text-faint)]">{t('agents.badge.inherited')}</span>
+  }
+  return (
+    <button type="button" onClick={onReset} className="w-7 text-center text-[10px] leading-none text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]">
+      {t('agents.badge.overridden')}
+    </button>
+  )
+}
+
 function InheritanceBadge({ inherited, onReset }: { inherited: boolean; onReset?: () => void }) {
   const { t } = useTranslation()
   return (
@@ -1248,9 +1338,9 @@ function buildProfileOptions(draft: Settings, effective: Settings, t: (key: stri
     if (!id) return
     profiles.set(id, modelProfileLabel(profile))
   }
-  profiles.set('default', effective.openai_model || t('agents.option.defaultModel'))
-  ;(effective.model_profiles ?? []).forEach(add)
+  modelProfilesWithDefault(effective).forEach(add)
   ;(draft.model_profiles ?? []).forEach(add)
+  if (!profiles.has('default')) profiles.set('default', t('agents.option.defaultModel'))
   return Array.from(profiles.entries()).map(([id, label]) => ({
     id,
     label: id === 'default' ? t('agents.option.defaultProfile', { label }) : t('agents.option.profile', { id, label }),
@@ -1302,6 +1392,20 @@ function hasTextOverride(value?: string) {
   return value !== undefined && value !== ''
 }
 
+function thinkingDisplayValue(value?: boolean | null) {
+  return value ?? true
+}
+
+function thinkingStatusLabel(t: (key: string) => string, value?: boolean | null) {
+  if (value === undefined || value === null) return t('agents.option.default')
+  return value ? t('agents.option.on') : t('agents.option.off')
+}
+
+function statusDotClass(label: string, checked: boolean, t: (key: string) => string) {
+  if (label === t('agents.option.default')) return 'bg-[var(--nova-text-faint)]'
+  return checked ? 'bg-[var(--nova-success)]' : 'bg-[var(--nova-danger)]'
+}
+
 function hasPromptOverride(value?: string) {
   return value !== undefined && value.trim() !== ''
 }
@@ -1310,8 +1414,34 @@ function isDeepAgentParent(agent: VisibleAgentKey): agent is DeepAgentParentKey 
   return (DEEP_AGENT_PARENT_KEYS as string[]).includes(agent)
 }
 
+const GENERAL_SUB_AGENT_KEYS = ['default', 'ide', 'interactive_story', 'config_manager', 'automation'] as const
+
+function defaultGeneralSubAgentSettings(): Settings['general_sub_agents'] {
+  return { default: false, ide: true, automation: true }
+}
+
+function previewGeneralSubAgentSettings(layered: LayeredSettings | null, activeLayer: SettingsLayer, draft: Settings): Settings['general_sub_agents'] {
+  let settings = defaultGeneralSubAgentSettings()
+  if (!layered) return mergeGeneralSubAgentSettings(settings, draft.general_sub_agents)
+  settings = mergeGeneralSubAgentSettings(settings, layered.default.general_sub_agents)
+  settings = mergeGeneralSubAgentSettings(settings, layered.global.general_sub_agents)
+  settings = mergeGeneralSubAgentSettings(settings, activeLayer === 'user' ? draft.general_sub_agents : layered.user.general_sub_agents)
+  settings = mergeGeneralSubAgentSettings(settings, activeLayer === 'workspace' ? draft.general_sub_agents : layered.workspace.general_sub_agents)
+  return settings
+}
+
+function mergeGeneralSubAgentSettings(parent: Settings['general_sub_agents'], child: Settings['general_sub_agents']): Settings['general_sub_agents'] {
+  const out: Settings['general_sub_agents'] = { ...(parent ?? {}) }
+  if (!child) return out
+  for (const key of GENERAL_SUB_AGENT_KEYS) {
+    const value = child[key]
+    if (value !== undefined && value !== null) out[key] = value
+  }
+  return out
+}
+
 function resolveGeneralSubAgentEnabled(settings: Settings['general_sub_agents'], agent: DeepAgentParentKey) {
-  const fallback = settings?.default ?? true
+  const fallback = settings?.default ?? false
   return settings?.[agent] ?? fallback
 }
 
@@ -1350,15 +1480,54 @@ function normalizeSubAgentConfig(value: SubAgentConfig): SubAgentConfig {
   }
 }
 
+function mergeVisibleSubAgents(effective: SubAgentConfig[], draft: SubAgentConfig[]) {
+  const rows: SubAgentConfig[] = []
+  const index = new Map<string, number>()
+  for (const subAgent of effective) {
+    const id = normalizeSubAgentID(subAgent.id || '')
+    if (!id || index.has(id)) continue
+    index.set(id, rows.length)
+    rows.push(normalizeSubAgentConfig(subAgent))
+  }
+  for (const subAgent of draft) {
+    const normalized = normalizeSubAgentConfig(subAgent)
+    const id = normalizeSubAgentID(normalized.id || '')
+    if (!id) continue
+    const existing = index.get(id)
+    if (existing === undefined) {
+      index.set(id, rows.length)
+      rows.push(normalized)
+    } else {
+      rows[existing] = normalized
+    }
+  }
+  return rows
+}
+
+function upsertSubAgentOverride(current: SubAgentConfig[], next: SubAgentConfig, previousID?: string) {
+  const nextID = normalizeSubAgentID(next.id || '')
+  const oldID = normalizeSubAgentID(previousID || nextID)
+  if (!nextID) return current
+  const filtered = current.filter((subAgent) => {
+    const id = normalizeSubAgentID(subAgent.id || '')
+    return id !== nextID && id !== oldID
+  })
+  return [...filtered, next]
+}
+
 function sanitizeSubAgentParents(value?: string[]) {
   if (!value || value.length === 0) return []
   const selected = DEEP_AGENT_PARENT_KEYS.filter((parent) => value.includes(parent))
-  return selected.length === DEEP_AGENT_PARENT_KEYS.length ? [] : selected
+  return selected
 }
 
 function effectiveSubAgentParents(subAgent: SubAgentConfig): DeepAgentParentKey[] {
   const parents = sanitizeSubAgentParents(subAgent.parents)
-  return parents.length > 0 ? parents as DeepAgentParentKey[] : DEEP_AGENT_PARENT_KEYS
+  return parents as DeepAgentParentKey[]
+}
+
+function subAgentParentsWithout(subAgent: SubAgentConfig, agent: DeepAgentParentKey): DeepAgentParentKey[] {
+  return effectiveSubAgentParents(subAgent).filter((parent) => parent !== agent)
 }
 
 function mergeAgentModelOverride(parent: AgentModelOverride, child: AgentModelOverride): AgentModelOverride {

@@ -26,6 +26,7 @@ type AgentModelSettings struct {
 	InteractiveHotChoices AgentModelOverride `toml:"interactive_hot_choices,omitempty" json:"interactive_hot_choices,omitempty"`
 	VersionSummary        AgentModelOverride `toml:"version_summary,omitempty" json:"version_summary,omitempty"`
 	ToolAgent             AgentModelOverride `toml:"tool_agent,omitempty" json:"tool_agent,omitempty"`
+	Image                 AgentModelOverride `toml:"image,omitempty" json:"image,omitempty"`
 	Automation            AgentModelOverride `toml:"automation,omitempty" json:"automation,omitempty"`
 	ContextCompaction     AgentModelOverride `toml:"context_compaction,omitempty" json:"context_compaction,omitempty"`
 }
@@ -58,6 +59,7 @@ func MergeAgentModelSettings(parent, child AgentModelSettings) AgentModelSetting
 		InteractiveHotChoices: mergeAgentModelOverride(parent.InteractiveHotChoices, child.InteractiveHotChoices),
 		VersionSummary:        mergeAgentModelOverride(parent.VersionSummary, child.VersionSummary),
 		ToolAgent:             mergeAgentModelOverride(parent.ToolAgent, child.ToolAgent),
+		Image:                 mergeAgentModelOverride(parent.Image, child.Image),
 		Automation:            mergeAgentModelOverride(parent.Automation, child.Automation),
 		ContextCompaction:     mergeAgentModelOverride(parent.ContextCompaction, child.ContextCompaction),
 	}
@@ -79,6 +81,24 @@ func ResolveAgentModel(cfg *Config, agentKind string) ResolvedModelSettings {
 		profile.ID = id
 		profiles[id] = mergeModelProfile(base, profile)
 	}
+	defaultProfile := profiles["default"]
+	if defaultProfile.OpenAIAPIKey == "" {
+		defaultProfile.OpenAIAPIKey = cfg.OpenAIAPIKey
+	}
+	if defaultProfile.OpenAIBaseURL == "" {
+		defaultProfile.OpenAIBaseURL = cfg.OpenAIBaseURL
+	}
+	if defaultProfile.OpenAIModel == "" {
+		defaultProfile.OpenAIModel = cfg.OpenAIModel
+	}
+	if defaultProfile.ContextWindowTokens == nil {
+		contextWindowTokens := cfg.OpenAIContextWindowTokens
+		if contextWindowTokens <= 0 {
+			contextWindowTokens = DefaultContextWindowTokens
+		}
+		defaultProfile.ContextWindowTokens = intPtr(contextWindowTokens)
+	}
+	profiles["default"] = defaultProfile
 
 	defaultOverride := cfg.AgentModels.Default
 	agentOverride := mergeAgentModelOverride(defaultOverride, agentModelOverrideFor(cfg.AgentModels, agentKind))
@@ -92,20 +112,16 @@ func ResolveAgentModel(cfg *Config, agentKind string) ResolvedModelSettings {
 		profile = profiles[profileID]
 	}
 	if profile.OpenAIAPIKey == "" {
-		profile.OpenAIAPIKey = cfg.OpenAIAPIKey
+		profile.OpenAIAPIKey = defaultProfile.OpenAIAPIKey
 	}
 	if profile.OpenAIBaseURL == "" {
-		profile.OpenAIBaseURL = cfg.OpenAIBaseURL
+		profile.OpenAIBaseURL = defaultProfile.OpenAIBaseURL
 	}
 	if profile.OpenAIModel == "" {
-		profile.OpenAIModel = cfg.OpenAIModel
+		profile.OpenAIModel = defaultProfile.OpenAIModel
 	}
 	if profile.ContextWindowTokens == nil {
-		contextWindowTokens := cfg.OpenAIContextWindowTokens
-		if contextWindowTokens <= 0 {
-			contextWindowTokens = DefaultContextWindowTokens
-		}
-		profile.ContextWindowTokens = intPtr(contextWindowTokens)
+		profile.ContextWindowTokens = defaultProfile.ContextWindowTokens
 	}
 	temperature := profile.Temperature
 	if agentOverride.Temperature != nil {
@@ -165,7 +181,7 @@ func sanitizeModelProfiles(profiles []ModelProfileSettings) []ModelProfileSettin
 		if profile.ID == "" {
 			continue
 		}
-		if profile.OpenAIModel == "" {
+		if profile.OpenAIModel == "" && profile.ID != "default" {
 			profile.OpenAIModel = profile.ID
 		}
 		profile.Name = strings.TrimSpace(profile.Name)
@@ -181,14 +197,21 @@ func sanitizeModelProfiles(profiles []ModelProfileSettings) []ModelProfileSettin
 	return out
 }
 
+func defaultModelProfile(profiles []ModelProfileSettings) (ModelProfileSettings, bool) {
+	for _, profile := range profiles {
+		if modelProfileID(profile) == "default" {
+			return profile, true
+		}
+	}
+	return ModelProfileSettings{}, false
+}
+
 func mergeModelProfile(parent, child ModelProfileSettings) ModelProfileSettings {
 	out := parent
 	if id := modelProfileID(child); id != "" {
 		out.ID = id
 	}
-	if child.Name != "" {
-		out.Name = strings.TrimSpace(child.Name)
-	}
+	out.Name = strings.TrimSpace(child.Name)
 	if child.OpenAIAPIKey != "" {
 		out.OpenAIAPIKey = child.OpenAIAPIKey
 	}

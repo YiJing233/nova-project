@@ -1,4 +1,6 @@
 import common from './en-US/common'
+import remoteAccess from './en-US/remoteAccess'
+import configManager from './en-US/configManager'
 import chat from './en-US/chat'
 import editor from './en-US/editor'
 import runtime from './en-US/runtime'
@@ -24,6 +26,8 @@ import storyPicker from './en-US/storyPicker'
 import branchTimeline from './en-US/branchTimeline'
 import storyStage from './en-US/storyStage'
 import snapshot from './en-US/snapshot'
+import memoryPanel from './en-US/memoryPanel'
+import storyMemory from './en-US/storyMemory'
 import settings from './en-US/settings'
 import time from './en-US/time'
 import versions from './en-US/versions'
@@ -31,9 +35,13 @@ import workbench from './en-US/workbench'
 import interactiveLayout from './en-US/interactiveLayout'
 import skills from './en-US/skills'
 import automations from './en-US/automations'
+import messages from './en-US/messages'
+import onboarding from './en-US/onboarding'
 
 const enUS = {
   ...common,
+  ...remoteAccess,
+  ...configManager,
   ...chat,
   ...editor,
   ...runtime,
@@ -59,6 +67,8 @@ const enUS = {
   ...branchTimeline,
   ...storyStage,
   ...snapshot,
+  ...memoryPanel,
+  ...storyMemory,
   ...settings,
   ...time,
   ...versions,
@@ -66,6 +76,8 @@ const enUS = {
   ...interactiveLayout,
   ...skills,
   ...automations,
+  ...messages,
+  ...onboarding,
 } as const
 
 export default enUS

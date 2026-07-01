@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { getSkills } from '@/lib/api'
@@ -70,12 +70,12 @@ describe('AgentsView', () => {
     render(<AgentsView />)
 
     await screen.findByText('模型与思考')
-    expect(screen.queryByText('deepseek（deepseek-v3）')).not.toBeInTheDocument()
+    expect(screen.queryByText('deepseek（DeepSeek V3）')).not.toBeInTheDocument()
 
     window.dispatchEvent(new CustomEvent('nova:settings-updated'))
 
     await waitFor(() => {
-      expect(screen.getByText('deepseek（deepseek-v3）')).toBeInTheDocument()
+      expect(screen.getByText('deepseek（DeepSeek V3）')).toBeInTheDocument()
     })
   })
 
@@ -124,10 +124,53 @@ describe('AgentsView', () => {
 
     const title = await screen.findByText('命令执行')
     const row = title.parentElement?.parentElement
-    const select = row?.querySelector('select')
+    const toggle = row ? within(row).getByRole('switch', { name: '命令执行' }) : null
     expect(screen.queryByText('Windows 暂不支持 execute')).not.toBeInTheDocument()
-    expect(select).toBeTruthy()
-    expect(select).not.toBeDisabled()
+    expect(toggle).toBeTruthy()
+    expect(toggle).not.toBeDisabled()
+  })
+
+  it('shows inherited empty thinking as the default state', async () => {
+    vi.mocked(fetchSettings).mockResolvedValue(settingsSnapshot({}))
+
+    render(<AgentsView />)
+
+    await screen.findByText('模型与思考')
+    const thinkingSwitch = screen.getByRole('switch', { name: '思考开关' })
+    expect(thinkingSwitch).toBeChecked()
+    expect(thinkingSwitch).toHaveAttribute('title', '思考开关: 默认')
+    expect(thinkingSwitch.parentElement?.querySelector('[aria-hidden="true"]')).toBeTruthy()
+  })
+
+  it('shows SubAgent thinking as inherited from the parent model', async () => {
+    const user = userEvent.setup()
+    vi.mocked(fetchSettings).mockResolvedValue(settingsSnapshot({
+      effective: {
+        agent_models: {
+          default: { enable_thinking: true },
+        },
+        sub_agents: [{
+          id: 'reviewer',
+          name: 'Reviewer',
+          description: 'Reviews drafts.',
+          system_prompt: 'Review only.',
+          parents: ['ide'],
+          enabled: true,
+          model: {},
+        }],
+      },
+    }))
+
+    render(<AgentsView />)
+
+    const reviewer = await screen.findByText('Reviewer')
+    const row = reviewer.closest('div.rounded-\\[var\\(--nova-radius\\)\\]')
+    expect(row).toBeTruthy()
+    await user.click(within(row as HTMLElement).getByRole('button', { name: '编辑 SubAgent' }))
+
+    const dialog = screen.getByRole('dialog')
+    expect(within(dialog).getByRole('switch', { name: '思考开关' })).toBeChecked()
+    expect(within(dialog).getAllByText('继承').length).toBeGreaterThan(0)
   })
 
   it('adds and edits custom SubAgents in user settings by default', async () => {
@@ -153,6 +196,104 @@ describe('AgentsView', () => {
           parents: ['ide'],
         })],
       }))
+    })
+  })
+
+  it('can disable inherited default SubAgents from the active settings layer', async () => {
+    const user = userEvent.setup()
+    vi.mocked(fetchSettings).mockResolvedValue(settingsSnapshot({
+      effective: {
+        sub_agents: [{
+          id: 'reviewer',
+          name: 'Reviewer',
+          description: 'Reviews drafts.',
+          system_prompt: 'Review only.',
+          parents: ['ide'],
+          enabled: true,
+        }],
+      },
+    }))
+
+    render(<AgentsView />)
+
+    const reviewer = await screen.findByText('Reviewer')
+    const row = reviewer.closest('div.rounded-\\[var\\(--nova-radius\\)\\]')
+    expect(row).toBeTruthy()
+    await user.click(within(row as HTMLElement).getByRole('switch', { name: '启用状态' }))
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(vi.mocked(updateUserSettings)).toHaveBeenCalledWith(expect.objectContaining({
+        sub_agents: [expect.objectContaining({
+          id: 'reviewer',
+          enabled: true,
+          parents: [],
+        })],
+      }))
+    })
+  })
+
+  it('deletes inherited SubAgents without re-enabling them on the next render', async () => {
+    const user = userEvent.setup()
+    vi.mocked(fetchSettings).mockResolvedValue(settingsSnapshot({
+      effective: {
+        sub_agents: [{
+          id: 'reviewer',
+          name: 'Reviewer',
+          description: 'Reviews drafts.',
+          system_prompt: 'Review only.',
+          parents: ['ide'],
+          enabled: true,
+        }],
+      },
+    }))
+
+    render(<AgentsView />)
+
+    await screen.findByText('Reviewer')
+    await user.click(screen.getByRole('button', { name: '删除 SubAgent' }))
+    await screen.findByText('删除 SubAgent？')
+    await user.click(screen.getByRole('button', { name: '仅从当前父 Agent 移除' }))
+
+    await waitFor(() => {
+      expect(screen.queryByText('Reviewer')).not.toBeInTheDocument()
+    })
+
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(vi.mocked(updateUserSettings)).toHaveBeenCalledWith(expect.objectContaining({
+        sub_agents: [expect.objectContaining({
+          id: 'reviewer',
+          enabled: true,
+          parents: [],
+        })],
+      }))
+    })
+  })
+
+  it('shows inherited SubAgents only on matching parent agents', async () => {
+    const user = userEvent.setup()
+    vi.mocked(fetchSettings).mockResolvedValue(settingsSnapshot({
+      effective: {
+        sub_agents: [{
+          id: 'reviewer',
+          name: 'Reviewer',
+          description: 'Reviews drafts.',
+          system_prompt: 'Review only.',
+          parents: ['ide'],
+          enabled: true,
+        }],
+      },
+    }))
+
+    render(<AgentsView />)
+
+    await screen.findByText('Reviewer')
+    await user.click(screen.getByRole('button', { name: '配置管理 Agent资料库、方案预设、Skills、自动化与故事记忆管理' }))
+
+    await waitFor(() => {
+      expect(screen.queryByText('Reviewer')).not.toBeInTheDocument()
     })
   })
 
@@ -182,7 +323,7 @@ describe('AgentsView', () => {
     })
   })
 
-  it('keeps the SubAgent editor open when auto-save completes', async () => {
+  it('keeps SubAgent dialog edits local until Done', async () => {
     vi.mocked(fetchSettings).mockResolvedValue(settingsSnapshot({}))
     vi.mocked(updateUserSettings).mockImplementation(async (settings) => settingsSnapshot({ user: settings, effective: settings }))
 
@@ -191,16 +332,38 @@ describe('AgentsView', () => {
     await screen.findByText('SubAgents')
     vi.useFakeTimers()
     fireEvent.click(screen.getByRole('button', { name: /新增 SubAgent/ }))
-    const nameInput = screen.getByDisplayValue('自定义 SubAgent')
+    const dialog = screen.getByRole('dialog')
+    const doneButton = within(dialog).getByRole('button', { name: '完成' })
+    expect(doneButton.parentElement).toHaveClass('mx-0', 'mb-0')
+    const nameInput = within(dialog).getByDisplayValue('自定义 SubAgent')
     fireEvent.change(nameInput, { target: { value: 'Researcher' } })
+    fireEvent.click(within(dialog).getByLabelText('写作'))
+
+    expect(within(dialog).getByText('当前父 Agent 未启用这个 SubAgent。')).toBeInTheDocument()
 
     await act(async () => {
       await vi.advanceTimersByTimeAsync(1100)
     })
 
-    expect(vi.mocked(updateUserSettings)).toHaveBeenCalled()
+    expect(vi.mocked(updateUserSettings)).not.toHaveBeenCalled()
     expect(screen.getByRole('dialog')).toBeInTheDocument()
     expect(screen.getByDisplayValue('Researcher')).toBeInTheDocument()
+
+    fireEvent.click(doneButton)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1100)
+    })
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(screen.queryByText('Researcher')).not.toBeInTheDocument()
+    expect(vi.mocked(updateUserSettings)).toHaveBeenCalledWith(expect.objectContaining({
+      sub_agents: [expect.objectContaining({
+        id: 'subagent-1',
+        name: 'Researcher',
+        parents: [],
+      })],
+    }))
   })
 
   it('deletes custom SubAgents from Agents page settings', async () => {
@@ -233,13 +396,32 @@ describe('AgentsView', () => {
     await screen.findByText('Researcher')
     await user.click(screen.getByRole('button', { name: '删除 SubAgent' }))
     await screen.findByText('删除 SubAgent？')
-    await user.click(screen.getByRole('button', { name: '删除' }))
+    await user.click(screen.getByRole('button', { name: '全部删除' }))
     await user.click(screen.getByRole('button', { name: '保存' }))
 
     await waitFor(() => {
       expect(vi.mocked(updateUserSettings)).toHaveBeenLastCalledWith(expect.objectContaining({
         sub_agents: [],
       }))
+    })
+  })
+
+  it('defaults General SubAgent to writing and automation only', async () => {
+    const user = userEvent.setup()
+    vi.mocked(fetchSettings).mockResolvedValue(settingsSnapshot({}))
+
+    render(<AgentsView />)
+
+    expect(await screen.findByLabelText('通用 SubAgent 启用状态')).toBeChecked()
+
+    await user.click(screen.getByRole('button', { name: /游戏叙事 Agent/ }))
+    await waitFor(() => {
+      expect(screen.getByLabelText('通用 SubAgent 启用状态')).not.toBeChecked()
+    })
+
+    await user.click(screen.getByRole('button', { name: /自动化Agent/ }))
+    await waitFor(() => {
+      expect(screen.getByLabelText('通用 SubAgent 启用状态')).toBeChecked()
     })
   })
 
@@ -254,7 +436,9 @@ describe('AgentsView', () => {
     render(<AgentsView />)
 
     const generalSwitch = await screen.findByLabelText('通用 SubAgent 启用状态')
-    await user.selectOptions(generalSwitch, 'false')
+    expect(generalSwitch).toBeChecked()
+    await user.click(generalSwitch)
+    expect(generalSwitch).not.toBeChecked()
     await user.click(screen.getByRole('button', { name: '保存' }))
 
     await waitFor(() => {
@@ -268,6 +452,7 @@ describe('AgentsView', () => {
     const user = userEvent.setup()
     vi.mocked(fetchSettings).mockResolvedValue(settingsSnapshot({
       paths: {
+        denova_dir: '/denova',
         nova_dir: '/nova',
         user_config: '/nova/config.toml',
         workspace_config: '/books/demo/.nova/config.toml',
@@ -305,6 +490,7 @@ function settingsSnapshot(patch: Partial<LayeredSettings>): LayeredSettings {
     workspace: {},
     effective: {},
     paths: {
+      denova_dir: '/denova',
       nova_dir: '/nova',
       user_config: '/nova/config.toml',
       workspace_config: '/books/demo/.nova/config.toml',

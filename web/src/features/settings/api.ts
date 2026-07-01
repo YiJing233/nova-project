@@ -1,25 +1,29 @@
 import { fetchAPI, jsonHeaders, parseSSEStream, readErrorMessage, requestJSON } from '@/lib/api-client'
-import type { LayeredSettings, Settings, UpdateCheckResult, UpdateInstallResult } from './types'
+import type { LayeredSettings, Settings, UpdateApplyResult, UpdateCheckResult, UpdateInstallResult } from './types'
 import type { SSEEvent } from '@/lib/api-client'
 
 export async function fetchSettings(): Promise<LayeredSettings> {
   return requestJSON('/api/settings')
 }
 
-export async function updateUserSettings(s: Settings): Promise<LayeredSettings> {
+export async function updateUserSettings(s: Settings, baseRevision?: string): Promise<LayeredSettings> {
   return requestJSON('/api/settings/user', {
     method: 'PUT',
     headers: jsonHeaders,
-    body: JSON.stringify(s),
+    body: JSON.stringify(settingsUpdateBody(s, baseRevision)),
   })
 }
 
-export async function updateWorkspaceSettings(s: Settings): Promise<LayeredSettings> {
+export async function updateWorkspaceSettings(s: Settings, baseRevision?: string): Promise<LayeredSettings> {
   return requestJSON('/api/settings/workspace', {
     method: 'PUT',
     headers: jsonHeaders,
-    body: JSON.stringify(s),
+    body: JSON.stringify(settingsUpdateBody(s, baseRevision)),
   })
+}
+
+function settingsUpdateBody(settings: Settings, baseRevision?: string) {
+  return baseRevision ? { settings, base_revision: baseRevision } : settings
 }
 
 export async function checkForUpdate(): Promise<UpdateCheckResult> {
@@ -35,4 +39,8 @@ export async function installUpdateStream(signal?: AbortSignal): Promise<Readabl
   if (!res.ok) throw new Error(await readErrorMessage(res))
   if (!res.body) throw new Error('No response body')
   return parseSSEStream(res.body)
+}
+
+export async function applyUpdate(): Promise<UpdateApplyResult> {
+  return requestJSON('/api/update/apply', { method: 'POST' })
 }

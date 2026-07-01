@@ -8,11 +8,13 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/cloudwego/eino-ext/components/model/openai"
+	openaiprotocol "github.com/cloudwego/eino-ext/libs/acl/openai"
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
@@ -23,9 +25,23 @@ var (
 	modelInputLogSeq     atomic.Uint64
 	modelInputLogMu      sync.Mutex
 	modelInputLogPath    = filepath.Join("log", "llm-inputs.jsonl")
+	modelInputLogJobs    chan modelInputLogJob
+	modelInputLogOnce    sync.Once
+	modelInputLogWG      sync.WaitGroup
+
+	modelInputLogPendingMu sync.Mutex
+	modelInputLogPending   = map[modelInputLogPendingKey][]string{}
 )
 
-const modelInputLogMaxLines = 10
+const (
+	modelInputLogMaxLines  = 10
+	modelInputLogQueueSize = 32
+)
+
+type modelInputLogPendingKey struct {
+	AgentKind string
+	Source    string
+}
 
 type modelInputLogOptions struct {
 	AgentKind string
@@ -43,11 +59,43 @@ type modelInputLogRecord struct {
 	AgentKind    string                   `json:"agent_kind,omitempty"`
 	Source       string                   `json:"source,omitempty"`
 	Mode         string                   `json:"mode,omitempty"`
+	ProviderID   string                   `json:"provider_request_id,omitempty"`
 	ModelConfig  modelInputLogModelConfig `json:"model_config"`
 	MessageCount int                      `json:"message_count"`
 	ToolCount    int                      `json:"tool_count"`
 	Messages     []*schema.Message        `json:"messages"`
 	Tools        []modelInputLogTool      `json:"tools,omitempty"`
+}
+
+type modelInputLogInputJob struct {
+	Timestamp    string
+	CallID       string
+	AgentKind    string
+	Source       string
+	Mode         string
+	Config       openai.ChatModelConfig
+	MessageCount int
+	ToolCount    int
+	Messages     []*schema.Message
+	Tools        []*schema.ToolInfo
+}
+
+type modelInputLogProviderRequestIDRecord struct {
+	Type       string `json:"type"`
+	Timestamp  string `json:"timestamp"`
+	CallID     string `json:"call_id"`
+	AgentKind  string `json:"agent_kind,omitempty"`
+	Source     string `json:"source,omitempty"`
+	Mode       string `json:"mode,omitempty"`
+	RunID      string `json:"run_id,omitempty"`
+	CallIndex  int    `json:"call_index,omitempty"`
+	Model      string `json:"model,omitempty"`
+	ProviderID string `json:"provider_request_id"`
+}
+
+type modelInputLogJob struct {
+	input             *modelInputLogInputJob
+	providerRequestID *modelInputLogProviderRequestIDRecord
 }
 
 type modelInputLogModelConfig struct {
@@ -83,39 +131,73 @@ func SetModelInputLoggingEnabled(enabled bool) {
 	modelInputLogEnabled.Store(enabled)
 }
 
-func logFullModelInput(opts modelInputLogOptions) {
+func logFullModelInput(opts modelInputLogOptions) string {
 	if !modelInputLogEnabled.Load() {
-		return
+		return ""
 	}
 
 	callSeq := modelInputLogSeq.Add(1)
-	record := modelInputLogRecord{
-		Type:         "llm_input",
+	callID := fmt.Sprintf("llm-%d", callSeq)
+	input := modelInputLogInputJob{
 		Timestamp:    time.Now().UTC().Format(time.RFC3339Nano),
-		CallID:       fmt.Sprintf("llm-%d", callSeq),
+		CallID:       callID,
 		AgentKind:    opts.AgentKind,
 		Source:       opts.Source,
 		Mode:         opts.Mode,
-		ModelConfig:  modelInputLogConfigFromOpenAI(opts.Config),
+		Config:       opts.Config,
 		MessageCount: len(opts.Messages),
 		ToolCount:    len(opts.Tools),
-		Messages:     opts.Messages,
-		Tools:        modelInputLogTools(opts.Tools),
+		Messages:     append([]*schema.Message(nil), opts.Messages...),
+		Tools:        append([]*schema.ToolInfo(nil), opts.Tools...),
 	}
 
-	var buf bytes.Buffer
-	enc := json.NewEncoder(&buf)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(record); err != nil {
-		log.Printf("[llm-input-log] marshal failed agent=%s source=%s mode=%s err=%v", opts.AgentKind, opts.Source, opts.Mode, err)
-		return
+	if !enqueueModelInputLogJob(modelInputLogJob{input: &input}) {
+		log.Printf("[llm-input-log] dropped agent=%s source=%s mode=%s call_id=%s reason=queue_full", opts.AgentKind, opts.Source, opts.Mode, callID)
+		return ""
 	}
+	rememberPendingModelInputLogCall(opts.AgentKind, opts.Source, callID)
+	log.Printf("[llm-input-log] queued agent=%s source=%s mode=%s call_id=%s path=%s messages=%d tools=%d", opts.AgentKind, opts.Source, opts.Mode, callID, modelInputLogPath, input.MessageCount, input.ToolCount)
+	return callID
+}
 
-	if err := appendModelInputLog(buf.Bytes()); err != nil {
-		log.Printf("[llm-input-log] write failed agent=%s source=%s mode=%s call_id=%s path=%s bytes=%d err=%v", opts.AgentKind, opts.Source, opts.Mode, record.CallID, modelInputLogPath, buf.Len(), err)
-		return
+func logModelProviderRequestID(agentKind, source, mode, modelName, runID string, callIndex int, msg *schema.Message) string {
+	return logModelProviderRequestIDForCall("", agentKind, source, mode, modelName, runID, callIndex, msg)
+}
+
+func logModelProviderRequestIDForCall(callID, agentKind, source, mode, modelName, runID string, callIndex int, msg *schema.Message) string {
+	requestID := providerRequestIDFromMessage(msg)
+	if requestID == "" {
+		forgetModelInputLogResponseCall(callID, agentKind, source)
+		return ""
 	}
-	log.Printf("[llm-input-log] captured agent=%s source=%s mode=%s call_id=%s path=%s bytes=%d messages=%d tools=%d", opts.AgentKind, opts.Source, opts.Mode, record.CallID, modelInputLogPath, buf.Len(), record.MessageCount, record.ToolCount)
+	log.Printf(
+		"[model-response] provider_request_id=%s agent=%s source=%s mode=%s model=%q run_id=%s call_index=%d",
+		requestID,
+		strings.TrimSpace(agentKind),
+		strings.TrimSpace(source),
+		strings.TrimSpace(mode),
+		strings.TrimSpace(modelName),
+		strings.TrimSpace(runID),
+		callIndex,
+	)
+	attachProviderRequestIDToModelInputLog(callID, agentKind, source, mode, modelName, runID, callIndex, requestID)
+	return requestID
+}
+
+func providerRequestIDFromMessage(msg *schema.Message) string {
+	if msg == nil {
+		return ""
+	}
+	if requestID := strings.TrimSpace(openaiprotocol.GetRequestID(msg)); requestID != "" {
+		return requestID
+	}
+	if msg.Extra == nil {
+		return ""
+	}
+	if requestID, ok := msg.Extra["openai-request-id"].(string); ok {
+		return strings.TrimSpace(requestID)
+	}
+	return ""
 }
 
 func appendModelInputLog(payload []byte) error {
@@ -154,6 +236,193 @@ func appendModelInputLog(payload []byte) error {
 		return err
 	}
 	return os.Rename(tmpPath, modelInputLogPath)
+}
+
+func enqueueModelInputLogJob(job modelInputLogJob) bool {
+	modelInputLogOnce.Do(func() {
+		modelInputLogJobs = make(chan modelInputLogJob, modelInputLogQueueSize)
+		go runModelInputLogWorker(modelInputLogJobs)
+	})
+	modelInputLogWG.Add(1)
+	select {
+	case modelInputLogJobs <- job:
+		return true
+	default:
+		modelInputLogWG.Done()
+		return false
+	}
+}
+
+func runModelInputLogWorker(jobs <-chan modelInputLogJob) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			log.Printf("[llm-input-log] worker panic recovered err=%v", recovered)
+		}
+	}()
+	for job := range jobs {
+		func() {
+			defer modelInputLogWG.Done()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					log.Printf("[llm-input-log] job panic recovered err=%v", recovered)
+				}
+			}()
+			if err := writeModelInputLogJob(job); err != nil {
+				log.Printf("[llm-input-log] write failed path=%s err=%v", modelInputLogPath, err)
+			}
+		}()
+	}
+}
+
+func writeModelInputLogJob(job modelInputLogJob) error {
+	switch {
+	case job.input != nil:
+		input := job.input
+		record := modelInputLogRecord{
+			Type:         "llm_input",
+			Timestamp:    input.Timestamp,
+			CallID:       input.CallID,
+			AgentKind:    input.AgentKind,
+			Source:       input.Source,
+			Mode:         input.Mode,
+			ModelConfig:  modelInputLogConfigFromOpenAI(input.Config),
+			MessageCount: input.MessageCount,
+			ToolCount:    input.ToolCount,
+			Messages:     input.Messages,
+			Tools:        modelInputLogTools(input.Tools),
+		}
+		payload, err := marshalModelInputLogRecord(record)
+		if err != nil {
+			return err
+		}
+		return appendModelInputLog(payload)
+	case job.providerRequestID != nil:
+		payload, err := marshalModelInputLogProviderRequestIDRecord(*job.providerRequestID)
+		if err != nil {
+			return err
+		}
+		return appendModelInputLog(payload)
+	default:
+		return nil
+	}
+}
+
+func attachProviderRequestIDToModelInputLog(callID, agentKind, source, mode, modelName, runID string, callIndex int, requestID string) {
+	requestID = strings.TrimSpace(requestID)
+	if requestID == "" || !modelInputLogEnabled.Load() {
+		return
+	}
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		callID = takePendingModelInputLogCall(agentKind, source)
+	}
+	if callID == "" {
+		return
+	}
+	forgetPendingModelInputLogCall(callID)
+	record := &modelInputLogProviderRequestIDRecord{
+		Type:       "llm_provider_request_id",
+		Timestamp:  time.Now().UTC().Format(time.RFC3339Nano),
+		CallID:     callID,
+		AgentKind:  strings.TrimSpace(agentKind),
+		Source:     strings.TrimSpace(source),
+		Mode:       strings.TrimSpace(mode),
+		RunID:      strings.TrimSpace(runID),
+		CallIndex:  callIndex,
+		Model:      strings.TrimSpace(modelName),
+		ProviderID: requestID,
+	}
+	if !enqueueModelInputLogJob(modelInputLogJob{providerRequestID: record}) {
+		log.Printf("[llm-input-log] provider_request_id dropped call_id=%s reason=queue_full", callID)
+	}
+}
+
+func forgetModelInputLogResponseCall(callID, agentKind, source string) {
+	callID = strings.TrimSpace(callID)
+	if callID != "" {
+		forgetPendingModelInputLogCall(callID)
+		return
+	}
+	if strings.TrimSpace(source) != "adk" {
+		return
+	}
+	_ = takePendingModelInputLogCall(agentKind, source)
+}
+
+func rememberPendingModelInputLogCall(agentKind, source, callID string) {
+	agentKind = strings.TrimSpace(agentKind)
+	source = strings.TrimSpace(source)
+	callID = strings.TrimSpace(callID)
+	if agentKind == "" || source != "adk" || callID == "" {
+		return
+	}
+	modelInputLogPendingMu.Lock()
+	defer modelInputLogPendingMu.Unlock()
+	key := modelInputLogPendingKey{AgentKind: agentKind, Source: source}
+	modelInputLogPending[key] = append(modelInputLogPending[key], callID)
+}
+
+func takePendingModelInputLogCall(agentKind, source string) string {
+	key := modelInputLogPendingKey{AgentKind: strings.TrimSpace(agentKind), Source: strings.TrimSpace(source)}
+	if key.AgentKind == "" || key.Source == "" {
+		return ""
+	}
+	modelInputLogPendingMu.Lock()
+	defer modelInputLogPendingMu.Unlock()
+	queue := modelInputLogPending[key]
+	if len(queue) == 0 {
+		return ""
+	}
+	callID := queue[0]
+	if len(queue) == 1 {
+		delete(modelInputLogPending, key)
+	} else {
+		modelInputLogPending[key] = append([]string(nil), queue[1:]...)
+	}
+	return callID
+}
+
+func forgetPendingModelInputLogCall(callID string) {
+	callID = strings.TrimSpace(callID)
+	if callID == "" {
+		return
+	}
+	modelInputLogPendingMu.Lock()
+	defer modelInputLogPendingMu.Unlock()
+	for key, queue := range modelInputLogPending {
+		for i, existing := range queue {
+			if existing != callID {
+				continue
+			}
+			queue = append(queue[:i], queue[i+1:]...)
+			if len(queue) == 0 {
+				delete(modelInputLogPending, key)
+			} else {
+				modelInputLogPending[key] = queue
+			}
+			return
+		}
+	}
+}
+
+func marshalModelInputLogRecord(record modelInputLogRecord) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(record); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
+}
+
+func marshalModelInputLogProviderRequestIDRecord(record modelInputLogProviderRequestIDRecord) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(record); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 func readLastModelInputLogLines(path string, maxLines int) ([]byte, error) {

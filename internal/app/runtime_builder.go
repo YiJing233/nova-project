@@ -7,12 +7,12 @@ import (
 
 	"github.com/cloudwego/eino/adk"
 
-	"nova/config"
-	"nova/internal/agent"
-	"nova/internal/book"
-	"nova/internal/interactive"
-	"nova/internal/prompts"
-	"nova/internal/session"
+	"denova/config"
+	"denova/internal/agent"
+	"denova/internal/book"
+	"denova/internal/interactive"
+	"denova/internal/prompts"
+	"denova/internal/session"
 )
 
 type runtimeState struct {
@@ -137,4 +137,12 @@ func buildAutomationAgentRunner(ctx context.Context, cfg *config.Config, state *
 		return nil, fmt.Errorf("构建自动化 Agent 失败: %w", err)
 	}
 	return agent.NewRunnerWithOptions(ctx, builtAgent, agent.RunOptions{AgentKind: agent.AgentKindAutomation, Workspace: cfg.Workspace}), nil
+}
+
+func buildImageAgentRunner(ctx context.Context, cfg *config.Config, state *book.State, systemPrompt string) (*adk.Runner, error) {
+	builtAgent, err := agent.BuildImageAgent(ctx, cfg, state, systemPrompt)
+	if err != nil {
+		return nil, fmt.Errorf("构建图像 Agent 失败: %w", err)
+	}
+	return agent.NewRunnerWithOptions(ctx, builtAgent, agent.RunOptions{AgentKind: agent.AgentKindImage, Workspace: cfg.Workspace}), nil
 }

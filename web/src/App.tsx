@@ -33,6 +33,8 @@ import {
 } from '@/components/workbench/CharacterCardImportDialog'
 import { APP_VERSION } from '@/app-version'
 import { RemoteAccessLogin } from '@/components/RemoteAccessLogin'
+import { OnboardingGuide, type OnboardingNavigationTarget } from '@/features/onboarding/OnboardingGuide'
+import { SETTINGS_SECTION_EVENT, WRITING_AGENT_INIT_EVENT } from '@/features/onboarding/events'
 
 const PROJECT_VISIBLE_KEY = 'nova.layout.projectVisible'
 const ACTIVITY_BAR_EXPANDED_KEY = 'nova.layout.activityBarExpanded'
@@ -52,7 +54,7 @@ function App() {
   const { t } = useTranslation()
   const { setTheme } = useTheme()
   const [projectVisible, setProjectVisible] = useState(() => readLayoutBoolean(PROJECT_VISIBLE_KEY, true))
-  const [activityBarExpanded, setActivityBarExpanded] = useState(() => readLayoutBoolean(ACTIVITY_BAR_EXPANDED_KEY, false))
+  const [activityBarExpanded, setActivityBarExpanded] = useState(() => readLayoutBoolean(ACTIVITY_BAR_EXPANDED_KEY, true))
   const [interactiveRightVisible, setInteractiveRightVisible] = useState(() => readLayoutBoolean(INTERACTIVE_RIGHT_VISIBLE_KEY, true))
   const [saveSignal, setSaveSignal] = useState(0)
   const [versionRefreshSignal, setVersionRefreshSignal] = useState(0)
@@ -127,8 +129,14 @@ function App() {
     references,
     styleScenes,
     textSelections,
+    planMode,
+    setPlanMode,
+    togglePlanMode,
     send,
     analyzeContext,
+    submitPlanQuestion,
+    approveProposedPlan,
+    exitPlanMode,
     stop,
     loadSessions,
     loadHistory,
@@ -147,6 +155,22 @@ function App() {
     addTextSelection,
     removeTextSelection,
   } = useChat({ onAgentFileChange: handleAgentFileChange })
+
+  const notifyPlanModeEnabled = useCallback(() => {
+    toast.info(t('chat.plan.modeOn'), {
+      description: t('chat.plan.shiftTabHint'),
+    })
+  }, [t])
+
+  const handleChatPlanModeChange = useCallback((value: boolean) => {
+    if (value && !planMode) notifyPlanModeEnabled()
+    setPlanMode(value)
+  }, [notifyPlanModeEnabled, planMode, setPlanMode])
+
+  const handleChatPlanModeToggle = useCallback(() => {
+    if (!planMode) notifyPlanModeEnabled()
+    togglePlanMode()
+  }, [notifyPlanModeEnabled, planMode, togglePlanMode])
 
   const refreshLoreItems = useCallback(async () => {
     if (!workspace) {
@@ -218,7 +242,7 @@ function App() {
           setEditorAutoSaveEnabled(effective?.auto_save_enabled ?? AUTO_SAVE_ENABLED_FALLBACK)
           setEditorAutoSaveDelayMs(normalizeAutoSaveDelayMs(effective?.auto_save_interval_ms))
           setUpdateCheckEnabled(effective?.update_check_enabled !== false)
-          setNovaDir(data?.paths?.nova_dir || '')
+          setNovaDir(data?.paths?.denova_dir || data?.paths?.nova_dir || '')
           setConfiguredLocale(effective?.language)
           setTheme(normalizeAppTheme(effective?.theme))
           setMotionIntensity(normalizeMotionIntensity(effective?.motion_intensity))
@@ -568,6 +592,77 @@ function App() {
     setSidebarView('search')
   }, [setMode])
 
+  const handleOnboardingNavigate = useCallback((target: OnboardingNavigationTarget, prompt?: string) => {
+    if (target === 'settings-model') {
+      setSettingsOpen(true)
+      window.setTimeout(() => {
+        window.dispatchEvent(new CustomEvent(SETTINGS_SECTION_EVENT, {
+          detail: { section: 'model', layer: 'user' },
+        }))
+      }, 0)
+      return
+    }
+    if (target === 'books') {
+      handleSetMode('books')
+      return
+    }
+    if (target === 'writing') {
+      handleSetMode('ide')
+      if (rightPanel === 'lore' || rightPanel === 'teller' || rightPanel === 'versions') handleSetRightPanel(null)
+      return
+    }
+    if (target === 'writing-agent') {
+      handleSetMode('ide')
+      handleSetRightPanel('ai')
+      if (prompt) {
+        window.setTimeout(() => {
+          window.dispatchEvent(new CustomEvent(WRITING_AGENT_INIT_EVENT, { detail: { prompt } }))
+        }, 0)
+      }
+      return
+    }
+    if (target === 'interactive') {
+      handleSetMode('interactive')
+      if (rightPanel === 'versions') handleSetRightPanel(null)
+      return
+    }
+    if (target === 'lore') {
+      setSettingsOpen(false)
+      if (mode === 'interactive') {
+        useInteractiveStore.getState().setSubmode('lore')
+      } else {
+        handleSetMode('ide')
+        handleSetRightPanel('lore')
+      }
+      return
+    }
+    if (target === 'teller') {
+      setSettingsOpen(false)
+      if (mode === 'interactive') {
+        useInteractiveStore.getState().setSubmode('teller')
+      } else {
+        handleSetMode('ide')
+        handleSetRightPanel('teller')
+      }
+      return
+    }
+    if (target === 'versions') {
+      handleOpenVersions()
+      return
+    }
+    if (target === 'skills') {
+      handleSetMode('skills')
+      return
+    }
+    if (target === 'agents') {
+      handleSetMode('agents')
+      return
+    }
+    if (target === 'automations') {
+      handleSetMode('automations')
+    }
+  }, [handleOpenVersions, handleSetMode, handleSetRightPanel, mode, rightPanel])
+
   useWorkspaceHotkeys({
     onSave: triggerSave,
     onOpenCommand: () => setCommandOpen(true),
@@ -623,6 +718,7 @@ function App() {
         loreItems={loreItems}
         styleScenes={styleScenes}
         textSelections={textSelections}
+        chatPlanMode={planMode}
         onSetMode={handleSetMode}
         onToggleActivityBarExpanded={() => setActivityBarExpanded((value) => !value)}
         onToggleProjectVisible={() => setProjectVisible((value) => !value)}
@@ -637,7 +733,6 @@ function App() {
         onOpenCharacterCardImport={handleOpenCharacterCardImportFromBooks}
         onSetSidebarView={setSidebarView}
         onSelectSearchResult={handleSelectSearchResult}
-        onRefreshTree={refresh}
         onSelectFile={handleSelectFile}
         onSetChapterConfirmed={handleSetChapterConfirmed}
         onReferenceFile={addReference}
@@ -663,6 +758,11 @@ function App() {
         onStyleSceneAdd={addStyleScene}
         onStyleSceneRemove={removeStyleScene}
         onTextSelectionRemove={removeTextSelection}
+        onChatPlanModeChange={handleChatPlanModeChange}
+        onChatPlanModeToggle={handleChatPlanModeToggle}
+        onSubmitPlanQuestion={submitPlanQuestion}
+        onApproveProposedPlan={approveProposedPlan}
+        onExitChatPlanMode={exitPlanMode}
       />
       <CommandPalette
         open={commandOpen}
@@ -702,6 +802,17 @@ function App() {
         onImport={handleCharacterCardImport}
       />
       <RemoteAccessLogin />
+      <OnboardingGuide
+        mode={mode}
+        rightPanel={rightPanel}
+        settingsOpen={settingsOpen}
+        workspace={workspace}
+        booksCount={books.length}
+        currentBookName={currentBookName}
+        messages={messages}
+        isStreaming={isStreaming}
+        onNavigate={handleOnboardingNavigate}
+      />
     </NovaMotionProvider>
   )
 }

@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useMemo, type ReactNode } from 'react'
+import { useState, useRef, useEffect, useLayoutEffect, useMemo, useCallback, type ReactNode } from 'react'
 import type { LucideIcon } from 'lucide-react'
 import { Archive, BadgeHelp, BarChart3, ClipboardList, Command as CommandIcon, Eraser, Layers3, List, ListTree, PenLine, ScrollText, Send, Sparkles, Square, WandSparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
@@ -21,12 +21,15 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import {
   DropdownMenu,
+  DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
 import { isComposingKeyboardEvent } from '@/lib/keyboard'
+import { useKeyboardInset } from '@/hooks/useKeyboardInset'
+import { useIsMobile } from '@/hooks/useIsMobile'
 
 /** 可用命令列表 */
 const COMMANDS: Array<{ cmd: string; descKey: string; hintKey: string; icon: LucideIcon }> = [
@@ -51,15 +54,20 @@ type CommandOption = {
   description: string
   hint: string
   icon: LucideIcon
+  source: 'builtin' | 'skill'
 }
 
 type CommandScope = 'all' | 'skills' | 'none'
+type BuiltinCommand = typeof COMMANDS[number]['cmd']
+const MAX_TOKEN_USAGE_MENU_COUNT = 10
 const inputDrafts = new Map<string, string>()
 
 interface InputAreaProps {
   onSend: (message: string) => void
   onStop?: () => void
   disabled: boolean
+  planMode?: boolean
+  onTogglePlanMode?: () => void
   draftKey?: string
   inputPrefill?: { prompt: string; nonce: number } | null
   onInputPrefillConsumed?: () => void
@@ -80,6 +88,7 @@ interface InputAreaProps {
   skills?: SkillCommand[]
   commandsEnabled?: boolean
   commandScope?: CommandScope
+  builtinCommands?: BuiltinCommand[]
   placeholder?: string
   disabledPlaceholder?: string
   onContextAnalyze?: (message: string) => void | Promise<void>
@@ -87,7 +96,9 @@ interface InputAreaProps {
   agentKey?: VisibleAgentKey
   workspace?: string
   writingSkillControl?: ReactNode
+  onboardingAnchor?: string
   floating?: boolean
+  onHeightChange?: (height: number) => void
 }
 
 /** 输入区域组件，支持 Enter 发送和命令菜单 */
@@ -95,6 +106,8 @@ export function InputArea({
   onSend,
   onStop,
   disabled,
+  planMode = false,
+  onTogglePlanMode,
   draftKey,
   inputPrefill,
   onInputPrefillConsumed,
@@ -115,6 +128,7 @@ export function InputArea({
   skills = [],
   commandsEnabled = true,
   commandScope = 'all',
+  builtinCommands,
   placeholder,
   disabledPlaceholder,
   onContextAnalyze,
@@ -122,9 +136,13 @@ export function InputArea({
   agentKey,
   workspace,
   writingSkillControl,
+  onboardingAnchor,
   floating = false,
+  onHeightChange,
 }: InputAreaProps) {
   const { t } = useTranslation()
+  const keyboardInset = useKeyboardInset()
+  const isMobile = useIsMobile()
   const [value, setValue] = useState(() => draftKey ? inputDrafts.get(draftKey) || '' : '')
   const [tokenUsageOpen, setTokenUsageOpen] = useState(false)
   const [showCommands, setShowCommands] = useState(false)
@@ -132,18 +150,25 @@ export function InputArea({
   const [referenceQuery, setReferenceQuery] = useState<string | null>(null)
   const [styleSceneQuery, setStyleSceneQuery] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
   const commandItemRefs = useRef<Array<HTMLDivElement | null>>([])
   const effectiveCommandScope: CommandScope = commandsEnabled ? commandScope : 'none'
   const defaultPlaceholder = skills.length > 0 && effectiveCommandScope !== 'none'
     ? t('chat.input.placeholderWithSkills')
     : t('chat.input.placeholder')
   const allCommands = useMemo<CommandOption[]>(() => {
-    const staticCommands = effectiveCommandScope === 'all' ? COMMANDS.map(({ cmd, descKey, hintKey, icon }) => ({
-      cmd,
-      description: t(descKey),
-      hint: t(hintKey),
-      icon,
-    })) : []
+    const allowedBuiltinCommands = builtinCommands ? new Set<string>(builtinCommands) : null
+    const staticCommands = effectiveCommandScope === 'all'
+      ? COMMANDS
+        .filter(({ cmd }) => !allowedBuiltinCommands || allowedBuiltinCommands.has(cmd))
+        .map(({ cmd, descKey, hintKey, icon }) => ({
+          cmd,
+          description: t(descKey),
+          hint: t(hintKey),
+          icon,
+          source: 'builtin' as const,
+        }))
+      : []
     const seen = new Set(staticCommands.map((command) => command.cmd))
     const skillCommands = skills
       .map((skill) => ({
@@ -151,6 +176,7 @@ export function InputArea({
         description: skill.description || skill.name,
         hint: t('chat.command.skill.hint'),
         icon: Sparkles,
+        source: 'skill' as const,
       }))
       .filter((command) => {
         if (seen.has(command.cmd)) return false
@@ -160,12 +186,23 @@ export function InputArea({
     if (effectiveCommandScope === 'skills') return skillCommands
     if (effectiveCommandScope === 'none') return []
     return [...staticCommands, ...skillCommands]
-  }, [effectiveCommandScope, skills, t])
+  }, [builtinCommands, effectiveCommandScope, skills, t])
   const filteredCommands = useMemo(() => {
     if (!value.startsWith('/')) return []
     const query = value.toLowerCase()
     return allCommands.filter((command) => command.cmd.toLowerCase().startsWith(query))
   }, [allCommands, value])
+  const filteredBuiltinCommands = useMemo(() => filteredCommands
+    .map((command, index) => ({ command, index }))
+    .filter(({ command }) => command.source === 'builtin'), [filteredCommands])
+  const filteredSkillCommands = useMemo(() => filteredCommands
+    .map((command, index) => ({ command, index }))
+    .filter(({ command }) => command.source === 'skill'), [filteredCommands])
+  const hasReferences = referencedFiles.length > 0 || loreReferences.length > 0 || styleScenes.length > 0 || textSelections.length > 0
+  const tokenUsageCount = useMemo(
+    () => Math.min(MAX_TOKEN_USAGE_MENU_COUNT, tokenUsageMessages.filter((message) => message.role === 'token_usage' && Number(message.model_calls || 0) > 0).length),
+    [tokenUsageMessages],
+  )
 
   useEffect(() => {
     if (!draftKey) return
@@ -202,6 +239,34 @@ export function InputArea({
     onInputPrefillConsumed?.()
   }, [inputPrefill, onInputPrefillConsumed])
 
+  const syncHeight = useCallback(() => {
+    const element = rootRef.current
+    if (!element) return
+    const height = Math.ceil(element.getBoundingClientRect().height)
+    // Floating composers pin to the layout-viewport bottom, so on iOS the
+    // on-screen keyboard covers them. They lift by `keyboardInset` (see the
+    // root style below), and the clearance a message list must reserve is the
+    // composer height plus that inset. Non-floating composers are in normal
+    // flow and ignore the inset.
+    onHeightChange?.(floating ? height + keyboardInset : height)
+  }, [onHeightChange, floating, keyboardInset])
+
+  useLayoutEffect(() => {
+    syncHeight()
+  }, [value, hasReferences, showCommands, referenceQuery, styleSceneQuery, syncHeight])
+
+  useEffect(() => {
+    if (!onHeightChange) return
+    const element = rootRef.current
+    if (!element || typeof ResizeObserver === 'undefined') {
+      syncHeight()
+      return
+    }
+    const observer = new ResizeObserver(syncHeight)
+    observer.observe(element)
+    return () => observer.disconnect()
+  }, [onHeightChange, syncHeight])
+
   /** 处理输入变化 */
   const handleChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const v = e.target.value
@@ -226,6 +291,12 @@ export function InputArea({
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const isMod = e.metaKey || e.ctrlKey
     const canPickCommand = effectiveCommandScope !== 'none' && showCommands && filteredCommands.length > 0
+
+    if (e.key === 'Tab' && e.shiftKey && onTogglePlanMode && !disabled) {
+      e.preventDefault()
+      onTogglePlanMode()
+      return
+    }
 
     if (canPickCommand && (e.key === 'ArrowDown' || e.key === 'ArrowUp')) {
       e.preventDefault()
@@ -334,8 +405,6 @@ export function InputArea({
     if (disabled) return
     void onContextAnalyze?.(value)
   }
-  const hasReferences = referencedFiles.length > 0 || loreReferences.length > 0 || styleScenes.length > 0 || textSelections.length > 0
-
   /** 选择命令 */
   const selectCommand = (cmd: string) => {
     setValue(cmd + ' ')
@@ -370,7 +439,12 @@ export function InputArea({
   }
 
   return (
-    <div className={floating ? 'nova-chat-input-area nova-chat-input-area-floating' : 'nova-chat-input-area relative border-t border-[var(--nova-border)] p-3'}>
+    <div
+      ref={rootRef}
+      data-onboarding-anchor={onboardingAnchor}
+      style={floating ? { bottom: keyboardInset } : undefined}
+      className={floating ? 'nova-chat-input-area nova-chat-input-area-floating' : 'nova-chat-input-area relative border-t border-[var(--nova-border)] p-3'}
+    >
       <Popover open={showCommands && filteredCommands.length > 0}>
         <PopoverTrigger asChild>
           <span className="absolute bottom-full left-3 h-0 w-0" />
@@ -390,7 +464,9 @@ export function InputArea({
                   </span>
                   <div className="min-w-0">
                     <div className="text-xs font-medium text-[var(--nova-text)]">{t('chat.commands.title')}</div>
-                    <div className="text-[11px] text-[var(--nova-text-faint)]">{t('chat.commands.description')}</div>
+                    <div className="text-[11px] text-[var(--nova-text-faint)]">
+                      {effectiveCommandScope === 'skills' ? t('chat.commands.skillsDescription') : t('chat.commands.description')}
+                    </div>
                   </div>
                 </div>
                 <kbd className="shrink-0 rounded border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-1.5 py-0.5 font-mono text-[10px] text-[var(--nova-text-faint)]">/</kbd>
@@ -398,38 +474,16 @@ export function InputArea({
             </div>
             <CommandList className="max-h-[312px] p-1.5">
               <CommandEmpty className="py-5 text-center text-xs text-[var(--nova-text-faint)]">{t('chat.commands.empty')}</CommandEmpty>
-              <CommandGroup heading={t('chat.commands.group')} className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-1 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:text-[var(--nova-text-faint)]">
-                {filteredCommands.map(({ cmd, description, hint, icon: Icon }, index) => {
-                  const active = index === activeCommandIndex
-                  return (
-                    <CommandItem
-                      key={cmd}
-                      ref={(element) => { commandItemRefs.current[index] = element }}
-                      value={cmd}
-                      onMouseEnter={() => setActiveCommandIndex(index)}
-                      onSelect={() => selectCommand(cmd)}
-                      className={`group min-h-12 cursor-pointer rounded-md border px-2.5 py-2 text-[var(--nova-text-muted)] ${
-                        active
-                          ? 'border-[var(--nova-border)] bg-[var(--nova-active)] text-[var(--nova-text)]'
-                          : 'border-transparent hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)]'
-                      }`}
-                    >
-                    <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-[var(--nova-surface-2)] ${
-                      active ? 'border-[var(--nova-border)] text-[var(--nova-text)]' : 'border-[var(--nova-border)] text-[var(--nova-text-faint)]'
-                    }`}>
-                      <Icon className="h-3.5 w-3.5" />
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="flex items-center gap-2">
-                        <span className="font-mono text-xs text-[var(--nova-text)]">{cmd}</span>
-                        <span className="truncate text-xs text-[var(--nova-text-muted)]">{description}</span>
-                      </span>
-                      <span className="mt-0.5 block text-[11px] text-[var(--nova-text-faint)]">{hint}</span>
-                    </span>
-                    </CommandItem>
-                  )
-                })}
-              </CommandGroup>
+              {filteredBuiltinCommands.length > 0 ? (
+                <CommandGroup heading={t('chat.commands.group')} className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-1 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:text-[var(--nova-text-faint)]">
+                  {filteredBuiltinCommands.map(({ command, index }) => renderCommandItem(command, index))}
+                </CommandGroup>
+              ) : null}
+              {filteredSkillCommands.length > 0 ? (
+                <CommandGroup heading={t('chat.commands.skillsGroup')} className="[&_[cmdk-group-heading]]:px-2 [&_[cmdk-group-heading]]:pb-1 [&_[cmdk-group-heading]]:pt-2 [&_[cmdk-group-heading]]:text-[11px] [&_[cmdk-group-heading]]:text-[var(--nova-text-faint)]">
+                  {filteredSkillCommands.map(({ command, index }) => renderCommandItem(command, index))}
+                </CommandGroup>
+              ) : null}
             </CommandList>
           </Command>
         </PopoverContent>
@@ -504,13 +558,18 @@ export function InputArea({
           <Textarea
             ref={textareaRef}
             autoResize
-            multilineMode="sticky-until-empty"
             value={value}
             onChange={handleChange}
             onKeyDown={handleKeyDown}
             placeholder={disabled ? (disabledPlaceholder ?? t('chat.input.disabledPlaceholder')) : (placeholder ?? defaultPlaceholder)}
             disabled={disabled}
-            rows={1}
+            rows={2}
+            minRows={2}
+            maxRows={isMobile ? 5 : 10}
+            multilineMode="always"
+            inputMode="text"
+            enterKeyHint="send"
+            autoCapitalize="sentences"
             className="nova-agent-composer-textarea min-h-[42px] resize-none border-0 bg-transparent px-1 py-[9px] text-sm leading-6 text-[var(--nova-text)] shadow-none placeholder:text-[var(--nova-text-faint)] focus-visible:border-transparent focus-visible:ring-0 disabled:opacity-50"
           />
         }
@@ -522,7 +581,7 @@ export function InputArea({
                   type="button"
                   size="icon-sm"
                   className="nova-agent-composer-icon h-8 w-8 shrink-0 rounded-[10px] border border-[var(--nova-border)] bg-[var(--nova-surface)] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)] disabled:opacity-45"
-                  disabled={!writingSkillControl && !onContextAnalyze && tokenUsageMessages.length === 0 && !(agentKey && workspace)}
+                  disabled={!onTogglePlanMode && !writingSkillControl && !onContextAnalyze && tokenUsageMessages.length === 0 && !(agentKey && workspace)}
                   aria-label={t('chat.input.actions')}
                   title={t('chat.input.actions')}
                 >
@@ -530,6 +589,22 @@ export function InputArea({
                 </Button>
               </DropdownMenuTrigger>
               <DropdownMenuContent align="start" side="top" className="w-80 border-[var(--nova-border)] bg-[var(--nova-surface-2)] p-2 text-[var(--nova-text)]">
+                {onTogglePlanMode ? (
+                  <>
+                    <DropdownMenuCheckboxItem
+                      checked={planMode}
+                      disabled={disabled}
+                      onCheckedChange={() => onTogglePlanMode()}
+                      className="cursor-pointer pr-16 text-xs focus:bg-[var(--nova-active)] focus:text-[var(--nova-text)]"
+                      title={t('chat.plan.shiftTabHint')}
+                    >
+                      <ClipboardList className="h-3.5 w-3.5" />
+                      <span className="min-w-0 flex-1">{t('chat.plan.short')}</span>
+                      <span className="text-[10px] text-[var(--nova-text-faint)]">Shift+Tab</span>
+                    </DropdownMenuCheckboxItem>
+                    <DropdownMenuSeparator className="bg-[var(--nova-border-soft)]" />
+                  </>
+                ) : null}
                 {writingSkillControl}
                 <ModelProfileSwitcher agentKey={agentKey} workspace={workspace} disabled={disabled} />
                 <DropdownMenuItem
@@ -538,7 +613,7 @@ export function InputArea({
                 >
                   <BarChart3 className="h-3.5 w-3.5" />
                   <span className="min-w-0 flex-1">{t('chat.tokenUsage.action')}</span>
-                  <span className="text-[10px] text-[var(--nova-text-faint)]">{t('chat.tokenUsage.subtitle', { count: tokenUsageMessages.length })}</span>
+                  <span className="text-[10px] text-[var(--nova-text-faint)]">{t('chat.tokenUsage.subtitle', { count: tokenUsageCount })}</span>
                 </DropdownMenuItem>
                 <DropdownMenuSeparator className="bg-[var(--nova-border-soft)]" />
                 <DropdownMenuItem
@@ -551,6 +626,16 @@ export function InputArea({
                 </DropdownMenuItem>
               </DropdownMenuContent>
             </DropdownMenu>
+            {planMode ? (
+              <span
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 border-l border-[var(--nova-border-soft)] pl-2 text-sm text-[var(--nova-text-muted)]"
+                aria-label={t('chat.plan.modeOn')}
+                title={t('chat.plan.shiftTabHint')}
+              >
+                <ClipboardList className="h-3.5 w-3.5" />
+                {t('chat.plan.short')}
+              </span>
+            ) : null}
             <TokenUsageDialog open={tokenUsageOpen} messages={tokenUsageMessages} onOpenChange={setTokenUsageOpen} />
           </>
         }
@@ -571,4 +656,35 @@ export function InputArea({
       />
     </div>
   )
+
+  function renderCommandItem({ cmd, description, hint, icon: Icon }: CommandOption, index: number) {
+    const active = index === activeCommandIndex
+    return (
+      <CommandItem
+        key={cmd}
+        ref={(element) => { commandItemRefs.current[index] = element }}
+        value={cmd}
+        onMouseEnter={() => setActiveCommandIndex(index)}
+        onSelect={() => selectCommand(cmd)}
+        className={`group min-h-12 cursor-pointer rounded-md border px-2.5 py-2 text-[var(--nova-text-muted)] ${
+          active
+            ? 'border-[var(--nova-border)] bg-[var(--nova-active)] text-[var(--nova-text)]'
+            : 'border-transparent hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)]'
+        }`}
+      >
+        <span className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md border bg-[var(--nova-surface-2)] ${
+          active ? 'border-[var(--nova-border)] text-[var(--nova-text)]' : 'border-[var(--nova-border)] text-[var(--nova-text-faint)]'
+        }`}>
+          <Icon className="h-3.5 w-3.5" />
+        </span>
+        <span className="min-w-0 flex-1">
+          <span className="flex items-center gap-2">
+            <span className="font-mono text-xs text-[var(--nova-text)]">{cmd}</span>
+            <span className="truncate text-xs text-[var(--nova-text-muted)]">{description}</span>
+          </span>
+          <span className="mt-0.5 block text-[11px] text-[var(--nova-text-faint)]">{hint}</span>
+        </span>
+      </CommandItem>
+    )
+  }
 }

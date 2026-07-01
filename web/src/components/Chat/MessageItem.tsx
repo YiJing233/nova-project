@@ -1,13 +1,22 @@
-import { Children, Fragment, cloneElement, isValidElement, memo, useEffect, useState } from 'react'
+import { Children, Fragment, cloneElement, isValidElement, memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
 import ReactMarkdown from 'react-markdown'
+import type { Components } from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, CircleDot, Clock3, FileText, ListTodo, PanelRightOpen, Pencil, RefreshCw } from 'lucide-react'
+import { Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, CircleDot, ClipboardCheck, ClipboardList, Clock3, Copy, FileText, ImagePlus, ListTodo, Loader2, PanelRightOpen, Pencil, RefreshCw, Send, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import type { ChatMessage } from '@/lib/api'
+import { ImagePreviewDialog } from '@/components/common/ImagePreviewDialog'
+import { workspaceAssetURL, type ChapterIllustration, type ChatMessage, type InteractiveImage, type InteractiveImageError } from '@/lib/api'
+import { findDialogueHighlightRanges } from '@/lib/dialogue-highlight'
+import { isWorkspaceImagePath } from '@/lib/workspace-file-kind'
 import { useBottomScrollLock } from '@/hooks/useBottomScrollLock'
 import { TooltipIconButton } from '@/components/common/tooltip-icon-button'
+import { TooltipProvider } from '@/components/ui/tooltip'
 import { subAgentSessionKey } from './subagent-session'
+import { Button } from '@/components/ui/button'
+import { Textarea } from '@/components/ui/textarea'
+import { boundedPlanDisplay, formatPlanQuestionAnswerMessage, formatPlanQuestionAnswerPreview, parsePlanQuestionSet, recommendedAnswerSet } from '@/lib/plan-mode'
+import type { PlanQuestionAnswer } from '@/lib/plan-mode'
 
 interface MessageItemProps {
   message: ChatMessage
@@ -17,41 +26,44 @@ interface MessageItemProps {
   onRegenerate?: (message: ChatMessage) => void
   onSwitchVersion?: (message: ChatMessage, direction: -1 | 1) => void
   onOpenSubAgentSession?: (message: ChatMessage) => void
+  onInsertIllustration?: (illustration: ChapterIllustration) => void
+  onGenerateInteractiveImage?: (message: ChatMessage) => void
+  generatingInteractiveImageTurnId?: string
   activeSubAgentSessionKey?: string
   subAgentPresentation?: 'card' | 'content'
+  onSubmitPlanQuestion?: (message: ChatMessage, content: string, preview: string) => void
+  onApprovePlan?: (message: ChatMessage) => void
+  onContinuePlan?: (message: ChatMessage) => void
+  onExitPlanMode?: () => void
+  onPlanCardLayoutChange?: () => void
 }
 
+const copyFeedbackDurationMs = 1200
+const messageActionTooltipDelayMs = 500
+const messageActionTooltipSkipDelayMs = 300
+const messageActionTooltipSideOffset = 3
+const planThinkingPreviewStaleMs = 3500
+
 /** 单条消息组件，根据 role 渲染不同样式 */
-export const MessageItem = memo(function MessageItem({ message, highlightDialogue = false, messageStyle, onEdit, onRegenerate, onSwitchVersion, onOpenSubAgentSession, activeSubAgentSessionKey, subAgentPresentation = 'card' }: MessageItemProps) {
-  const { t } = useTranslation()
+export const MessageItem = memo(function MessageItem({ message, highlightDialogue = false, messageStyle, onEdit, onRegenerate, onSwitchVersion, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, subAgentPresentation = 'card', onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onPlanCardLayoutChange }: MessageItemProps) {
   const { role, content = '' } = message
   const canEdit = role === 'user' && Boolean(message.turn_id) && Boolean(onEdit)
   const canRegenerate = role === 'assistant' && Boolean(message.turn_id) && Boolean(onRegenerate) && !message.streaming
+  const canGenerateInteractiveImage = role === 'assistant' && Boolean(message.turn_id) && Boolean(onGenerateInteractiveImage) && !message.streaming
   const versionCount = message.turn_versions?.length || 0
   const markedVersionIndex = message.turn_versions?.findIndex((version) => version.current) ?? -1
   const versionIndex = message.turn_version_index ?? markedVersionIndex
   const canSwitchVersion = role === 'assistant' && versionCount > 1 && versionIndex >= 0 && Boolean(onSwitchVersion) && !message.streaming
-  const showAssistantActions = canRegenerate || canSwitchVersion
 
   switch (role) {
     case 'user':
       return (
         <div className="group flex justify-end gap-2">
-          {canEdit && (
-            <div className="flex h-8 shrink-0 items-center gap-1 self-end opacity-80 transition-opacity group-hover:opacity-100">
-              {onEdit && (
-                <TooltipIconButton
-                  label={t('chat.action.editTurn')}
-                  className="h-7 w-7 border border-[var(--nova-border)] bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]"
-                  onClick={() => onEdit(message)}
-                >
-                  <Pencil className="h-3.5 w-3.5" />
-                </TooltipIconButton>
-              )}
+          <div className="nova-message-body-with-meta nova-message-body-with-meta-user max-w-[88%]">
+            <div className="nova-user-message rounded-lg px-3.5 py-2.5 text-sm text-[var(--nova-user-message-text)] whitespace-pre-wrap" style={messageStyle}>
+              {content}
             </div>
-          )}
-          <div className="nova-user-message max-w-[88%] rounded-lg px-3.5 py-2.5 text-sm text-[var(--nova-user-message-text)] whitespace-pre-wrap" style={messageStyle}>
-            {content}
+            <MessageInlineMeta message={message} content={content} align="right" onEdit={canEdit ? onEdit : undefined} />
           </div>
         </div>
       )
@@ -71,57 +83,36 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
       }
       // 流式期间正文可能尚未到达，或全是被隐藏的思考内容（清洗后为空）：
       // 此时显示"正在思考"占位，避免出现一个空白气泡、像卡死无响应。
-      const visibleContent = sanitizeThinkTags(content).trim()
+      const streamingTargetContent = message.streaming === true && message.streaming_target_content && message.streaming_target_content !== content
+        ? message.streaming_target_content
+        : undefined
+      const visibleContent = sanitizeThinkTags(streamingTargetContent || content).trim()
       return (
         <div className="group flex justify-start">
-          <div className="chat-agent-message w-full px-1 text-sm text-[var(--nova-text)]" style={messageStyle}>
-            {message.streaming && !visibleContent ? (
-              <StreamingPlaceholder />
-            ) : message.streaming ? (
-              <StreamingMarkdown content={content} highlightDialogue={highlightDialogue} />
-            ) : (
-              <MarkdownContent content={content} highlightDialogue={highlightDialogue} />
-            )}
-            {showAssistantActions && (
-              <div className="mt-1.5 flex justify-end">
-                <div className="flex items-center gap-0.5 opacity-30 transition-opacity group-hover:opacity-80 focus-within:opacity-80">
-                  {canSwitchVersion && onSwitchVersion && (
-                    <>
-                      <TooltipIconButton
-                        label={t('chat.action.prevVersion')}
-                        className="h-6 w-6 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)] disabled:cursor-not-allowed disabled:opacity-30"
-                        disabled={versionIndex <= 0}
-                        onClick={() => onSwitchVersion(message, -1)}
-                      >
-                        <ChevronLeft className="h-3 w-3" />
-                      </TooltipIconButton>
-                      <span className="min-w-8 text-center font-mono text-[10px] leading-6 text-[var(--nova-text-faint)]">
-                        {versionIndex + 1}/{versionCount}
-                      </span>
-                    </>
-                  )}
-                  {canRegenerate && onRegenerate && (
-                    <TooltipIconButton
-                      label={t('chat.action.regenerateTurn')}
-                      className="h-6 w-6 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)]"
-                      onClick={() => onRegenerate(message)}
-                    >
-                      <RefreshCw className="h-3 w-3" />
-                    </TooltipIconButton>
-                  )}
-                  {canSwitchVersion && onSwitchVersion && (
-                    <TooltipIconButton
-                      label={t('chat.action.nextVersion')}
-                      className="h-6 w-6 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)] disabled:cursor-not-allowed disabled:opacity-30"
-                      disabled={versionIndex >= versionCount - 1}
-                      onClick={() => onSwitchVersion(message, 1)}
-                    >
-                      <ChevronRight className="h-3 w-3" />
-                    </TooltipIconButton>
-                  )}
-                </div>
+          <div className="w-full">
+            <div className="nova-message-body-with-meta nova-message-body-with-meta-assistant">
+              <div className="chat-agent-message w-full px-1 text-sm text-[var(--nova-text)]" style={messageStyle}>
+                {message.streaming && !visibleContent ? (
+                  <StreamingPlaceholder />
+                ) : message.streaming ? (
+                  <StreamingMarkdown content={content} targetContent={streamingTargetContent} highlightDialogue={highlightDialogue} />
+                ) : (
+                  <MarkdownContent content={content} highlightDialogue={highlightDialogue} />
+                )}
               </div>
-            )}
+              <InteractiveImageStrip message={message} />
+              <MessageInlineMeta
+                message={message}
+                content={content}
+                align="left"
+                onGenerateInteractiveImage={canGenerateInteractiveImage ? onGenerateInteractiveImage : undefined}
+                generatingInteractiveImage={Boolean(message.turn_id && generatingInteractiveImageTurnId === message.turn_id)}
+                onRegenerate={canRegenerate ? onRegenerate : undefined}
+                onSwitchVersion={canSwitchVersion ? onSwitchVersion : undefined}
+                versionIndex={versionIndex}
+                versionCount={versionCount}
+              />
+            </div>
           </div>
         </div>
       )
@@ -131,16 +122,34 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
       return <ThinkingBlock message={message} content={content} streaming={message.streaming === true} />
 
     case 'tool_call':
+      if ((message.name || '') === 'generate_interactive_image') {
+        return <InteractiveImageBlock message={message} onRegenerate={onGenerateInteractiveImage} />
+      }
+      if (['generate_image', 'generate_chapter_illustration'].includes(message.name || '') && message.illustration) {
+        return <ChapterIllustrationBlock message={message} onInsert={onInsertIllustration} />
+      }
       if ((message.name || '') === 'write_todos') {
         return <TodoListBlock message={message} />
       }
       return <ToolExecutionBlock message={message} />
 
     case 'tool_result':
+      if ((message.name || '') === 'generate_interactive_image' || message.interactive_image) {
+        return <InteractiveImageBlock message={message} onRegenerate={onGenerateInteractiveImage} />
+      }
+      if (message.illustration) {
+        return <ChapterIllustrationBlock message={message} onInsert={onInsertIllustration} />
+      }
       return <ToolResultBlock content={content} />
 
     case 'context_compaction':
       return <ContextCompactionBlock message={message} />
+
+    case 'plan_question':
+      return <PlanQuestionBlock message={message} onSubmit={onSubmitPlanQuestion} onLayoutChange={onPlanCardLayoutChange} />
+
+    case 'proposed_plan':
+      return <ProposedPlanBlock message={message} highlightDialogue={highlightDialogue} onApprove={onApprovePlan} onContinue={onContinuePlan} onExit={onExitPlanMode} onLayoutChange={onPlanCardLayoutChange} />
 
     case 'system':
       return (
@@ -164,6 +173,152 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
       return null
   }
 })
+
+function MessageInlineMeta({ message, content, align, onEdit, onGenerateInteractiveImage, generatingInteractiveImage = false, onRegenerate, onSwitchVersion, versionIndex = -1, versionCount = 0 }: { message: ChatMessage; content: string; align: 'left' | 'right'; onEdit?: (message: ChatMessage) => void; onGenerateInteractiveImage?: (message: ChatMessage) => void; generatingInteractiveImage?: boolean; onRegenerate?: (message: ChatMessage) => void; onSwitchVersion?: (message: ChatMessage, direction: -1 | 1) => void; versionIndex?: number; versionCount?: number }) {
+  const { t } = useTranslation()
+  const [copied, setCopied] = useState(false)
+  const formatted = formatMessageHoverTime(message.created_at)
+  const canSwitchVersion = Boolean(onSwitchVersion && versionCount > 1 && versionIndex >= 0)
+  const metaTooltip = {
+    tooltipSide: 'top' as const,
+    tooltipSideOffset: messageActionTooltipSideOffset,
+    useTooltipProvider: false,
+  }
+  if (!formatted && !content && !onEdit && !onGenerateInteractiveImage && !onRegenerate && !canSwitchVersion) return null
+  return (
+    <TooltipProvider delayDuration={messageActionTooltipDelayMs} skipDelayDuration={messageActionTooltipSkipDelayMs} disableHoverableContent>
+      <div className={`nova-message-meta nova-message-meta-${align}`} aria-label={formatted}>
+        {formatted ? <span className="nova-message-time">{formatted}</span> : null}
+        <TooltipIconButton
+          label={copied ? t('chat.action.copyMessageDone') : t('chat.action.copyMessage')}
+          {...metaTooltip}
+          className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)]"
+          onClick={(event) => {
+            event.stopPropagation()
+            setCopied(true)
+            window.setTimeout(() => setCopied(false), copyFeedbackDurationMs)
+            void copyText(content)
+          }}
+        >
+          {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+        </TooltipIconButton>
+        {onGenerateInteractiveImage && (
+          <TooltipIconButton
+            label={message.interactive_images?.length || message.interactive_image ? t('chat.interactiveImage.regenerate') : t('chat.action.generateInteractiveImage')}
+            {...metaTooltip}
+            className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)] disabled:cursor-not-allowed disabled:opacity-45"
+            disabled={generatingInteractiveImage}
+            onClick={(event) => {
+              event.stopPropagation()
+              onGenerateInteractiveImage(message)
+            }}
+          >
+            {generatingInteractiveImage ? <Loader2 className="h-3 w-3 animate-spin" /> : <ImagePlus className="h-3 w-3" />}
+          </TooltipIconButton>
+        )}
+        {onRegenerate && (
+          <TooltipIconButton
+            label={t('chat.action.regenerateTurn')}
+            {...metaTooltip}
+            className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)]"
+            onClick={(event) => {
+              event.stopPropagation()
+              onRegenerate(message)
+            }}
+          >
+            <RefreshCw className="h-3 w-3" />
+          </TooltipIconButton>
+        )}
+        {canSwitchVersion && onSwitchVersion && (
+          <>
+            <TooltipIconButton
+              label={t('chat.action.prevVersion')}
+              {...metaTooltip}
+              className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)] disabled:cursor-not-allowed disabled:opacity-30"
+              disabled={versionIndex <= 0}
+              onClick={(event) => {
+                event.stopPropagation()
+                onSwitchVersion(message, -1)
+              }}
+            >
+              <ChevronLeft className="h-3 w-3" />
+            </TooltipIconButton>
+            <span className="min-w-7 text-center font-mono text-[10px] leading-5 text-[var(--nova-text-faint)]">
+              {versionIndex + 1}/{versionCount}
+            </span>
+            <TooltipIconButton
+              label={t('chat.action.nextVersion')}
+              {...metaTooltip}
+              className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)] disabled:cursor-not-allowed disabled:opacity-30"
+              disabled={versionIndex >= versionCount - 1}
+              onClick={(event) => {
+                event.stopPropagation()
+                onSwitchVersion(message, 1)
+              }}
+            >
+              <ChevronRight className="h-3 w-3" />
+            </TooltipIconButton>
+          </>
+        )}
+        {onEdit && (
+          <TooltipIconButton
+            label={t('chat.action.editTurn')}
+            {...metaTooltip}
+            className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)]"
+            onClick={(event) => {
+              event.stopPropagation()
+              onEdit(message)
+            }}
+          >
+            <Pencil className="h-3 w-3" />
+          </TooltipIconButton>
+        )}
+      </div>
+    </TooltipProvider>
+  )
+}
+
+function formatMessageHoverTime(value?: string) {
+  if (!value) return ''
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return ''
+  const time = `${padTime(date.getHours())}:${padTime(date.getMinutes())}`
+  const now = new Date()
+  const sameDay = date.getFullYear() === now.getFullYear() &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate()
+  if (sameDay) return time
+  return `${date.getFullYear()}-${padTime(date.getMonth() + 1)}-${padTime(date.getDate())} ${time}`
+}
+
+function padTime(value: number) {
+  return value.toString().padStart(2, '0')
+}
+
+async function copyText(content: string) {
+  if (navigator.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(content)
+      return true
+    } catch {
+      // Fall through to the legacy path for embedded/local browser surfaces.
+    }
+  }
+
+  const textarea = document.createElement('textarea')
+  textarea.value = content
+  textarea.setAttribute('readonly', 'true')
+  textarea.style.position = 'fixed'
+  textarea.style.left = '-9999px'
+  textarea.style.top = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  try {
+    return document.execCommand('copy')
+  } finally {
+    document.body.removeChild(textarea)
+  }
+}
 
 function SubAgentOutputWindow({
   message,
@@ -189,6 +344,7 @@ function SubAgentOutputWindow({
   const detailMode = Boolean(onOpen)
   const actionLabel = detailMode ? t('chat.subagent.openSession') : (expanded ? t('chat.subagent.collapse') : t('chat.subagent.expand'))
   const shownContent = detailMode || !expanded ? preview : content
+  const shownTargetContent = message.streaming_target_content && shownContent === content ? message.streaming_target_content : undefined
   const contentScrollLock = useBottomScrollLock<HTMLDivElement>({
     enabled: message.streaming === true,
     resetKey: `${message.id || message.created_at || name}:subagent-output`,
@@ -233,7 +389,7 @@ function SubAgentOutputWindow({
           {hasContent ? (
             <div className="chat-agent-message text-sm text-[var(--nova-text)]" style={messageStyle}>
               {message.streaming ? (
-                <StreamingMarkdown content={shownContent} highlightDialogue={highlightDialogue} />
+                <StreamingMarkdown content={shownContent} targetContent={shownTargetContent} highlightDialogue={highlightDialogue} />
               ) : (
                 <MarkdownContent content={shownContent} highlightDialogue={highlightDialogue} />
               )}
@@ -347,6 +503,315 @@ function ContextCompactionBlock({ message }: { message: ChatMessage }) {
   )
 }
 
+function PlanQuestionBlock({ message, onSubmit, onLayoutChange }: { message: ChatMessage; onSubmit?: (message: ChatMessage, content: string, preview: string) => void; onLayoutChange?: () => void }) {
+  const { t } = useTranslation()
+  const questionSet = parsePlanQuestionSet(message.content || '')
+  const fallback = boundedPlanDisplay(message.content || '')
+  const [selected, setSelected] = useState<Record<string, string[]>>(() => questionSet ? recommendedAnswerSet(questionSet) : {})
+  const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({})
+  const [questionIndex, setQuestionIndex] = useState(0)
+  const [localAction, setLocalAction] = useState<ChatMessage['plan_action']>(message.plan_action)
+  const questionBodyRef = useRef<HTMLDivElement | null>(null)
+  const pendingLayoutChangeRef = useRef(false)
+  const planAction = message.plan_action || localAction
+  const locked = planAction === 'answered'
+  const requestLayoutChange = () => {
+    pendingLayoutChangeRef.current = true
+  }
+  useEffect(() => {
+    if (!questionSet) return
+    setSelected((current) => Object.keys(current).length > 0 ? current : recommendedAnswerSet(questionSet))
+    setQuestionIndex((current) => Math.min(current, Math.max(0, questionSet.questions.length - 1)))
+  }, [message.content])
+  useEffect(() => {
+    if (message.plan_action) setLocalAction(message.plan_action)
+  }, [message.plan_action])
+  useLayoutEffect(() => {
+    if (questionBodyRef.current) questionBodyRef.current.scrollTop = 0
+    if (!pendingLayoutChangeRef.current) return
+    pendingLayoutChangeRef.current = false
+    onLayoutChange?.()
+  }, [questionIndex, message.content, planAction, onLayoutChange])
+
+  if (message.status === 'running' && !(message.content || '').trim()) {
+    return (
+      <PlanShell icon={<Loader2 className="h-3.5 w-3.5 animate-spin" />} title={t('chat.plan.questionTitle')} badge={t('chat.plan.generatingBadge')}>
+        <PlanPendingBlock text={t('chat.plan.generatingQuestions')} preview={message.thinking_preview} />
+      </PlanShell>
+    )
+  }
+
+  if (!questionSet) {
+    return (
+      <PlanShell icon={<ClipboardList className="h-3.5 w-3.5" />} title={t('chat.plan.questionTitle')}>
+        <div className="max-h-72 overflow-auto whitespace-pre-wrap text-xs leading-relaxed text-[var(--nova-text-muted)]">{fallback.content}</div>
+      </PlanShell>
+    )
+  }
+
+  const setQuestionSelection = (questionId: string, optionId: string, multi: boolean) => {
+    if (locked) return
+    setSelected((current) => {
+      const existing = current[questionId] || []
+      if (!multi) return { ...current, [questionId]: [optionId] }
+      return {
+        ...current,
+        [questionId]: existing.includes(optionId)
+          ? existing.filter((item) => item !== optionId)
+          : [...existing, optionId],
+      }
+    })
+  }
+
+  const submit = () => {
+    if (locked) return
+    const answers: PlanQuestionAnswer[] = questionSet.questions.map((question) => {
+      const selectedIds = new Set(selected[question.id] || [])
+      return {
+        questionId: question.id,
+        question: question.question,
+        selectedOptions: question.options.filter((option) => selectedIds.has(option.id)),
+        customAnswer: customAnswers[question.id] || '',
+      }
+    })
+    setLocalAction('answered')
+    requestLayoutChange()
+    onSubmit?.(message, formatPlanQuestionAnswerMessage(answers), formatPlanQuestionAnswerPreview(answers))
+  }
+
+  const currentIndex = Math.min(questionIndex, questionSet.questions.length - 1)
+  const question = questionSet.questions[currentIndex]
+  const selectedIds = new Set(selected[question.id] || [])
+  const isLastQuestion = currentIndex >= questionSet.questions.length - 1
+
+  return (
+    <PlanShell icon={<ClipboardList className="h-3.5 w-3.5" />} title={t('chat.plan.questionTitle')} badge={t('chat.plan.questionProgress', { current: currentIndex + 1, total: questionSet.questions.length })}>
+      <div className="flex max-h-[min(620px,calc(100vh-220px))] min-h-0 flex-col">
+        <div ref={questionBodyRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 [scrollbar-gutter:stable]">
+          <div className="rounded-md border border-[var(--nova-border)] bg-[var(--nova-surface-2)] p-2.5">
+            <div className="flex min-w-0 items-start gap-2">
+              <div className="min-w-0 flex-1">
+                <div className="text-sm font-medium leading-5 text-[var(--nova-text)]">{question.question}</div>
+                {question.description && <div className="mt-1 text-xs leading-5 text-[var(--nova-text-muted)]">{question.description}</div>}
+              </div>
+              <span className="shrink-0 rounded border border-[var(--nova-border)] bg-[var(--nova-surface)] px-1.5 py-0.5 text-[10px] text-[var(--nova-text-faint)]">
+                {question.type === 'multi' ? t('chat.plan.multiChoice') : t('chat.plan.singleChoice')}
+              </span>
+            </div>
+            <div className="mt-2 space-y-1.5">
+              {question.options.map((option) => {
+                const active = selectedIds.has(option.id)
+                return (
+                  <button
+                    key={option.id}
+                    type="button"
+                    disabled={locked}
+                    className={`flex w-full items-start gap-2 rounded-md border px-2.5 py-2 text-left transition-colors disabled:cursor-default ${active ? 'border-[var(--nova-accent)] bg-[var(--nova-active)] text-[var(--nova-text)]' : `border-[var(--nova-border)] bg-[var(--nova-surface)] text-[var(--nova-text-muted)] ${locked ? '' : 'hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]'}`}`}
+                    onClick={() => setQuestionSelection(question.id, option.id, question.type === 'multi')}
+                  >
+                    <span className="mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-current">
+                      {active && <span className="h-2 w-2 rounded-full bg-current" />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="flex flex-wrap items-center gap-1.5 text-xs font-medium">
+                        {option.label}
+                        {option.recommended && <span className="rounded border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--nova-text-faint)]">{t('chat.plan.recommended')}</span>}
+                      </span>
+                      {option.description && <span className="mt-0.5 block text-[11px] leading-4 text-[var(--nova-text-faint)]">{option.description}</span>}
+                    </span>
+                  </button>
+                )
+              })}
+            </div>
+            {question.allow_custom !== false && (
+              <Textarea
+                value={customAnswers[question.id] || ''}
+                onChange={(event) => {
+                  if (locked) return
+                  setCustomAnswers((current) => ({ ...current, [question.id]: event.target.value }))
+                }}
+                placeholder={t('chat.plan.customPlaceholder')}
+                rows={2}
+                readOnly={locked}
+                disabled={locked}
+                className="nova-field mt-2 min-h-16 resize-none text-xs"
+              />
+            )}
+          </div>
+        </div>
+        {locked ? (
+          <PlanActionStatus text={t('chat.plan.answerSubmittedStatus')} />
+        ) : (
+          <div className="mt-3 flex shrink-0 flex-wrap justify-between gap-2 border-t border-[var(--nova-border)] bg-[var(--nova-surface)] pt-3">
+            <Button type="button" size="xs" variant="outline" className="gap-1.5" onClick={() => {
+              setSelected(recommendedAnswerSet(questionSet))
+            }}>
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              {t('chat.plan.useRecommended')}
+            </Button>
+            <div className="flex flex-wrap justify-end gap-2">
+              {currentIndex > 0 && (
+                <Button type="button" size="xs" variant="outline" className="gap-1.5" onClick={() => {
+                  requestLayoutChange()
+                  setQuestionIndex((value) => Math.max(0, value - 1))
+                }}>
+                  <ChevronLeft className="h-3.5 w-3.5" />
+                  {t('chat.plan.previousQuestion')}
+                </Button>
+              )}
+              {isLastQuestion ? (
+                <Button type="button" size="xs" className="gap-1.5" onClick={submit}>
+                  <Send className="h-3.5 w-3.5" />
+                  {t('chat.plan.submitAllAnswers')}
+                </Button>
+              ) : (
+                <Button type="button" size="xs" className="gap-1.5" onClick={() => {
+                  requestLayoutChange()
+                  setQuestionIndex((value) => Math.min(questionSet.questions.length - 1, value + 1))
+                }}>
+                  {t('chat.plan.confirmAndNext')}
+                  <ChevronRight className="h-3.5 w-3.5" />
+                </Button>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
+    </PlanShell>
+  )
+}
+
+function ProposedPlanBlock({ message, highlightDialogue, onApprove, onContinue, onExit, onLayoutChange }: { message: ChatMessage; highlightDialogue?: boolean; onApprove?: (message: ChatMessage) => void; onContinue?: (message: ChatMessage) => void; onExit?: () => void; onLayoutChange?: () => void }) {
+  const { t } = useTranslation()
+  const display = boundedPlanDisplay(message.content || '')
+  const [localAction, setLocalAction] = useState<ChatMessage['plan_action']>(message.plan_action)
+  const planAction = message.plan_action || localAction
+  useEffect(() => {
+    if (message.plan_action) setLocalAction(message.plan_action)
+  }, [message.plan_action])
+  if (message.status === 'running' && !(message.content || '').trim()) {
+    return (
+      <PlanShell icon={<Loader2 className="h-3.5 w-3.5 animate-spin" />} title={t('chat.plan.proposalTitle')} badge={t('chat.plan.generatingBadge')}>
+        <PlanPendingBlock text={t('chat.plan.generatingProposal')} preview={message.thinking_preview} />
+      </PlanShell>
+    )
+  }
+  return (
+    <PlanShell icon={<ClipboardCheck className="h-3.5 w-3.5" />} title={t('chat.plan.proposalTitle')} badge={t('chat.plan.proposalBadge')}>
+      <div className="flex max-h-[min(680px,calc(100vh-220px))] min-h-0 flex-col">
+        <div className="chat-agent-message min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 text-sm leading-6 text-[var(--nova-text)] [scrollbar-gutter:stable]">
+          <MarkdownContent content={display.content} highlightDialogue={highlightDialogue === true} />
+        </div>
+        {display.truncated && <div className="mt-2 shrink-0 text-[11px] text-[var(--nova-text-faint)]">{t('chat.plan.displayTruncated')}</div>}
+        {planAction ? (
+          <PlanActionStatus text={planActionStatusText(t, planAction)} />
+        ) : (
+          <div className="mt-3 flex shrink-0 flex-wrap justify-end gap-2 border-t border-[var(--nova-border)] bg-[var(--nova-surface)] pt-3">
+            <Button type="button" size="xs" variant="outline" className="gap-1.5" onClick={() => {
+              setLocalAction('continue')
+              onLayoutChange?.()
+              onContinue?.(message)
+            }}>
+              <Pencil className="h-3.5 w-3.5" />
+              {t('chat.plan.continueDiscussion')}
+            </Button>
+            <Button type="button" size="xs" variant="outline" className="gap-1.5" onClick={() => {
+              setLocalAction('exited')
+              onLayoutChange?.()
+              onExit?.()
+            }}>
+              <X className="h-3.5 w-3.5" />
+              {t('chat.plan.exit')}
+            </Button>
+            <Button type="button" size="xs" className="gap-1.5" onClick={() => {
+              setLocalAction('approved')
+              onLayoutChange?.()
+              onApprove?.(message)
+            }}>
+              <CheckCircle2 className="h-3.5 w-3.5" />
+              {t('chat.plan.approve')}
+            </Button>
+          </div>
+        )}
+      </div>
+    </PlanShell>
+  )
+}
+
+function PlanPendingBlock({ text, preview }: { text: string; preview?: string }) {
+  const { t } = useTranslation()
+  const [visiblePreview, setVisiblePreview] = useState(preview || '')
+  useEffect(() => {
+    if (!preview) {
+      setVisiblePreview('')
+      return undefined
+    }
+    setVisiblePreview(preview)
+    const timer = window.setTimeout(() => {
+      setVisiblePreview((current) => current === preview ? '' : current)
+    }, planThinkingPreviewStaleMs)
+    return () => window.clearTimeout(timer)
+  }, [preview])
+
+  return (
+    <div className="rounded-md border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2.5 text-xs text-[var(--nova-text-muted)]">
+      <div className="flex items-center gap-2">
+        <span className="inline-block h-2 w-2 animate-pulse rounded-full bg-[var(--nova-text-muted)]" />
+        <span>{text}</span>
+      </div>
+      {visiblePreview && (
+        <div className="mt-1 flex min-w-0 items-center gap-1 text-[11px] text-[var(--nova-text-faint)]">
+          <span className="shrink-0">{t('chat.plan.thinkingPreviewLabel')}</span>
+          <span className="min-w-0 truncate">{visiblePreview}</span>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function PlanActionStatus({ text }: { text: string }) {
+  return (
+    <div className="mt-3 flex shrink-0 items-center gap-2 border-t border-[var(--nova-border)] bg-[var(--nova-surface)] pt-3 text-xs text-[var(--nova-text-muted)]">
+      <CheckCircle2 className="h-3.5 w-3.5 text-[var(--nova-accent)]" />
+      <span>{text}</span>
+    </div>
+  )
+}
+
+function planActionStatusText(t: ReturnType<typeof useTranslation>['t'], action: ChatMessage['plan_action']) {
+  switch (action) {
+    case 'approved':
+      return t('chat.plan.approvedStatus')
+    case 'continue':
+      return t('chat.plan.continueStatus')
+    case 'exited':
+      return t('chat.plan.exitedStatus')
+    case 'answered':
+      return t('chat.plan.answerSubmittedStatus')
+    default:
+      return ''
+  }
+}
+
+function PlanShell({ icon, title, badge, children }: { icon: ReactNode; title: string; badge?: string; children: ReactNode }) {
+  return (
+    <div className="flex justify-start">
+      <div className="w-full overflow-hidden rounded-lg border border-[var(--nova-border)] bg-[var(--nova-surface)] text-xs shadow-[var(--nova-shadow)] backdrop-blur">
+        <div className="flex items-center gap-2 border-b border-[var(--nova-border)] px-3 py-2.5">
+          <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--nova-border)] bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]">
+            {icon}
+          </span>
+          <span className="min-w-0 flex-1 text-sm font-medium text-[var(--nova-text)]">{title}</span>
+          {badge && <span className="rounded-full border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--nova-text-faint)]">{badge}</span>}
+        </div>
+        <div className="px-3 py-3">
+          {children}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 /** 工具执行卡片，默认以单行展示运行态和结果态。 */
 export function ToolExecutionBlock({ message }: { message: ChatMessage }) {
   const { t } = useTranslation()
@@ -359,16 +824,24 @@ export function ToolExecutionBlock({ message }: { message: ChatMessage }) {
   const result = message.result || ''
   const isDelegationTool = name === 'task'
   const taskSubAgent = isDelegationTool ? (message.subagent_type || parseTaskSubagentType(rawArgs)) : ''
+  const isChapterBodyHidden = message.sse_display_notice === 'chapter_body_hidden'
+  const chapterBodyHiddenPath = isChapterBodyHidden ? extractToolArgPath(rawArgs) : ''
+  const chapterGeneratedChars = isChapterBodyHidden && typeof message.sse_generated_chars === 'number' ? message.sse_generated_chars : undefined
   const displayName = isDelegationTool ? t('chat.subagent.taskLabel') : name
-  const detailArgs = isDelegationTool ? formatTaskDelegationArgs(rawArgs) : args
+  const detailArgs = isDelegationTool ? formatTaskDelegationArgs(rawArgs) : (isChapterBodyHidden ? '' : args)
   const hasResult = status === 'success'
-  const isStreamingContent = status === 'running' && isContentTool(name) && rawArgs.length > 50
+  const isStreamingContent = !isChapterBodyHidden && status === 'running' && isContentTool(name) && rawArgs.length > 50
   const streamPreview = isStreamingContent ? extractStreamingContent(rawArgs) : ''
   const summary = taskSubAgent
     ? t('chat.subagent.delegating', { name: taskSubAgent })
     : buildToolArgSummary(args) || (isStreamingContent ? t('chat.tool.writing') : t('chat.tool.preparing'))
   const resultPreview = buildPreview(result, 80)
-  const hasDetail = Boolean(detailArgs || result)
+  const displaySummary = isChapterBodyHidden
+    ? chapterGeneratedChars !== undefined
+      ? t(hasResult ? 'chat.tool.chapterWrittenWithCount' : 'chat.tool.chapterWritingWithCount', { count: chapterGeneratedChars })
+      : (hasResult ? t('chat.tool.chapterWritten') : t('chat.tool.chapterWriting'))
+    : (hasResult ? resultPreview || t('chat.tool.done') : summary)
+  const hasDetail = Boolean(detailArgs || result || isChapterBodyHidden)
   const streamPreviewScrollLock = useBottomScrollLock<HTMLDivElement>({
     enabled: isStreamingContent,
     resetKey: `${message.id || name}:tool-stream-preview`,
@@ -391,7 +864,7 @@ export function ToolExecutionBlock({ message }: { message: ChatMessage }) {
           )}
           {message.subagent && <AgentSourceBadge message={message} compact />}
           <span className="min-w-0 flex-1 truncate text-[var(--nova-text-faint)]">
-            {hasResult ? resultPreview || t('chat.tool.done') : summary}
+            {displaySummary}
           </span>
           {hasDetail && !isStreamingContent && (
             <button
@@ -418,6 +891,22 @@ export function ToolExecutionBlock({ message }: { message: ChatMessage }) {
         )}
         {expanded && !isStreamingContent && (
           <div className="grid max-h-48 gap-2 overflow-auto border-t border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2.5 font-mono text-[11px] leading-relaxed text-[var(--nova-text-muted)]">
+            {isChapterBodyHidden && (
+              <div className="grid gap-1 font-sans">
+                {chapterBodyHiddenPath && (
+                  <div className="min-w-0">
+                    <span className="text-[var(--nova-text-faint)]">{t('chat.tool.chapterPath')}</span>
+                    <code className="ml-1 break-all font-mono text-[var(--nova-text-muted)]">{chapterBodyHiddenPath}</code>
+                  </div>
+                )}
+                {chapterGeneratedChars !== undefined && (
+                  <div className="text-[var(--nova-text-faint)]">
+                    {t('chat.tool.chapterGeneratedChars', { count: chapterGeneratedChars })}
+                  </div>
+                )}
+                <div className="text-[var(--nova-text-faint)]">{t('chat.tool.chapterBodyHidden')}</div>
+              </div>
+            )}
             {detailArgs && <pre className="whitespace-pre-wrap">{detailArgs}</pre>}
             {taskSubAgent && result && <div className="text-[var(--nova-text-muted)]">{t('chat.subagent.result')}</div>}
             {result && <pre className="whitespace-pre-wrap text-[var(--nova-accent-green)]">{result}</pre>}
@@ -426,6 +915,211 @@ export function ToolExecutionBlock({ message }: { message: ChatMessage }) {
       </div>
     </div>
   )
+}
+
+function ChapterIllustrationBlock({ message, onInsert }: { message: ChatMessage; onInsert?: (illustration: ChapterIllustration) => void }) {
+  const { t } = useTranslation()
+  const illustration = message.illustration
+  if (!illustration) return <ToolExecutionBlock message={message} />
+
+  const status = message.status || 'running'
+  const isMarkdownChapter = isMarkdownPath(illustration.chapter_path)
+  const canInsert = status === 'success' && isMarkdownChapter && Boolean(onInsert)
+  const imageSrc = workspaceAssetURL(illustration.image_path)
+  const imageTitle = illustration.alt_text || t('chat.illustration.previewAlt')
+
+  return (
+    <div className="flex justify-start">
+      <div className="w-full overflow-hidden rounded-lg border border-[var(--nova-border)] bg-[var(--nova-surface)] text-xs shadow-[var(--nova-shadow)]">
+        <ImagePreviewDialog src={imageSrc} title={imageTitle} alt={imageTitle} path={illustration.image_path}>
+          <button
+            type="button"
+            className="group relative block w-full overflow-hidden bg-black/90 text-left focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--nova-accent)]"
+            aria-label={t('chat.illustration.openPreview')}
+          >
+            <img
+              src={imageSrc}
+              alt={imageTitle}
+              className="max-h-80 w-full object-contain"
+              loading="lazy"
+            />
+            <span className="absolute left-3 top-3 inline-flex items-center gap-1.5 rounded-md border border-white/15 bg-black/45 px-2 py-1 text-[11px] font-medium text-white opacity-90 backdrop-blur">
+              <ToolStatusIcon status={status} />
+              {t('chat.illustration.title')}
+            </span>
+          </button>
+        </ImagePreviewDialog>
+        <div className="flex min-w-0 flex-col gap-2 border-t border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 sm:flex-row sm:items-center">
+          <code className="min-w-0 flex-1 truncate rounded border border-[var(--nova-border)] bg-[var(--nova-surface)] px-2 py-1 font-mono text-[10px] text-[var(--nova-text-muted)]" title={illustration.image_path}>
+            {illustration.image_path}
+          </code>
+          <div className="flex min-w-0 items-center justify-end gap-2">
+            {!isMarkdownChapter && (
+              <span className="min-w-0 truncate text-[11px] text-[var(--nova-text-faint)]">{t('chat.illustration.markdownOnly')}</span>
+            )}
+            <button
+              type="button"
+              disabled={!canInsert}
+              onClick={() => illustration && onInsert?.(illustration)}
+              className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-[var(--nova-border)] bg-[var(--nova-surface)] px-2 text-[11px] font-medium text-[var(--nova-text-muted)] transition hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)] disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <ImagePlus className="h-3.5 w-3.5" />
+              {status === 'running' ? t('chat.illustration.generating') : t('chat.illustration.insert')}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function InteractiveImageBlock({ message }: { message: ChatMessage; onRegenerate?: (message: ChatMessage) => void }) {
+  return (
+    <div className="flex justify-start">
+      <div className="w-full">
+        <InteractiveImageStrip message={message} />
+      </div>
+    </div>
+  )
+}
+
+function InteractiveImageStrip({ message }: { message: ChatMessage }) {
+  const { t } = useTranslation()
+  const images = interactiveImagesFromMessage(message)
+  const error = message.interactive_image_error || readInteractiveImageErrorFromMessage(message)
+  const status = message.interactive_image_status || message.status
+  const [index, setIndex] = useState(Math.max(0, images.length - 1))
+  const previousImageCountRef = useRef(images.length)
+
+  useEffect(() => {
+    const previousLength = previousImageCountRef.current
+    previousImageCountRef.current = images.length
+    setIndex((current) => {
+      if (images.length > previousLength) return images.length - 1
+      return Math.min(Math.max(0, images.length - 1), Math.max(0, current))
+    })
+  }, [images.length])
+
+  if (images.length === 0) {
+    if (status === 'running') {
+      return (
+        <div className="mt-3 flex items-center gap-2 px-1 text-xs text-[var(--nova-text-faint)]">
+          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          <span>{t('chat.interactiveImage.generating')}</span>
+        </div>
+      )
+    }
+    if (error) {
+      return (
+        <div className="mt-3 rounded-md border border-[var(--nova-danger-border)] bg-[var(--nova-danger-bg)] px-3 py-2 text-xs text-[var(--nova-danger)]">
+          {error.message || t('chat.interactiveImage.failed')}
+        </div>
+      )
+    }
+    return null
+  }
+
+  const safeIndex = Math.min(index, images.length - 1)
+  const image = images[safeIndex]
+  const title = image.alt_text || t('chat.interactiveImage.previewAlt')
+  const src = workspaceAssetURL(image.image_path)
+  const canSwitch = images.length > 1
+
+  return (
+    <div className="mt-3 max-w-full">
+      <ImagePreviewDialog src={src} title={title} alt={title} path={image.image_path}>
+        <div
+          role="button"
+          tabIndex={0}
+          className="group relative block w-full overflow-hidden rounded-lg border border-[var(--nova-border)] bg-black/90 text-left shadow-[var(--nova-shadow)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--nova-accent)]"
+          aria-label={t('chat.interactiveImage.openPreview')}
+        >
+          <img
+            src={src}
+            alt={title}
+            className="max-h-[440px] w-full object-contain"
+            loading="lazy"
+          />
+          {canSwitch && (
+            <span className="absolute bottom-2 right-2 inline-flex items-center gap-1 rounded-md border border-white/10 bg-black/35 px-1 py-0.5 text-[10px] text-white/70 opacity-45 backdrop-blur transition group-hover:opacity-90">
+              <button
+                type="button"
+                aria-label={t('chat.interactiveImage.prevVersion')}
+                className={`flex h-5 w-5 items-center justify-center rounded border border-transparent ${safeIndex <= 0 ? 'opacity-30' : 'hover:border-white/15 hover:bg-white/10'}`}
+                disabled={safeIndex <= 0}
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setIndex((current) => Math.max(0, current - 1))
+                }}
+              >
+                <ChevronLeft className="h-3 w-3" />
+              </button>
+              <span className="min-w-7 text-center font-mono leading-5">{safeIndex + 1}/{images.length}</span>
+              <button
+                type="button"
+                aria-label={t('chat.interactiveImage.nextVersion')}
+                className={`flex h-5 w-5 items-center justify-center rounded border border-transparent ${safeIndex >= images.length - 1 ? 'opacity-30' : 'hover:border-white/15 hover:bg-white/10'}`}
+                disabled={safeIndex >= images.length - 1}
+                onClick={(event) => {
+                  event.preventDefault()
+                  event.stopPropagation()
+                  setIndex((current) => Math.min(images.length - 1, current + 1))
+                }}
+              >
+                <ChevronRight className="h-3 w-3" />
+              </button>
+            </span>
+          )}
+        </div>
+      </ImagePreviewDialog>
+    </div>
+  )
+}
+
+function interactiveImagesFromMessage(message: ChatMessage): InteractiveImage[] {
+  if (message.interactive_images?.length) return message.interactive_images.filter((image) => Boolean(image.image_path))
+  const image = message.interactive_image?.image_path ? message.interactive_image : readInteractiveImageFromMessage(message)
+  return image?.image_path ? [image] : []
+}
+
+function readInteractiveImageFromMessage(message: ChatMessage): InteractiveImage | undefined {
+  if (message.interactive_image?.image_path) return message.interactive_image
+  const data = parseMessageResult(message.result)
+  if (isInteractiveImage(data)) return data
+  return undefined
+}
+
+function readInteractiveImageErrorFromMessage(message: ChatMessage): InteractiveImageError | undefined {
+  if (message.interactive_image_error) return message.interactive_image_error
+  const data = parseMessageResult(message.result)
+  if (isInteractiveImageError(data)) return data
+  return undefined
+}
+
+function parseMessageResult(result?: string): unknown {
+  if (!result) return null
+  try {
+    return JSON.parse(result)
+  } catch {
+    return null
+  }
+}
+
+function isInteractiveImage(value: unknown): value is InteractiveImage {
+  if (!value || typeof value !== 'object') return false
+  const data = value as Record<string, unknown>
+  return data.schema === 'interactive_image.v1' && typeof data.image_path === 'string' && Boolean(data.image_path)
+}
+
+function isInteractiveImageError(value: unknown): value is InteractiveImageError {
+  if (!value || typeof value !== 'object') return false
+  const data = value as Record<string, unknown>
+  return data.schema === 'interactive_image_error.v1'
+}
+
+function isMarkdownPath(path?: string) {
+  return /\.(md|markdown)$/i.test(path || '')
 }
 
 interface TodoItem {
@@ -691,6 +1385,18 @@ function buildToolArgSummary(args: string) {
   return buildPreview(args, 120)
 }
 
+function extractToolArgPath(args: string) {
+  if (!args) return ''
+  try {
+    const data = JSON.parse(args) as Record<string, unknown>
+    const path = data.file_path || data.path
+    return typeof path === 'string' ? path : ''
+  } catch {
+    const match = args.match(/"(?:file_path|path)"\s*:\s*"([^"]+)"/)
+    return match?.[1] || ''
+  }
+}
+
 function buildPreview(content: string, maxLength: number) {
   const normalized = content.trim().replace(/\s+/g, ' ')
   if (normalized.length <= maxLength) return normalized
@@ -745,9 +1451,22 @@ function StreamingPlaceholder() {
   )
 }
 
-/** 流式和持久化消息共用同一 Markdown 渲染器，避免刷新后段落、列表和行距重新排版。 */
-function StreamingMarkdown({ content, highlightDialogue }: { content: string; highlightDialogue: boolean }) {
-  return <MarkdownContent content={content} highlightDialogue={highlightDialogue} />
+/** 流式 Markdown 由上层先提交 target 高度，随后再把 target 提升为可见 content。 */
+function StreamingMarkdown({ content, targetContent, highlightDialogue }: { content: string; targetContent?: string; highlightDialogue: boolean }) {
+  if (!targetContent || targetContent === content) {
+    return <MarkdownContent content={content} highlightDialogue={highlightDialogue} />
+  }
+
+  return (
+    <div className="nova-streaming-markdown-stage">
+      <div className="nova-streaming-markdown-reserve" aria-hidden="true">
+        <MarkdownContent content={targetContent} highlightDialogue={highlightDialogue} />
+      </div>
+      <div className="nova-streaming-markdown-overlay">
+        <MarkdownContent content={content} highlightDialogue={highlightDialogue} />
+      </div>
+    </div>
+  )
 }
 
 function sanitizeThinkTags(text: string): string {
@@ -771,14 +1490,19 @@ const MarkdownContent = memo(function MarkdownContent({ content, highlightDialog
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
-      components={highlightDialogue ? dialogueMarkdownComponents : undefined}
+      components={highlightDialogue ? dialogueMarkdownComponents : markdownComponents}
     >
       {content}
     </ReactMarkdown>
   )
 })
 
-const dialogueMarkdownComponents = {
+const markdownComponents: Components = {
+  img: ChatMarkdownImage,
+}
+
+const dialogueMarkdownComponents: Components = {
+  ...markdownComponents,
   p: ({ children }: { children?: ReactNode }) => <p>{highlightDialogueNodes(children)}</p>,
   li: ({ children }: { children?: ReactNode }) => <li>{highlightDialogueNodes(children)}</li>,
   h1: ({ children }: { children?: ReactNode }) => <h1>{highlightDialogueNodes(children)}</h1>,
@@ -788,6 +1512,35 @@ const dialogueMarkdownComponents = {
   h5: ({ children }: { children?: ReactNode }) => <h5>{highlightDialogueNodes(children)}</h5>,
   h6: ({ children }: { children?: ReactNode }) => <h6>{highlightDialogueNodes(children)}</h6>,
   blockquote: ({ children }: { children?: ReactNode }) => <blockquote>{highlightDialogueNodes(children)}</blockquote>,
+}
+
+function ChatMarkdownImage({ src = '', alt = '', title = '' }: { src?: string; alt?: string; title?: string }) {
+  const { t } = useTranslation()
+  const imageSrc = normalizeChatImageSrc(src)
+  if (!imageSrc) return null
+  const imageTitle = alt || title || t('chat.image.previewTitle')
+  const imagePath = shouldShowImagePath(src) ? src : undefined
+
+  return (
+    <ImagePreviewDialog src={imageSrc} title={imageTitle} alt={alt || imageTitle} path={imagePath}>
+      <button type="button" className="nova-chat-image-button" aria-label={t('chat.image.openPreview')}>
+        <img src={imageSrc} alt={alt || imageTitle} title={title || undefined} loading="lazy" />
+      </button>
+    </ImagePreviewDialog>
+  )
+}
+
+function normalizeChatImageSrc(src: string) {
+  const trimmed = src.trim()
+  if (!trimmed) return ''
+  if (/^(https?:|data:|blob:|\/)/i.test(trimmed)) return trimmed
+  if (isWorkspaceImagePath(trimmed)) return workspaceAssetURL(trimmed)
+  return trimmed
+}
+
+function shouldShowImagePath(src: string) {
+  const trimmed = src.trim()
+  return Boolean(trimmed && !/^(data:|blob:)/i.test(trimmed))
 }
 
 function highlightDialogueNodes(children: ReactNode): ReactNode {
@@ -803,21 +1556,18 @@ function highlightDialogueNodes(children: ReactNode): ReactNode {
 function highlightDialogueText(text: string, enabled: boolean, keyPrefix: string): ReactNode {
   if (!enabled || !text) return text
   const nodes: ReactNode[] = []
-  const pattern = /("([^"\n]+)"|“([^”\n]+)”|「([^」\n]+)」)/g
+  const ranges = findDialogueHighlightRanges(text)
   let lastIndex = 0
-  let match: RegExpExecArray | null
-  let index = 0
 
-  while ((match = pattern.exec(text)) !== null) {
-    if (match.index > lastIndex) nodes.push(text.slice(lastIndex, match.index))
+  ranges.forEach((range, index) => {
+    if (range.from > lastIndex) nodes.push(text.slice(lastIndex, range.from))
     nodes.push(
       <span key={`${keyPrefix}-dialogue-${index}`} className="nova-dialogue-highlight">
-        {match[0]}
+        {text.slice(range.from, range.to)}
       </span>,
     )
-    lastIndex = pattern.lastIndex
-    index += 1
-  }
+    lastIndex = range.to
+  })
 
   if (lastIndex < text.length) nodes.push(text.slice(lastIndex))
   if (nodes.length === 0) return text

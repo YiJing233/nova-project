@@ -1,10 +1,12 @@
 package app
 
 import (
+	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
-	"nova/config"
+	"denova/config"
 )
 
 func TestAppSettingsReturnsLayered(t *testing.T) {
@@ -101,7 +103,7 @@ func TestAppUpdateWorkspaceSettingsPersists(t *testing.T) {
 	if _, err := a.UpdateWorkspaceSettings(in); err != nil {
 		t.Fatal(err)
 	}
-	out, err := config.ReadSettingsFile(filepath.Join(ws, ".nova", "config.toml"))
+	out, err := config.ReadSettingsFile(config.WorkspaceConfigPath(ws))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -110,6 +112,60 @@ func TestAppUpdateWorkspaceSettingsPersists(t *testing.T) {
 	}
 	if out.InteractiveHotChoices == nil || *out.InteractiveHotChoices {
 		t.Fatalf("interactive hot choices not persisted: %v", out.InteractiveHotChoices)
+	}
+}
+
+func TestAppUpdateWorkspaceSettingsFiltersLLMInputLogSetting(t *testing.T) {
+	ws := t.TempDir()
+	novaDir := t.TempDir()
+
+	a := &App{
+		cfg:       &config.Config{Workspace: ws, NovaDir: novaDir},
+		workspace: ws,
+	}
+	enabled := true
+	if _, err := a.UpdateWorkspaceSettings(config.Settings{LLMInputLogEnabled: &enabled}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := config.ReadSettingsFile(config.WorkspaceConfigPath(ws))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.LLMInputLogEnabled != nil {
+		t.Fatalf("workspace llm input log setting should not be persisted: %#v", out.LLMInputLogEnabled)
+	}
+}
+
+func TestAppUpdateWorkspaceSettingsRejectsStaleRevision(t *testing.T) {
+	ws := t.TempDir()
+	novaDir := t.TempDir()
+	a := &App{
+		cfg:       &config.Config{Workspace: ws, NovaDir: novaDir},
+		workspace: ws,
+	}
+	layered, err := a.UpdateWorkspaceSettings(config.Settings{OpenAIModel: "front-base"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layered.Revisions.Workspace == "" {
+		t.Fatalf("workspace revision should be exposed")
+	}
+
+	time.Sleep(2 * time.Millisecond)
+	path := config.WorkspaceConfigPath(ws)
+	if err := config.WriteSettingsFile(path, config.Settings{OpenAIModel: "agent-model"}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := a.UpdateWorkspaceSettings(config.Settings{OpenAIModel: "front-stale"}, layered.Revisions.Workspace); !errors.Is(err, config.ErrSettingsRevisionConflict) {
+		t.Fatalf("expected revision conflict, got %v", err)
+	}
+	out, err := config.ReadSettingsFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.OpenAIModel != "agent-model" {
+		t.Fatalf("stale save should not overwrite external change: %s", out.OpenAIModel)
 	}
 }
 
@@ -139,15 +195,80 @@ func TestApplyLayeredSettingsToConfigAppliesAgentIdleTimeout(t *testing.T) {
 	}
 }
 
-func TestApplyLayeredSettingsToConfigAppliesWritingSkillDefault(t *testing.T) {
+func TestApplyLayeredSettingsToConfigAllowsUnlimitedAgentIdleTimeout(t *testing.T) {
+	idleTimeout := 0
+	cfg := &config.Config{AgentIdleTimeoutSeconds: 1800}
+	applyLayeredSettingsToConfig(cfg, config.LayeredSettings{
+		Effective: config.Settings{
+			AgentIdleTimeoutSeconds: &idleTimeout,
+		},
+	})
+	if cfg.AgentIdleTimeoutSeconds != 0 {
+		t.Fatalf("agent idle timeout = %d, want 0", cfg.AgentIdleTimeoutSeconds)
+	}
+}
+
+func TestApplyLayeredSettingsToConfigAppliesAgentToolResultLimit(t *testing.T) {
+	limitKB := 128
+	cfg := &config.Config{}
+	applyLayeredSettingsToConfig(cfg, config.LayeredSettings{
+		Effective: config.Settings{
+			AgentToolResultLimitKB: &limitKB,
+		},
+	})
+	if cfg.AgentToolResultLimitKB != limitKB {
+		t.Fatalf("agent tool result limit = %d, want %d", cfg.AgentToolResultLimitKB, limitKB)
+	}
+}
+
+func TestApplyLayeredSettingsToConfigAllowsUnlimitedAgentToolResultLimit(t *testing.T) {
+	limitKB := 0
+	cfg := &config.Config{AgentToolResultLimitKB: 128}
+	applyLayeredSettingsToConfig(cfg, config.LayeredSettings{
+		Effective: config.Settings{
+			AgentToolResultLimitKB: &limitKB,
+		},
+	})
+	if cfg.AgentToolResultLimitKB != 0 {
+		t.Fatalf("agent tool result limit = %d, want 0", cfg.AgentToolResultLimitKB)
+	}
+}
+
+func TestAgentIdleTimeoutAllowsUnlimited(t *testing.T) {
+	if got := agentIdleTimeout(config.Config{AgentIdleTimeoutSeconds: 0}); got != 0 {
+		t.Fatalf("agent idle timeout = %s, want no limit", got)
+	}
+	if got := agentIdleTimeout(config.Config{AgentIdleTimeoutSeconds: 1800}); got != 30*time.Minute {
+		t.Fatalf("agent idle timeout = %s, want 30m", got)
+	}
+}
+
+func TestApplyLayeredSettingsToConfigAppliesWritingSkillDefaultAndImagePreset(t *testing.T) {
 	cfg := &config.Config{}
 	applyLayeredSettingsToConfig(cfg, config.LayeredSettings{
 		Effective: config.Settings{
 			WritingSkillDefault: "novel-heavy",
+			IDEImagePresetID:    "realistic",
 		},
 	})
 	if cfg.WritingSkillDefault != "novel-heavy" {
 		t.Fatalf("writing skill default = %s, want novel-heavy", cfg.WritingSkillDefault)
+	}
+	if cfg.IDEImagePresetID != "realistic" {
+		t.Fatalf("image preset default = %s, want realistic", cfg.IDEImagePresetID)
+	}
+}
+
+func TestApplyLayeredSettingsToConfigAppliesLiveOutputChapterBodySetting(t *testing.T) {
+	enabled := true
+	cfg := &config.Config{}
+	applyLayeredSettingsToConfig(cfg, config.LayeredSettings{
+		Effective: config.Settings{
+			HideChapterBodyLiveOutput: &enabled,
+		},
+	})
+	if !cfg.HideChapterBodyLiveOutput {
+		t.Fatalf("HideChapterBodyLiveOutput should be applied")
 	}
 }
 

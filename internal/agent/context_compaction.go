@@ -15,9 +15,9 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
 
-	"nova/config"
-	"nova/internal/observability"
-	"nova/internal/session"
+	"denova/config"
+	"denova/internal/observability"
+	"denova/internal/session"
 )
 
 const (
@@ -25,7 +25,7 @@ const (
 	contextCompactionPhaseMidRun = "mid_run"
 	contextCompactionReasonLimit = "context_usage_threshold"
 
-	contextCompactionSummaryPrefix = "[Nova Context Compaction]"
+	contextCompactionSummaryPrefix = "[Denova Context Compaction]"
 	contextCompactionMaxAttempts   = 2
 )
 
@@ -359,7 +359,7 @@ func generateContextCompactionSummary(ctx context.Context, cfg *config.Config, a
 			schema.SystemMessage(systemPrompt),
 			schema.UserMessage(buildContextCompactionTranscript(source, existingMemory, referenceContext, sourceTokens, inputChars, retryReason, policy)),
 		}
-		logFullModelInput(modelInputLogOptions{
+		callID := logFullModelInput(modelInputLogOptions{
 			AgentKind: config.AgentKindContextCompaction,
 			Source:    "context_compaction",
 			Mode:      fmt.Sprintf("stream_attempt_%d", attempt),
@@ -370,6 +370,7 @@ func generateContextCompactionSummary(ctx context.Context, cfg *config.Config, a
 		if err != nil {
 			return "", inputChars, fmt.Errorf("上下文压缩失败: %w", err)
 		}
+		logModelProviderRequestIDForCall(callID, config.AgentKindContextCompaction, "context_compaction", fmt.Sprintf("stream_attempt_%d", attempt), modelCfg.Model, "", 0, msg)
 		summary = strings.TrimSpace(msg.Content)
 		if summary == "" {
 			return "", inputChars, fmt.Errorf("上下文压缩结果为空")
@@ -470,13 +471,13 @@ func contextCompactionRetryInstruction(summaryChars, minChars, maxChars int) str
 
 func contextCompactionSystemInstruction() string {
 	return strings.TrimSpace(`
-你是 Nova 的独立“互动小说上下文压缩器”，用于类似酒馆/SillyTavern 的高轮次互动小说和长对话创作场景。
+你是 Denova 的独立“互动小说上下文压缩器”，用于类似酒馆/SillyTavern 的高轮次互动小说和长对话创作场景。
 
 你的任务是把输入上下文压缩成更精简的“事件时间线记忆”，同时保留所有会对后续剧情、写作任务或用户意图产生长期影响的信息。
 
 输入可能包含：
 1. existing_memory：此前已经压缩过的记忆，可能为空。
-2. reference_context：参考上下文，例如完整 Story Memory 表格。互动模式必须参考其中的故事记忆，尤其 plot_summary / 剧情纪要。
+2. reference_context：参考上下文，例如完整 Story Memory 表格。游戏模式必须参考其中的故事记忆，尤其 plot_summary / 剧情纪要。
 3. new_context：上次压缩后新增的原始有效对话链或互动回合链，包括用户行动、用户对白、LLM 剧情推进、NPC 反应、环境变化、任务状态等。
 
 处理目标：
@@ -552,7 +553,7 @@ func buildContextCompactionTranscript(messages []*schema.Message, existingMemory
 	}
 	minChars, maxChars := compactionTargetCharRange(inputChars, policy)
 	var sb strings.Builder
-	sb.WriteString("请按系统要求压缩以下 Nova 上下文。基于 existing_memory、reference_context 与 new_context 合并生成新的压缩记忆，保留所有会影响后续剧情、任务、关系、世界状态或用户偏好的信息。\n")
+	sb.WriteString("请按系统要求压缩以下 Denova 上下文。基于 existing_memory、reference_context 与 new_context 合并生成新的压缩记忆，保留所有会影响后续剧情、任务、关系、世界状态或用户偏好的信息。\n")
 	sb.WriteString(fmt.Sprintf("Estimated new context tokens: %d. Input characters across existing memory, reference context, and new context: %d. Target summary length: %d-%d characters (%s of input characters). 不得低于下限；信息密度高时使用目标范围上半区。\n\n", sourceTokens, inputChars, minChars, maxChars, compactionTargetRange(policy)))
 	if retryInstruction = strings.TrimSpace(retryInstruction); retryInstruction != "" {
 		sb.WriteString("Retry instruction:\n")

@@ -22,11 +22,17 @@ func TestDefaultSettingsValues(t *testing.T) {
 	if s.AutoSaveEnabled == nil || *s.AutoSaveEnabled != true {
 		t.Fatalf("AutoSaveEnabled default")
 	}
+	if s.HideChapterBodyLiveOutput == nil || *s.HideChapterBodyLiveOutput {
+		t.Fatalf("HideChapterBodyLiveOutput should default off")
+	}
 	if s.MaxIteration != nil {
 		t.Fatalf("MaxIteration should default to unset")
 	}
-	if s.AgentIdleTimeoutSeconds == nil || *s.AgentIdleTimeoutSeconds != 180 {
+	if s.AgentIdleTimeoutSeconds == nil || *s.AgentIdleTimeoutSeconds != DefaultAgentIdleTimeoutSeconds {
 		t.Fatalf("AgentIdleTimeoutSeconds default")
+	}
+	if s.AgentToolResultLimitKB == nil || *s.AgentToolResultLimitKB != DefaultAgentToolResultLimitKB {
+		t.Fatalf("AgentToolResultLimitKB default")
 	}
 	if s.InteractiveStageFontSize == nil || *s.InteractiveStageFontSize != 16 {
 		t.Fatalf("InteractiveStageFontSize default")
@@ -42,6 +48,12 @@ func TestDefaultSettingsValues(t *testing.T) {
 	}
 	if s.InteractiveHotChoices == nil || *s.InteractiveHotChoices != true {
 		t.Fatalf("InteractiveHotChoices default")
+	}
+	if s.AgentModels.IDE.EnableThinking == nil || !*s.AgentModels.IDE.EnableThinking {
+		t.Fatalf("IDE thinking should default on")
+	}
+	if s.AgentModels.ConfigManager.EnableThinking == nil || !*s.AgentModels.ConfigManager.EnableThinking {
+		t.Fatalf("ConfigManager thinking should default on")
 	}
 	if s.AgentModels.ToolAgent.EnableThinking == nil || *s.AgentModels.ToolAgent.EnableThinking {
 		t.Fatalf("ToolAgent thinking should default off")
@@ -82,6 +94,24 @@ func TestDefaultSettingsValues(t *testing.T) {
 	if s.WritingSkillDefault != DefaultWritingSkillName {
 		t.Fatalf("WritingSkillDefault default: %s", s.WritingSkillDefault)
 	}
+	if s.IDEImagePresetID != "game-cg" {
+		t.Fatalf("IDEImagePresetID default: %s", s.IDEImagePresetID)
+	}
+	if len(s.SubAgents) != 0 {
+		t.Fatalf("SubAgents should come from editable config layers, not Go defaults: %#v", s.SubAgents)
+	}
+	if s.GeneralSubAgents.Default == nil || *s.GeneralSubAgents.Default {
+		t.Fatalf("GeneralSubAgents default fallback should be disabled")
+	}
+	if s.GeneralSubAgents.IDE == nil || !*s.GeneralSubAgents.IDE {
+		t.Fatalf("GeneralSubAgents should default enabled for IDE")
+	}
+	if s.GeneralSubAgents.Automation == nil || !*s.GeneralSubAgents.Automation {
+		t.Fatalf("GeneralSubAgents should default enabled for automation")
+	}
+	if s.GeneralSubAgents.InteractiveStory != nil || s.GeneralSubAgents.ConfigManager != nil {
+		t.Fatalf("GeneralSubAgents should not explicitly enable interactive story or config manager by default")
+	}
 }
 
 func TestMergeOverridesNonZero(t *testing.T) {
@@ -91,6 +121,7 @@ func TestMergeOverridesNonZero(t *testing.T) {
 		OpenAIContextWindowTokens:  intPtr(DefaultContextWindowTokens),
 		MaxIteration:               intPtr(10),
 		AgentIdleTimeoutSeconds:    intPtr(120),
+		AgentToolResultLimitKB:     intPtr(0),
 		UIFontFamily:               "apple-system",
 		UIFontSize:                 intPtr(14),
 		ReadingFontFamily:          "source-han-serif",
@@ -99,12 +130,14 @@ func TestMergeOverridesNonZero(t *testing.T) {
 		Theme:                      "dark",
 		MotionIntensity:            "system",
 		UpdateCheckEnabled:         boolPtr(true),
+		HideChapterBodyLiveOutput:  boolPtr(false),
 		ChapterFilenameFormat:      "old-chapter",
 		VolumeDirFormat:            "old-volume",
 		BackendPort:                intPtr(8080),
 		FrontendPort:               intPtr(5173),
 		AllowLANAccess:             boolPtr(false),
 		WritingSkillDefault:        "novel-standard",
+		IDEImagePresetID:           "realistic",
 		InteractiveHotChoices:      boolPtr(true),
 		InteractiveStageFontSize:   intPtr(16),
 		InteractiveStageLineHeight: floatPtr(1.78),
@@ -114,6 +147,7 @@ func TestMergeOverridesNonZero(t *testing.T) {
 		OpenAIContextWindowTokens:  intPtr(1000000),
 		MaxIteration:               nil, // 继承 parent
 		AgentIdleTimeoutSeconds:    intPtr(240),
+		AgentToolResultLimitKB:     intPtr(64),
 		UIFontFamily:               "humanist-sans",
 		UIFontSize:                 intPtr(13),
 		ReadingFontFamily:          "system-serif",
@@ -122,12 +156,14 @@ func TestMergeOverridesNonZero(t *testing.T) {
 		Theme:                      "light",
 		MotionIntensity:            "reduced",
 		UpdateCheckEnabled:         boolPtr(false),
+		HideChapterBodyLiveOutput:  boolPtr(true),
 		ChapterFilenameFormat:      "new-chapter",
 		VolumeDirFormat:            "new-volume",
 		BackendPort:                intPtr(18080),
 		FrontendPort:               intPtr(15173),
 		AllowLANAccess:             boolPtr(true),
 		WritingSkillDefault:        "novel-heavy",
+		IDEImagePresetID:           "2d-illustration",
 		RemoteAccessUsername:       "reader",
 		RemoteAccessPasswordHash:   "$2a$10$hash",
 		InteractiveHotChoices:      boolPtr(false),
@@ -149,6 +185,9 @@ func TestMergeOverridesNonZero(t *testing.T) {
 	}
 	if out.AgentIdleTimeoutSeconds == nil || *out.AgentIdleTimeoutSeconds != 240 {
 		t.Fatalf("AgentIdleTimeoutSeconds should override parent")
+	}
+	if out.AgentToolResultLimitKB == nil || *out.AgentToolResultLimitKB != 64 {
+		t.Fatalf("AgentToolResultLimitKB should override parent")
 	}
 	if out.UIFontFamily != "humanist-sans" {
 		t.Fatalf("UIFontFamily should override parent: %s", out.UIFontFamily)
@@ -174,6 +213,9 @@ func TestMergeOverridesNonZero(t *testing.T) {
 	if out.UpdateCheckEnabled == nil || *out.UpdateCheckEnabled != false {
 		t.Fatalf("UpdateCheckEnabled should override parent")
 	}
+	if out.HideChapterBodyLiveOutput == nil || *out.HideChapterBodyLiveOutput != true {
+		t.Fatalf("HideChapterBodyLiveOutput should override parent")
+	}
 	if out.ChapterFilenameFormat != "new-chapter" || out.VolumeDirFormat != "new-volume" {
 		t.Fatalf("filename formats should override parent: %#v", out)
 	}
@@ -188,6 +230,9 @@ func TestMergeOverridesNonZero(t *testing.T) {
 	}
 	if out.WritingSkillDefault != "novel-heavy" {
 		t.Fatalf("WritingSkillDefault should override parent: %s", out.WritingSkillDefault)
+	}
+	if out.IDEImagePresetID != "2d-illustration" {
+		t.Fatalf("IDEImagePresetID should override parent: %s", out.IDEImagePresetID)
 	}
 	if out.RemoteAccessUsername != "reader" || out.RemoteAccessPasswordHash == "" || !out.RemoteAccessPasswordSet {
 		t.Fatalf("remote access credentials should override parent: %#v", out)
@@ -354,8 +399,72 @@ func TestWriteSettingsFileNormalizesAgentIdleTimeout(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.AgentIdleTimeoutSeconds == nil || *out.AgentIdleTimeoutSeconds != 3600 {
-		t.Fatalf("agent idle timeout should be capped at 3600, got %v", out.AgentIdleTimeoutSeconds)
+	if out.AgentIdleTimeoutSeconds == nil || *out.AgentIdleTimeoutSeconds != 7200 {
+		t.Fatalf("agent idle timeout should preserve positive values, got %v", out.AgentIdleTimeoutSeconds)
+	}
+}
+
+func TestWriteSettingsFileAllowsUnlimitedAgentIdleTimeout(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+	in := Settings{OpenAIModel: "abc", AgentIdleTimeoutSeconds: intPtr(0)}
+	if err := WriteSettingsFile(p, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ReadSettingsFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.AgentIdleTimeoutSeconds == nil || *out.AgentIdleTimeoutSeconds != 0 {
+		t.Fatalf("agent idle timeout should preserve explicit 0, got %v", out.AgentIdleTimeoutSeconds)
+	}
+}
+
+func TestWriteSettingsFileFiltersNegativeAgentIdleTimeout(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+	in := Settings{OpenAIModel: "abc", AgentIdleTimeoutSeconds: intPtr(-1)}
+	if err := WriteSettingsFile(p, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ReadSettingsFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.AgentIdleTimeoutSeconds != nil {
+		t.Fatalf("negative agent idle timeout should be filtered, got %v", *out.AgentIdleTimeoutSeconds)
+	}
+}
+
+func TestWriteSettingsFileAllowsUnlimitedAgentToolResultLimit(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+	in := Settings{OpenAIModel: "abc", AgentToolResultLimitKB: intPtr(0)}
+	if err := WriteSettingsFile(p, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ReadSettingsFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.AgentToolResultLimitKB == nil || *out.AgentToolResultLimitKB != 0 {
+		t.Fatalf("agent tool result limit should preserve explicit 0, got %v", out.AgentToolResultLimitKB)
+	}
+}
+
+func TestWriteSettingsFileFiltersNegativeAgentToolResultLimit(t *testing.T) {
+	dir := t.TempDir()
+	p := filepath.Join(dir, "config.toml")
+	in := Settings{OpenAIModel: "abc", AgentToolResultLimitKB: intPtr(-1)}
+	if err := WriteSettingsFile(p, in); err != nil {
+		t.Fatal(err)
+	}
+	out, err := ReadSettingsFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.AgentToolResultLimitKB != nil {
+		t.Fatalf("negative agent tool result limit should be filtered, got %v", *out.AgentToolResultLimitKB)
 	}
 }
 
@@ -531,5 +640,27 @@ func TestLoadLayeredIgnoresRemoteAccessFromWorkspaceLayer(t *testing.T) {
 	}
 	if layered.Effective.AllowLANAccess == nil || !*layered.Effective.AllowLANAccess || layered.Effective.RemoteAccessUsername != "user" {
 		t.Fatalf("user remote access settings should remain effective: %#v", layered.Effective)
+	}
+}
+
+func TestLoadLayeredIgnoresLLMInputLogFromWorkspaceLayer(t *testing.T) {
+	home := t.TempDir()
+	ws := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(ws, ".nova"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ws, ".nova", "config.toml"), []byte("llm_input_log_enabled = true\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	layered, err := LoadLayered(home, ws)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if layered.Workspace.LLMInputLogEnabled != nil {
+		t.Fatalf("workspace llm input log setting should be filtered")
+	}
+	if layered.Effective.LLMInputLogEnabled == nil || *layered.Effective.LLMInputLogEnabled {
+		t.Fatalf("workspace llm input log should not become effective: %#v", layered.Effective.LLMInputLogEnabled)
 	}
 }

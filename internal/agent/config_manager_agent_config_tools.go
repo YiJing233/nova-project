@@ -8,7 +8,7 @@ import (
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/components/tool/utils"
 
-	"nova/config"
+	"denova/config"
 )
 
 type agentConfigWriteInput struct {
@@ -59,6 +59,8 @@ type agentConfigLayeredSnapshot struct {
 type agentConfigLayerSnapshot struct {
 	DefaultModel     string                              `json:"default_model,omitempty"`
 	ModelProfiles    []safeModelProfileSettings          `json:"model_profiles,omitempty"`
+	DefaultImageAPI  string                              `json:"default_image_api_profile_id,omitempty"`
+	ImageAPIProfiles []safeImageAPIProfileSettings       `json:"image_api_profiles,omitempty"`
 	AgentModels      config.AgentModelSettings           `json:"agent_models,omitempty"`
 	AgentTools       config.AgentToolSettings            `json:"agent_tools,omitempty"`
 	AgentPrompts     config.AgentPromptSettings          `json:"agent_prompts,omitempty"`
@@ -75,6 +77,17 @@ type safeModelProfileSettings struct {
 	OpenAIModel         string   `json:"openai_model,omitempty"`
 	Temperature         *float64 `json:"temperature,omitempty"`
 	ContextWindowTokens *int     `json:"context_window_tokens,omitempty"`
+}
+
+type safeImageAPIProfileSettings struct {
+	ID                  string `json:"id,omitempty"`
+	Name                string `json:"name,omitempty"`
+	Provider            string `json:"provider,omitempty"`
+	OpenAIBaseURL       string `json:"openai_base_url,omitempty"`
+	OpenAIModel         string `json:"openai_model,omitempty"`
+	DefaultSize         string `json:"default_size,omitempty"`
+	DefaultQuality      string `json:"default_quality,omitempty"`
+	DefaultOutputFormat string `json:"default_output_format,omitempty"`
 }
 
 type agentConfigSubAgentIndexRow struct {
@@ -108,6 +121,7 @@ func newListAgentConfigsTool(cfg *config.Config) (tool.BaseTool, error) {
 			Notes: []string{
 				"write_agent_configs 必须显式指定 scope=user 或 scope=workspace。",
 				"model_profiles 已脱敏，不包含模型密钥；本工具不负责创建或编辑模型配置。",
+				"image_api_profiles 已脱敏，不包含图像模型密钥；本工具不负责创建或编辑图像模型配置。",
 				"delete_sub_agent 只删除目标层配置；如需屏蔽继承来的 SubAgent，请 upsert 同 ID 且 enabled=false 的覆盖项。",
 			},
 		}
@@ -155,7 +169,7 @@ func loadAgentConfigLayered(cfg *config.Config) (config.LayeredSettings, error) 
 		novaDir = cfg.NovaDir
 		workspace = cfg.Workspace
 	}
-	layered, err := config.LoadLayered(novaDir, workspace)
+	layered, err := config.LoadLayeredWithStartupConfig(novaDir, workspace)
 	if err != nil {
 		return config.LayeredSettings{}, fmt.Errorf("读取 Agent 配置失败: %w", err)
 	}
@@ -279,6 +293,8 @@ func agentConfigLayer(settings config.Settings) agentConfigLayerSnapshot {
 	return agentConfigLayerSnapshot{
 		DefaultModel:     settings.OpenAIModel,
 		ModelProfiles:    safeModelProfiles(settings.ModelProfiles),
+		DefaultImageAPI:  settings.DefaultImageAPIProfileID,
+		ImageAPIProfiles: safeImageAPIProfiles(settings.ImageAPIProfiles),
 		AgentModels:      settings.AgentModels,
 		AgentTools:       settings.AgentTools,
 		AgentPrompts:     settings.AgentPrompts,
@@ -287,6 +303,26 @@ func agentConfigLayer(settings config.Settings) agentConfigLayerSnapshot {
 		GeneralSubAgents: settings.GeneralSubAgents,
 		SubAgents:        settings.SubAgents,
 	}
+}
+
+func safeImageAPIProfiles(profiles []config.ImageAPIProfileSettings) []safeImageAPIProfileSettings {
+	if len(profiles) == 0 {
+		return nil
+	}
+	out := make([]safeImageAPIProfileSettings, 0, len(profiles))
+	for _, profile := range profiles {
+		out = append(out, safeImageAPIProfileSettings{
+			ID:                  profile.ID,
+			Name:                profile.Name,
+			Provider:            profile.Provider,
+			OpenAIBaseURL:       profile.OpenAIBaseURL,
+			OpenAIModel:         profile.OpenAIModel,
+			DefaultSize:         profile.DefaultSize,
+			DefaultQuality:      profile.DefaultQuality,
+			DefaultOutputFormat: profile.DefaultOutputFormat,
+		})
+	}
+	return out
 }
 
 func safeModelProfiles(profiles []config.ModelProfileSettings) []safeModelProfileSettings {
@@ -360,6 +396,8 @@ func setAgentModelOverride(settings *config.Settings, agent string, value config
 		settings.AgentModels.VersionSummary = value
 	case config.AgentKindToolAgent:
 		settings.AgentModels.ToolAgent = value
+	case config.AgentKindImage:
+		settings.AgentModels.Image = value
 	case config.AgentKindAutomation:
 		settings.AgentModels.Automation = value
 	case config.AgentKindContextCompaction:
@@ -385,6 +423,8 @@ func setAgentToolOverride(settings *config.Settings, agent string, value config.
 		settings.AgentTools.VersionSummary = value
 	case config.AgentKindToolAgent:
 		settings.AgentTools.ToolAgent = value
+	case config.AgentKindImage:
+		settings.AgentTools.Image = value
 	case config.AgentKindAutomation:
 		settings.AgentTools.Automation = value
 	case config.AgentKindContextCompaction:
@@ -410,6 +450,8 @@ func setAgentPromptOverride(settings *config.Settings, agent string, value confi
 		settings.AgentPrompts.VersionSummary = value
 	case config.AgentKindToolAgent:
 		settings.AgentPrompts.ToolAgent = value
+	case config.AgentKindImage:
+		settings.AgentPrompts.Image = value
 	case config.AgentKindAutomation:
 		settings.AgentPrompts.Automation = value
 	case config.AgentKindContextCompaction:
@@ -435,6 +477,8 @@ func setAgentSkillOverride(settings *config.Settings, agent string, value config
 		settings.AgentSkills.VersionSummary = value
 	case config.AgentKindToolAgent:
 		settings.AgentSkills.ToolAgent = value
+	case config.AgentKindImage:
+		settings.AgentSkills.Image = value
 	case config.AgentKindAutomation:
 		settings.AgentSkills.Automation = value
 	case config.AgentKindContextCompaction:
@@ -460,6 +504,8 @@ func setAgentContextOverride(settings *config.Settings, agent string, value conf
 		settings.AgentContexts.VersionSummary = value
 	case config.AgentKindToolAgent:
 		settings.AgentContexts.ToolAgent = value
+	case config.AgentKindImage:
+		settings.AgentContexts.Image = value
 	case config.AgentKindAutomation:
 		settings.AgentContexts.Automation = value
 	case config.AgentKindContextCompaction:

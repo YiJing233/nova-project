@@ -8,16 +8,19 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"denova/internal/workspacepath"
 )
 
 const maxBookRecords = 20
 
 // BookRecord 表示 Nova 数据目录中的一个书籍工作目录。
 type BookRecord struct {
-	Name         string `json:"name"`
-	Path         string `json:"path"`
-	Author       string `json:"author"`
-	LastOpenedAt string `json:"last_opened_at"`
+	Name           string `json:"name"`
+	Path           string `json:"path"`
+	Author         string `json:"author"`
+	CoverUpdatedAt string `json:"cover_updated_at,omitempty"`
+	LastOpenedAt   string `json:"last_opened_at"`
 }
 
 type bookRegistryData struct {
@@ -198,7 +201,8 @@ func isNovaUserDataDir(name string) bool {
 
 func isBookWorkspace(path string) bool {
 	markers := []string{
-		filepath.Join(path, ".nova"),
+		filepath.Join(path, workspacepath.DataDirName),
+		filepath.Join(path, workspacepath.LegacyDataDirName),
 		filepath.Join(path, "book.json"),
 		filepath.Join(path, "ideas.md"),
 		filepath.Join(path, "brainstorm.md"),
@@ -378,7 +382,7 @@ func legacyBookRegistryPath() string {
 		return filepath.Join(dir, "nova", "books.json")
 	}
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
-		return filepath.Join(home, ".nova", "books.json")
+		return filepath.Join(home, workspacepath.LegacyDataDirName, "books.json")
 	}
 	return filepath.Join(".", ".nova-books.json")
 }

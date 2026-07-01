@@ -8,10 +8,10 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	"nova/config"
-	"nova/internal/book"
-	"nova/internal/prompts"
-	"nova/internal/session"
+	"denova/config"
+	"denova/internal/book"
+	"denova/internal/prompts"
+	"denova/internal/session"
 )
 
 func TestInteractiveContextAnalysisLabelsDynamicContextAtFinalMessage(t *testing.T) {
@@ -66,6 +66,40 @@ func TestInteractiveContextAnalysisUsesConfiguredContextWindow(t *testing.T) {
 	}
 	if analysis.ContextWindowTokens != contextWindow {
 		t.Fatalf("context window tokens = %d, want %d", analysis.ContextWindowTokens, contextWindow)
+	}
+}
+
+func TestInteractiveContextAnalysisShowsDirectNarrativeOutputProtocol(t *testing.T) {
+	analysis, err := BuildInteractiveStoryContextAnalysis(
+		&config.Config{},
+		nil,
+		prompts.InteractiveStorySystemInstructionInput{},
+		nil,
+		ChatRequest{Message: "继续"},
+		nil,
+		func(originalMessage, agentMessage string) ([]*schema.Message, error) {
+			return []*schema.Message{schema.UserMessage(agentMessage)}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outputProtocol *ContextAnalysisPart
+	for i := range analysis.SystemPromptParts {
+		part := &analysis.SystemPromptParts[i]
+		if part.ID == "output_protocol" {
+			outputProtocol = part
+			break
+		}
+	}
+	if outputProtocol == nil {
+		t.Fatalf("output protocol part missing: %#v", analysis.SystemPromptParts)
+	}
+	if !strings.Contains(outputProtocol.Content, "只输出本回合可展示在故事舞台上的故事正文") {
+		t.Fatalf("output protocol should describe direct narrative text: %#v", outputProtocol)
+	}
+	if strings.Contains(outputProtocol.Content, "<NARRATIVE>") {
+		t.Fatalf("output protocol should not require narrative XML wrapper: %#v", outputProtocol)
 	}
 }
 
@@ -229,7 +263,13 @@ func TestIDEContextAnalysisSplitsStableAndDynamicWorkspaceState(t *testing.T) {
 		0,
 		nil,
 		nil,
-		ChatRequest{Message: "继续写"},
+		ChatRequest{
+			Message: "继续写",
+			IDEContext: IDEContextRef{
+				CurrentFile: "chapters/ch0001-开局.md",
+				OpenFiles:   []string{"chapters/ch0001-开局.md", "setting/progress.md"},
+			},
+		},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -264,7 +304,7 @@ func TestIDEContextAnalysisSplitsStableAndDynamicWorkspaceState(t *testing.T) {
 	if final.Source != "本轮上下文" || final.Title != "动态作品状态与本轮用户请求" {
 		t.Fatalf("final message should carry dynamic workspace state label: %#v", final)
 	}
-	for _, want := range []string{"# 本轮动态作品状态", "章节组：探索废城", "chapters/ch0001-开局.md", "当前进度：抵达废城入口", "林川：警惕", "# 本轮用户请求（最高优先级）"} {
+	for _, want := range []string{"# 本轮动态作品状态", "章节组：探索废城", "chapters/ch0001-开局.md", "当前进度：抵达废城入口", "林川：警惕", "## IDE 当前状态", "当前聚焦文件：chapters/ch0001-开局.md", "当前打开文件：chapters/ch0001-开局.md、setting/progress.md", "# 本轮用户请求（最高优先级）"} {
 		if !strings.Contains(final.Content, want) {
 			t.Fatalf("final message missing %q:\n%s", want, final.Content)
 		}

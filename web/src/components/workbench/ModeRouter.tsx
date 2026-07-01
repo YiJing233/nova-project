@@ -1,25 +1,27 @@
-import { BookMarked, BookOpen, CheckCircle2, ChevronDown, ChevronRight, Circle, Database, FileText, Loader2, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, RefreshCw, SlidersHorizontal, Sparkles } from 'lucide-react'
+import { BookMarked, BookOpen, CheckCircle2, ChevronDown, ChevronRight, Circle, Database, FileText, Loader2, PanelLeftClose, PanelLeftOpen, PanelRightClose, PanelRightOpen, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import type { KeyboardEvent, ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { FileTree } from '@/components/Sidebar/FileTree'
 import { SearchPanel } from '@/components/Sidebar/SearchPanel'
 import { AgentPanel } from '@/components/Chat/AgentPanel'
+import { FilePreview } from '@/components/workbench/FilePreview'
 import { MarkdownEditor } from '@/components/Editor/MarkdownEditor'
 import { VersionPanel } from '@/components/Versions/VersionPanel'
 import { HomeView } from '@/components/Home/HomeView'
 import { InteractiveLayout } from '@/features/interactive/components/InteractiveLayout'
 import { SettingPanel } from '@/features/interactive/components/SettingPanel'
-import { getInteractiveTellers } from '@/features/interactive/api'
+import { getImagePresets, getInteractiveTellers } from '@/features/interactive/api'
 import { useInteractiveStore } from '@/features/interactive/stores/interactive-store'
 import { AgentsView } from '@/features/agents/AgentsView'
 import { AutomationsView } from '@/features/automations/AutomationsView'
 import { SkillsView } from '@/features/skills/SkillsView'
 import { SettingsView } from '@/features/settings/SettingsView'
-import type { Teller } from '@/features/interactive/types'
+import type { ImagePreset, Teller } from '@/features/interactive/types'
 import type { FileNode } from '@/hooks/useWorkspace'
-import type { BookRecord, ChapterSummary, ChatMessage, ContextAnalysis, DocumentPreview, LoreItem, SessionSummary, TextSelection, WorkspaceSearchResult, WorkspaceSummary } from '@/lib/api'
+import type { BookRecord, ChapterIllustration, ChapterSummary, ChatMessage, ContextAnalysis, DocumentPreview, LoreItem, SessionSummary, TextSelection, WorkspaceSearchResult, WorkspaceSummary } from '@/lib/api'
 import type { RightPanel, WorkspaceMode } from '@/stores/workspace-store'
+import { workspaceFileKind } from '@/lib/workspace-file-kind'
 import type { Tab } from './TabController'
 import { TabController, tabKey } from './TabController'
 import { WorkbenchShell } from './WorkbenchShell'
@@ -76,6 +78,7 @@ interface ModeRouterProps {
   loreItems: LoreItem[]
   styleScenes: string[]
   textSelections: TextSelection[]
+  chatPlanMode: boolean
   updateNotice?: { latestVersion: string } | null
   onSetMode: (mode: WorkspaceMode) => void
   onToggleActivityBarExpanded: () => void
@@ -89,7 +92,6 @@ interface ModeRouterProps {
   onOpenCharacterCardImport: () => void
   onSetSidebarView: (view: 'outline' | 'files' | 'search') => void
   onSelectSearchResult: (result: WorkspaceSearchResult, query: string) => void | Promise<void>
-  onRefreshTree: () => void
   onSelectFile: (path: string) => void | Promise<void>
   onSetChapterConfirmed: (path: string, confirmed: boolean) => void | Promise<void>
   onReferenceFile: (path: string) => void
@@ -106,8 +108,8 @@ interface ModeRouterProps {
   onSwitchChatSession: (id: string) => void | Promise<void>
   onRenameChatSession: (id: string, title: string) => void | Promise<void>
   onDeleteChatSession: (id: string) => void | Promise<void>
-  onSend: (message: string, options?: { writingSkill?: string }) => void
-  onAnalyzeContext: (message: string, options?: { writingSkill?: string }) => Promise<ContextAnalysis>
+  onSend: (message: string, options?: { writingSkill?: string; ideContext?: { currentFile?: string; openFiles?: string[] }; imagePresetId?: string }) => void
+  onAnalyzeContext: (message: string, options?: { writingSkill?: string; ideContext?: { currentFile?: string; openFiles?: string[] }; imagePresetId?: string }) => Promise<ContextAnalysis>
   onStop: () => void
   onReferenceRemove: (path: string) => void
   onLoreReferenceAdd: (id: string) => void
@@ -115,6 +117,11 @@ interface ModeRouterProps {
   onStyleSceneAdd: (scene: string) => void
   onStyleSceneRemove: (scene: string) => void
   onTextSelectionRemove: (index: number) => void
+  onChatPlanModeChange: (value: boolean) => void
+  onChatPlanModeToggle: () => void
+  onSubmitPlanQuestion: (message: ChatMessage, content: string, preview: string) => void
+  onApproveProposedPlan: (message: ChatMessage) => void
+  onExitChatPlanMode: () => void
   onDismissUpdateNotice?: () => void
 }
 
@@ -158,6 +165,7 @@ export function ModeRouter(props: ModeRouterProps) {
     loreItems,
     styleScenes,
     textSelections,
+    chatPlanMode,
     updateNotice,
     onSetMode,
     onToggleActivityBarExpanded,
@@ -171,7 +179,6 @@ export function ModeRouter(props: ModeRouterProps) {
     onOpenCharacterCardImport,
     onSetSidebarView,
     onSelectSearchResult,
-    onRefreshTree,
     onSelectFile,
     onSetChapterConfirmed,
     onReferenceFile,
@@ -197,10 +204,20 @@ export function ModeRouter(props: ModeRouterProps) {
     onStyleSceneAdd,
     onStyleSceneRemove,
     onTextSelectionRemove,
+    onChatPlanModeChange,
+    onChatPlanModeToggle,
+    onSubmitPlanQuestion,
+    onApproveProposedPlan,
+    onExitChatPlanMode,
     onDismissUpdateNotice,
   } = props
 
   const activeTab = openTabs.find((tab) => tabKey(tab) === activeTabKey) ?? null
+  const activeFileKind = selectedFile ? workspaceFileKind(selectedFile) : null
+  const ideContext = useMemo(() => ({
+    currentFile: selectedFile || undefined,
+    openFiles: openTabs.map((tab) => tab.path),
+  }), [openTabs, selectedFile])
   const versionsVisible = rightPanel === 'versions'
   const agentsVisible = mode === 'agents'
   const automationsVisible = mode === 'automations'
@@ -209,22 +226,36 @@ export function ModeRouter(props: ModeRouterProps) {
   const interactiveSubmode = useInteractiveStore((state) => state.submode)
   const setInteractiveSubmode = useInteractiveStore((state) => state.setSubmode)
   const [tellers, setTellers] = useState<Teller[]>([])
+  const [imagePresets, setImagePresets] = useState<ImagePreset[]>([])
+  const [agentSubAgentDetailsOpen, setAgentSubAgentDetailsOpen] = useState(false)
+  const [illustrationInsertSignal, setIllustrationInsertSignal] = useState<{ illustration: ChapterIllustration; nonce: number } | null>(null)
 
   useEffect(() => {
     let cancelled = false
     if (!workspace) {
       setTellers([])
+      setImagePresets([])
       return () => { cancelled = true }
     }
-    getInteractiveTellers()
-      .then((data) => {
-        if (!cancelled) setTellers(data)
+    Promise.all([getInteractiveTellers(), getImagePresets()])
+      .then(([nextTellers, nextImagePresets]) => {
+        if (!cancelled) {
+          setTellers(nextTellers)
+          setImagePresets(nextImagePresets)
+        }
       })
       .catch(() => {
-        if (!cancelled) setTellers([])
+        if (!cancelled) {
+          setTellers([])
+          setImagePresets([])
+        }
       })
     return () => { cancelled = true }
   }, [workspace])
+
+  useEffect(() => {
+    if (mode !== 'ide' || rightPanel !== 'ai') setAgentSubAgentDetailsOpen(false)
+  }, [mode, rightPanel])
 
   const loreReferenceLabels = useMemo(() => Object.fromEntries(loreItems.map((item) => [item.id, item.name])), [loreItems])
   const loreSuggestions = useMemo(() => loreItems.map((item) => ({
@@ -262,6 +293,36 @@ export function ModeRouter(props: ModeRouterProps) {
         detail: { prompt },
       }))
     }, 0)
+  }
+  const requestChapterIllustration = (chapterPath: string) => {
+    const target = currentChapter?.path || chapterPath || selectedFile || ''
+    if (!target) return
+    onSetMode('ide')
+    onSetRightPanel('ai')
+    window.setTimeout(() => {
+      window.dispatchEvent(new CustomEvent(WRITING_AGENT_INIT_EVENT, {
+        detail: {
+          autoSend: true,
+          prompt: [
+            '/<chapter-illustration>',
+            '',
+            `目标章节 / Target chapter: ${target}`,
+            '',
+            '请基于这个章节生成一张非剧透插画。只生成图像和 meta.json，不要自动插入正文；生成后等待我手动点击“插入正文”。',
+          ].join('\n'),
+        },
+      }))
+    }, 0)
+  }
+  const insertIllustrationIntoEditor = (illustration: ChapterIllustration) => {
+    const apply = () => {
+      setIllustrationInsertSignal((current) => ({ illustration, nonce: (current?.nonce || 0) + 1 }))
+    }
+    if (illustration.chapter_path && selectedFile !== illustration.chapter_path) {
+      void Promise.resolve(onSelectFile(illustration.chapter_path)).finally(() => window.setTimeout(apply, 0))
+      return
+    }
+    apply()
   }
   const aiVisible = rightPanel === 'ai'
   const closeBooks = () => {
@@ -302,51 +363,26 @@ export function ModeRouter(props: ModeRouterProps) {
 
   const sidebar = (
     <section className="nova-sidebar flex h-full flex-col border-r">
-      <div className="flex min-h-[92px] flex-col gap-2 border-b border-[var(--nova-border)] px-3 py-3">
-        <div className="flex items-center justify-between">
-          <div>
-            <div className="text-xs font-medium text-[var(--nova-text)]">{summary?.title || t('router.work')}</div>
-            <div className="mt-0.5 text-[11px] text-[var(--nova-text-faint)]">
-              {summary ? t('workbench.status.summary', { title: summary.title || t('workbench.untitled'), chapters: formatNumber(summary.chapter_count), words: formatNumber(summary.total_words) }) : t('router.loadingProgress')}
-            </div>
-          </div>
-          <div className="flex items-center gap-1">
-            <button
-              type="button"
-              onClick={onRefreshTree}
-              className="nova-nav-item rounded p-1"
-              title={t('router.refreshTree')}
-            >
-              <RefreshCw className="h-3.5 w-3.5" />
-            </button>
-            <button
-              type="button"
-              onClick={onToggleProjectVisible}
-              className="nova-nav-item rounded px-1"
-            >
-              ×
-            </button>
-          </div>
-        </div>
-        <div className="flex items-center gap-1">
+      <div className="border-b border-[var(--nova-border)] px-3 py-2">
+        <div className="grid grid-cols-3 gap-1">
           <button
             type="button"
             onClick={() => onSetSidebarView('outline')}
-            className={`nova-nav-item flex-1 px-2 py-1 text-xs ${sidebarView === 'outline' ? 'is-active' : 'bg-[var(--nova-surface-2)]'}`}
+            className={`nova-nav-item h-7 min-w-0 truncate whitespace-nowrap px-1 text-[11px] ${sidebarView === 'outline' ? 'is-active' : 'bg-[var(--nova-surface-2)]'}`}
           >
             {t('router.outline')}
           </button>
           <button
             type="button"
             onClick={() => onSetSidebarView('files')}
-            className={`nova-nav-item flex-1 px-2 py-1 text-xs ${sidebarView === 'files' ? 'is-active' : 'bg-[var(--nova-surface-2)]'}`}
+            className={`nova-nav-item h-7 min-w-0 truncate whitespace-nowrap px-1 text-[11px] ${sidebarView === 'files' ? 'is-active' : 'bg-[var(--nova-surface-2)]'}`}
           >
             {t('router.files')}
           </button>
           <button
             type="button"
             onClick={() => onSetSidebarView('search')}
-            className={`nova-nav-item flex-1 px-2 py-1 text-xs ${sidebarView === 'search' ? 'is-active' : 'bg-[var(--nova-surface-2)]'}`}
+            className={`nova-nav-item h-7 min-w-0 truncate whitespace-nowrap px-1 text-[11px] ${sidebarView === 'search' ? 'is-active' : 'bg-[var(--nova-surface-2)]'}`}
           >
             {t('router.search')}
           </button>
@@ -410,18 +446,24 @@ export function ModeRouter(props: ModeRouterProps) {
         />
         <div className="flex min-h-0 flex-1 flex-col">
           {activeTab ? (
-            <MarkdownEditor
-              fileName={selectedFile}
-              content={fileContent}
-              onSave={onSaveCurrentFile}
-              onQuoteSelection={onQuoteSelection}
-              saveSignal={saveSignal}
-              autoSaveEnabled={editorAutoSaveEnabled}
-              autoSaveDelayMs={editorAutoSaveDelayMs}
-              chapterSummary={currentChapter}
-              workspaceSummary={summary}
-              searchIntent={editorSearchIntent?.path === selectedFile ? editorSearchIntent : null}
-            />
+            activeFileKind === 'image' || activeFileKind === 'json' || activeFileKind === 'jsonl' ? (
+              <FilePreview path={selectedFile || activeTab.path} content={fileContent} />
+            ) : (
+              <MarkdownEditor
+                fileName={selectedFile}
+                content={fileContent}
+                onSave={onSaveCurrentFile}
+                onQuoteSelection={onQuoteSelection}
+                saveSignal={saveSignal}
+                autoSaveEnabled={editorAutoSaveEnabled}
+                autoSaveDelayMs={editorAutoSaveDelayMs}
+                chapterSummary={currentChapter}
+                searchIntent={editorSearchIntent?.path === selectedFile ? editorSearchIntent : null}
+                onGenerateIllustration={requestChapterIllustration}
+                generateIllustrationDisabled={isStreaming || !currentChapter}
+                illustrationInsertSignal={illustrationInsertSignal}
+              />
+            )
           ) : (
             loreEmpty ? (
               <EmptyLoreGuide
@@ -444,6 +486,8 @@ export function ModeRouter(props: ModeRouterProps) {
         <MainRouteLayer visible={visibleMainRoute === 'interactive'}>
           <InteractiveLayout
             workspace={workspace}
+            imagePresets={imagePresets}
+            onImagePresetsChange={setImagePresets}
             loreEmpty={loreEmpty}
             onRequestLoreInit={requestLoreInit}
             rightPanelVisible={interactiveRightVisible}
@@ -480,7 +524,7 @@ export function ModeRouter(props: ModeRouterProps) {
             icon={<SlidersHorizontal className="h-3.5 w-3.5 text-[var(--nova-text-muted)]" />}
             onClose={() => onSetRightPanel(null)}
           >
-            <SettingPanel mode="teller" workspace={workspace} tellers={tellers} onTellersChange={setTellers} />
+            <SettingPanel mode="teller" workspace={workspace} tellers={tellers} imagePresets={imagePresets} onTellersChange={setTellers} onImagePresetsChange={setImagePresets} />
           </IdeWorkspacePanel>
         </MainRouteLayer>
       )}
@@ -527,6 +571,7 @@ export function ModeRouter(props: ModeRouterProps) {
       currentChapter={currentChapter}
       selectedFile={selectedFile}
       tellers={tellers}
+      imagePresets={imagePresets}
       messages={messages}
       sessions={sessions}
       activeSessionId={activeSessionId}
@@ -538,6 +583,7 @@ export function ModeRouter(props: ModeRouterProps) {
       loreSuggestions={loreSuggestions}
       styleScenes={styleScenes}
       textSelections={textSelections}
+      planMode={chatPlanMode}
       fileSuggestions={flattenFileTree(tree)}
       onCreateSession={onCreateChatSession}
       onSwitchSession={onSwitchChatSession}
@@ -545,6 +591,7 @@ export function ModeRouter(props: ModeRouterProps) {
       onDeleteSession={onDeleteChatSession}
       onSend={onSend}
       onAnalyzeContext={onAnalyzeContext}
+      ideContext={ideContext}
       onStop={onStop}
       onReferenceRemove={onReferenceRemove}
       onLoreReferenceAdd={onLoreReferenceAdd}
@@ -552,7 +599,14 @@ export function ModeRouter(props: ModeRouterProps) {
       onStyleSceneAdd={onStyleSceneAdd}
       onStyleSceneRemove={onStyleSceneRemove}
       onTextSelectionRemove={onTextSelectionRemove}
+      onInsertIllustration={insertIllustrationIntoEditor}
+      onPlanModeChange={onChatPlanModeChange}
+      onPlanModeToggle={onChatPlanModeToggle}
+      onSubmitPlanQuestion={onSubmitPlanQuestion}
+      onApproveProposedPlan={onApproveProposedPlan}
+      onExitPlanMode={onExitChatPlanMode}
       onClose={() => onSetRightPanel(null)}
+      onSubAgentDetailsChange={setAgentSubAgentDetailsOpen}
     />
   ) : null
 
@@ -569,6 +623,7 @@ export function ModeRouter(props: ModeRouterProps) {
       projectVisible={projectVisible}
       activityBarExpanded={activityBarExpanded}
       rightPanel={rightPanel}
+      rightPanelWide={agentSubAgentDetailsOpen}
       settingsOpen={settingsOpen}
       interactiveSubmode={interactiveSubmode}
       sidebar={sidebar}
@@ -699,11 +754,6 @@ function ChapterOutline({
   const hasPlanning = settingShortcuts.length > 0 || bookSettings.length > 0 || chapterPlans.length > 0
   const latestChapterPlan = chapterPlans[chapterPlans.length - 1]
   const historicalChapterPlans = useMemo(() => chapterPlans.slice(0, -1), [chapterPlans])
-  const selectedBookSetting = useMemo(
-    () => bookSettings.find((item) => item.document.path === selectedFile),
-    [bookSettings, selectedFile],
-  )
-
   useEffect(() => {
     if (selectedFile && historicalChapterPlans.some((plan) => plan.path === selectedFile)) {
       setChapterPlanHistoryExpanded(true)
@@ -730,7 +780,21 @@ function ChapterOutline({
   return (
     <div className="space-y-3">
       <section className="space-y-1.5">
-        <div className="px-1 text-[11px] font-medium text-[var(--nova-text-faint)]">{t('planning.bookSettings')}</div>
+        <div className="flex items-center justify-between gap-2 px-1">
+          <span className="text-[11px] font-medium text-[var(--nova-text-faint)]">{t('planning.bookSettings')}</span>
+          <button
+            type="button"
+            className="nova-nav-item flex min-w-0 items-center gap-1 rounded-[var(--nova-radius)] px-1.5 py-0.5 text-[10px] text-[var(--nova-text-faint)]"
+            onClick={() => setBookSettingsExpanded((expanded) => !expanded)}
+          >
+            {bookSettingsExpanded ? (
+              <ChevronDown className="h-3 w-3 shrink-0" />
+            ) : (
+              <ChevronRight className="h-3 w-3 shrink-0" />
+            )}
+            <span className="truncate">{t('planning.bookSettingCount', { count: bookSettings.length })}</span>
+          </button>
+        </div>
         <div className="flex items-center gap-1">
           {settingShortcuts.map((item) => {
             const selected = selectedFile === item.document.path
@@ -749,27 +813,8 @@ function ChapterOutline({
             )
           })}
         </div>
-      </section>
-
-      <section className="space-y-1.5">
-        <button
-          type="button"
-          className="nova-nav-item flex w-full items-center gap-1.5 border border-transparent bg-[var(--nova-surface)] px-2 py-1 text-left"
-          onClick={() => setBookSettingsExpanded((expanded) => !expanded)}
-        >
-          {bookSettingsExpanded ? (
-            <ChevronDown className="h-3 w-3 shrink-0 text-[var(--nova-text-muted)]" />
-          ) : (
-            <ChevronRight className="h-3 w-3 shrink-0 text-[var(--nova-text-muted)]" />
-          )}
-          <BookMarked className="h-3 w-3 shrink-0 text-[var(--nova-text-muted)]" />
-          <span className="min-w-0 flex-1 truncate text-[11px] font-medium text-[var(--nova-text)]">{t('planning.otherBookSettings')}</span>
-          <span className="max-w-[96px] shrink-0 truncate text-[10px] text-[var(--nova-text-faint)]">
-            {selectedBookSetting && !bookSettingsExpanded ? selectedBookSetting.document.title : t('planning.bookSettingCount', { count: bookSettings.length })}
-          </span>
-        </button>
         {bookSettingsExpanded && (
-          <div className="space-y-0.5 pl-3">
+          <div className="space-y-0.5 pl-1">
             {bookSettings.map((item) => (
               <PlanningListItem
                 key={item.document.path}

@@ -9,8 +9,8 @@ import (
 	"github.com/cloudwego/eino/adk/prebuilt/deep"
 	"github.com/cloudwego/eino/schema"
 
-	"nova/config"
-	"nova/internal/session"
+	"denova/config"
+	"denova/internal/session"
 )
 
 func TestConfigMaxIterationDefaultsToUnlimited(t *testing.T) {
@@ -57,7 +57,7 @@ func TestBuildDeepAgentPassesGeneralAndConfiguredSubAgents(t *testing.T) {
 		}},
 	}, deepAgentSpec{
 		Kind:        config.AgentKindIDE,
-		Name:        "NovaAgent",
+		Name:        "DenovaAgent",
 		Description: "test",
 		Instruction: "test",
 	})
@@ -82,7 +82,7 @@ func TestBuildDeepAgentPassesGeneralAndConfiguredSubAgents(t *testing.T) {
 }
 
 func TestBuildSubAgentInstructionInheritsParentSystemPrompt(t *testing.T) {
-	parentInstruction := "# Nova 运行时契约（不可覆盖）\n\n作品根目录：/tmp/book\n父级工具权限边界。"
+	parentInstruction := "# Denova 运行时契约（不可覆盖）\n\n作品根目录：/tmp/book\n父级工具权限边界。"
 	instruction := buildSubAgentInstruction(deepAgentSpec{
 		Kind:        config.AgentKindIDE,
 		Instruction: parentInstruction,
@@ -94,7 +94,7 @@ func TestBuildSubAgentInstructionInheritsParentSystemPrompt(t *testing.T) {
 	})
 
 	for _, required := range []string{
-		"Nova 运行时契约",
+		"Denova 运行时契约",
 		"/tmp/book",
 		"父级工具权限边界",
 		"SubAgent 专属说明",
@@ -127,13 +127,16 @@ func TestBuildSubAgentInstructionInheritsInteractiveStoryBoundary(t *testing.T) 
 
 	for _, required := range []string{
 		"禁止修改 workspace 文件",
-		"<NARRATIVE>",
+		"只输出本回合可展示在故事舞台上的故事正文",
 		"互动禁写规则",
 		"Only return context findings.",
 	} {
 		if !strings.Contains(instruction, required) {
 			t.Fatalf("interactive subagent instruction missing %q:\n%s", required, instruction)
 		}
+	}
+	if strings.Contains(instruction, "<NARRATIVE>") {
+		t.Fatalf("interactive subagent instruction should not require narrative XML wrapper:\n%s", instruction)
 	}
 }
 
@@ -168,7 +171,7 @@ func TestBuildDeepAgentCanDisableGeneralSubAgent(t *testing.T) {
 		},
 	}, deepAgentSpec{
 		Kind:        config.AgentKindIDE,
-		Name:        "NovaAgent",
+		Name:        "DenovaAgent",
 		Description: "test",
 		Instruction: "test",
 	})
@@ -214,11 +217,44 @@ func TestSubAgentAssemblyUsesParentToolPolicyKind(t *testing.T) {
 	}
 }
 
+func TestBuildChatModelAgentAssemblyPassesToolResultLimit(t *testing.T) {
+	assembly, err := buildChatModelAgentAssembly(context.Background(), &config.Config{AgentToolResultLimitKB: 64}, chatModelAgentAssemblySpec{
+		Kind: config.AgentKindIDE,
+		ToolSettings: config.ResolvedAgentToolSettings{
+			FileRead:     false,
+			FileWrite:    false,
+			ShellExecute: false,
+			Skills:       false,
+			LoreRead:     false,
+			LoreWrite:    false,
+			Todo:         false,
+			WebSearch:    false,
+		},
+		IncludeCompaction: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var orchestrator *toolOrchestratorMiddleware
+	for _, handler := range assembly.Handlers {
+		if middleware, ok := handler.(*toolOrchestratorMiddleware); ok {
+			orchestrator = middleware
+			break
+		}
+	}
+	if orchestrator == nil {
+		t.Fatalf("expected tool orchestrator middleware")
+	}
+	if got := orchestrator.toolResultLimitBytes(); got != 64*1024 {
+		t.Fatalf("tool result limit bytes = %d, want %d", got, 64*1024)
+	}
+}
+
 func TestSubAgentStreamingDoesNotAppendParentAssistantContent(t *testing.T) {
 	var fullContent, fullThinking strings.Builder
 	var events []Event
-	meta := agentEventMetadata{AgentName: "researcher", RootAgentName: "NovaAgent", RunPath: []string{"NovaAgent", "researcher"}, SubAgent: true}
-	processNonStreamingEvent(&adk.MessageVariant{Message: schema.AssistantMessage("sub draft", nil)}, &fullContent, &fullThinking, meta, func(ev Event) {
+	meta := agentEventMetadata{AgentName: "researcher", RootAgentName: "DenovaAgent", RunPath: []string{"DenovaAgent", "researcher"}, SubAgent: true}
+	processNonStreamingEvent(&adk.MessageVariant{Message: schema.AssistantMessage("sub draft", nil)}, &fullContent, &fullThinking, 0, meta, nil, func(ev Event) {
 		events = append(events, ev)
 	})
 	if fullContent.Len() != 0 || fullThinking.Len() != 0 {
@@ -228,8 +264,8 @@ func TestSubAgentStreamingDoesNotAppendParentAssistantContent(t *testing.T) {
 		t.Fatalf("subagent chunk should still be emitted with metadata: %#v", events)
 	}
 
-	rootMeta := agentEventMetadata{AgentName: "NovaAgent", RootAgentName: "NovaAgent", RunPath: []string{"NovaAgent"}}
-	processNonStreamingEvent(&adk.MessageVariant{Message: schema.AssistantMessage("root final", nil)}, &fullContent, &fullThinking, rootMeta, func(Event) {})
+	rootMeta := agentEventMetadata{AgentName: "DenovaAgent", RootAgentName: "DenovaAgent", RunPath: []string{"DenovaAgent"}}
+	processNonStreamingEvent(&adk.MessageVariant{Message: schema.AssistantMessage("root final", nil)}, &fullContent, &fullThinking, 0, rootMeta, nil, func(Event) {})
 	if got := fullContent.String(); got != "root final" {
 		t.Fatalf("root output should append to parent builder, got %q", got)
 	}
@@ -241,8 +277,8 @@ func TestDisplayRecorderPersistsSubAgentAssistantChunks(t *testing.T) {
 	meta := agentEventMetadata{
 		RunID:             "run-1",
 		AgentName:         "researcher",
-		RootAgentName:     "NovaAgent",
-		RunPath:           []string{"NovaAgent", "researcher"},
+		RootAgentName:     "DenovaAgent",
+		RunPath:           []string{"DenovaAgent", "researcher"},
 		SubAgent:          true,
 		SubAgentSessionID: "run-1-subagent-01-researcher",
 		SubAgentType:      "researcher",

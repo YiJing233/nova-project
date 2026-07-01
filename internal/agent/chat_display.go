@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"nova/internal/session"
+	"denova/internal/session"
 )
 
 // appendAssistantIfAny 将已生成的正文持久化，避免异常中断后刷新丢失输出。
@@ -37,6 +37,18 @@ func appendAssistantIfAny(conversation Conversation, content, thinking *strings.
 	return generated
 }
 
+func discardPlanAssistantContentIfNeeded(planMode bool, planParser *planProtocolParser, content, thinking *strings.Builder) {
+	if !planMode || planParser == nil || !planParser.HasSuccessfulBlock() {
+		return
+	}
+	if content != nil {
+		content.Reset()
+	}
+	if thinking != nil {
+		thinking.Reset()
+	}
+}
+
 type displayEventAppender interface {
 	AppendDisplayEvent(event session.DisplayEvent) error
 	UpdateDisplayToolStatus(id, name, status string) error
@@ -48,6 +60,10 @@ type displayToolArgsAppender interface {
 
 type displayToolResultUpdater interface {
 	UpdateDisplayToolResult(id, name, status, result string) error
+}
+
+type displayToolIllustrationUpdater interface {
+	UpdateDisplayToolIllustration(id, name string, illustration *session.ChapterIllustration) error
 }
 
 type displayEventContentAppender interface {
@@ -97,6 +113,11 @@ func (r *displayEventRecorder) Record(ev Event) {
 		id := eventDataString(ev.Data, "id")
 		name := eventDataString(ev.Data, "name")
 		args := eventDataString(ev.Data, "args")
+		if isPlanProtocolToolName(name) {
+			if handled, _ := emitPlanProtocolToolCall(name, args, meta, func(planEv Event) { r.Record(planEv) }); handled {
+				return
+			}
+		}
 		if strings.TrimSpace(name) == "" {
 			name = "unknown_tool"
 		}
@@ -125,6 +146,9 @@ func (r *displayEventRecorder) Record(ev Event) {
 		id := eventDataString(ev.Data, "id")
 		name := eventDataString(ev.Data, "name")
 		delta := eventDataString(ev.Data, "delta")
+		if isPlanProtocolToolName(name) {
+			return
+		}
 		argsAppender, ok := r.appender.(displayToolArgsAppender)
 		if !ok {
 			return
@@ -137,12 +161,22 @@ func (r *displayEventRecorder) Record(ev Event) {
 		id := eventDataString(ev.Data, "id")
 		name := eventDataString(ev.Data, "name")
 		result := eventDataString(ev.Data, "content")
+		if isPlanProtocolToolName(name) {
+			return
+		}
 		if resultUpdater, ok := r.appender.(displayToolResultUpdater); ok {
 			if err := resultUpdater.UpdateDisplayToolResult(id, name, "success", result); err != nil {
 				log.Printf("[agent-run] persist display tool_result failed name=%s id=%s err=%v", name, id, err)
 			}
 		} else if err := r.appender.UpdateDisplayToolStatus(id, name, "success"); err != nil {
 			log.Printf("[agent-run] persist display tool_result status failed name=%s id=%s err=%v", name, id, err)
+		}
+		if illustration := eventDataChapterIllustration(ev.Data, "illustration"); illustration != nil {
+			if updater, ok := r.appender.(displayToolIllustrationUpdater); ok {
+				if err := updater.UpdateDisplayToolIllustration(id, name, illustration); err != nil {
+					log.Printf("[agent-run] persist display illustration failed name=%s id=%s err=%v", name, id, err)
+				}
+			}
 		}
 		if id != "" {
 			delete(r.pendingToolIDs, id)
@@ -183,6 +217,29 @@ func (r *displayEventRecorder) Record(ev Event) {
 			UsageCalls:           usageCallsForSession(stats.Calls),
 		}); err != nil {
 			log.Printf("[agent-run] persist token_usage failed run_id=%s err=%v", stats.RunID, err)
+		}
+	case "plan_question", "proposed_plan":
+		r.flushThinking()
+		content := eventDataString(ev.Data, "content")
+		if strings.TrimSpace(content) == "" {
+			return
+		}
+		meta := eventMetadataFromData(ev.Data)
+		if err := r.appender.AppendDisplayEvent(session.DisplayEvent{
+			ID:                eventDataString(ev.Data, "id"),
+			Role:              ev.Type,
+			Content:           content,
+			Status:            eventDataString(ev.Data, "status"),
+			RunID:             meta.RunID,
+			AgentKind:         meta.AgentKind,
+			AgentName:         meta.AgentName,
+			RootAgentName:     meta.RootAgentName,
+			RunPath:           append([]string(nil), meta.RunPath...),
+			SubAgent:          meta.SubAgent,
+			SubAgentSessionID: meta.SubAgentSessionID,
+			SubAgentType:      meta.SubAgentType,
+		}); err != nil {
+			log.Printf("[agent-run] persist display plan event failed role=%s bytes=%d err=%v", ev.Type, len(content), err)
 		}
 	case "error", "aborted":
 		r.flushThinking()
@@ -383,6 +440,29 @@ func eventDataUsageCalls(data interface{}, key string) []runTokenUsageCall {
 	default:
 		return nil
 	}
+}
+
+func eventDataChapterIllustration(data interface{}, key string) *session.ChapterIllustration {
+	typed, ok := data.(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	value, ok := typed[key]
+	if !ok || value == nil {
+		return nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	var result session.ChapterIllustration
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return nil
+	}
+	if strings.TrimSpace(result.Schema) == "" || strings.TrimSpace(result.ImagePath) == "" {
+		return nil
+	}
+	return &result
 }
 
 func usageCallsForSession(calls []runTokenUsageCall) []session.TokenUsageCall {

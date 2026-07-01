@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -16,8 +17,9 @@ import (
 // toolOrchestratorMiddleware centralizes Nova's internal tool execution policy.
 type toolOrchestratorMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
-	agentKind  string
-	policyKind string
+	agentKind          string
+	policyKind         string
+	toolResultMaxBytes int
 }
 
 type interactiveStoryToolMiddleware struct {
@@ -77,7 +79,7 @@ func isInteractiveStoryWriteTool(name string) bool {
 }
 
 func interactiveStoryWriteToolBlockedMessage(name string) string {
-	return fmt.Sprintf("[tool error] 互动故事模式禁止使用写文件工具 %q。请不要修改 workspace 文件，只输出本回合故事正文；状态变化由后端状态 Agent 异步写入 story jsonl。", name)
+	return fmt.Sprintf("[tool error] 游戏模式禁止使用写文件工具 %q。请不要修改 workspace 文件，只输出本回合故事正文；状态变化由后端状态 Agent 异步写入 story jsonl。", name)
 }
 
 type ToolDecision struct {
@@ -110,6 +112,7 @@ func (m *toolOrchestratorMiddleware) WrapInvokableToolCall(
 ) (adk.InvokableToolCallEndpoint, error) {
 	return func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
 		decision := m.buildToolDecision(toolCtx, args)
+		decision = applyToolArgumentValidation(decision, args)
 		observer := RunObserverFromContext(ctx)
 		observer.RecordToolDecision(decision)
 		if decision.Action == "blocked" {
@@ -141,7 +144,7 @@ func (m *toolOrchestratorMiddleware) WrapInvokableToolCall(
 			})
 			return msg, nil
 		}
-		filtered := FilterToolResultForModel(toolName(toolCtx), args, result)
+		filtered := FilterToolResultForModelWithLimit(toolName(toolCtx), args, result, m.toolResultLimitBytes())
 		observer.RecordToolExecution(ToolExecutionRecord{
 			ToolName:       filtered.Manifest.Name,
 			ToolCallID:     decision.ToolCallID,
@@ -163,6 +166,7 @@ func (m *toolOrchestratorMiddleware) WrapStreamableToolCall(
 ) (adk.StreamableToolCallEndpoint, error) {
 	return func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
 		decision := m.buildToolDecision(toolCtx, args)
+		decision = applyToolArgumentValidation(decision, args)
 		observer := RunObserverFromContext(ctx)
 		observer.RecordToolDecision(decision)
 		if decision.Action == "blocked" {
@@ -193,7 +197,7 @@ func (m *toolOrchestratorMiddleware) WrapStreamableToolCall(
 			})
 			return singleChunkReader(fmt.Sprintf("[tool error] %v", err)), nil
 		}
-		return filterToolResultReader(ctx, sr, toolCtx, args), nil
+		return filterToolResultReader(ctx, sr, toolCtx, args, m.toolResultLimitBytes()), nil
 	}, nil
 }
 
@@ -223,12 +227,13 @@ func safeWrapReader(sr *schema.StreamReader[string]) *schema.StreamReader[string
 	return r
 }
 
-func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string], toolCtx *adk.ToolContext, args string) *schema.StreamReader[string] {
+func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string], toolCtx *adk.ToolContext, args string, maxBytes int) *schema.StreamReader[string] {
 	r, w := schema.Pipe[string](1)
 	go func() {
 		defer w.Close()
 		name := toolName(toolCtx)
 		manifest := ManifestForTool(name)
+		manifest.MaxResultBytes = normalizeToolResultLimitBytes(maxBytes)
 		limit := normalizedToolResultLimit(manifest)
 		var content strings.Builder
 		originalBytes := 0
@@ -261,6 +266,10 @@ func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string]
 				return
 			}
 			originalBytes += len(chunk)
+			if limit <= 0 {
+				content.WriteString(chunk)
+				continue
+			}
 			if content.Len() >= limit {
 				continue
 			}
@@ -274,6 +283,13 @@ func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string]
 		}
 	}()
 	return r
+}
+
+func (m *toolOrchestratorMiddleware) toolResultLimitBytes() int {
+	if m == nil {
+		return 0
+	}
+	return normalizeToolResultLimitBytes(m.toolResultMaxBytes)
 }
 
 func (m *toolOrchestratorMiddleware) buildToolDecision(toolCtx *adk.ToolContext, args string) ToolDecision {
@@ -293,6 +309,48 @@ func (m *toolOrchestratorMiddleware) buildToolDecision(toolCtx *adk.ToolContext,
 		decision.Reason = interactiveStoryWriteToolBlockedMessage(name)
 	}
 	return decision
+}
+
+func applyToolArgumentValidation(decision ToolDecision, args string) ToolDecision {
+	if decision.Action == "blocked" {
+		return decision
+	}
+	if msg := invalidToolArgumentsMessage(decision.ToolName, args); msg != "" {
+		decision.Action = "blocked"
+		decision.Reason = msg
+	}
+	return decision
+}
+
+func invalidToolArgumentsMessage(toolName, args string) string {
+	if err := validateToolArgumentsJSON(args); err != nil {
+		return fmt.Sprintf("[tool error] 工具 %q 的参数不是完整 JSON 对象：%v。请重新发起同一个工具调用，并保证 arguments 是完整、合法的 JSON object；字符串里的换行、引号和反斜杠必须正确转义。 / Tool arguments must be a complete JSON object; escape newlines, quotes, and backslashes inside strings.", toolName, err)
+	}
+	return ""
+}
+
+func validateToolArgumentsJSON(args string) error {
+	args = strings.TrimSpace(args)
+	if args == "" {
+		return nil
+	}
+	decoder := json.NewDecoder(strings.NewReader(args))
+	decoder.UseNumber()
+	var payload map[string]any
+	if err := decoder.Decode(&payload); err != nil {
+		return err
+	}
+	if payload == nil {
+		return fmt.Errorf("arguments must be a JSON object")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("arguments contain trailing JSON data")
+		}
+		return fmt.Errorf("arguments contain trailing data: %w", err)
+	}
+	return nil
 }
 
 func (m *toolOrchestratorMiddleware) effectivePolicyKind() string {

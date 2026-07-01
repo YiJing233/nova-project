@@ -7,11 +7,12 @@ import (
 	"strings"
 	"time"
 
-	"nova/config"
-	"nova/internal/agent"
-	"nova/internal/book"
-	"nova/internal/interactive"
-	"nova/internal/session"
+	"denova/config"
+	"denova/internal/agent"
+	"denova/internal/book"
+	"denova/internal/imagepreset"
+	"denova/internal/interactive"
+	"denova/internal/session"
 )
 
 // ChatAppService 负责普通创作 Agent 任务与会话管理。
@@ -273,7 +274,7 @@ func (s *ChatAppService) StartTask(req agent.ChatRequest) *Task {
 
 	task := NewTask(func(ctx context.Context, task *Task, emit func(agent.Event)) {
 		log.Printf("[agent-task] run begin id=%s message_len=%d references=%d lore_references=%d style_scenes=%d style_rules=%d selections=%d plan_mode=%v writing_skill=%s", task.ID(), len(req.Message), len(req.References), len(req.LoreReferences), len(req.StyleScenes), len(req.StyleRules), len(req.Selections), req.PlanMode, req.WritingSkill)
-		runtimeContexts := agent.IDEWorkspaceRuntimeContextsForState(runtime.state)
+		runtimeContexts := agent.IDEWorkspaceRuntimeContextsForRequest(runtime.state, req)
 		conversation := agent.NewSessionConversationForAgentWithRuntimeContexts(
 			runtime.sess,
 			&runtime.cfg,
@@ -290,6 +291,7 @@ func (s *ChatAppService) StartTask(req agent.ChatRequest) *Task {
 			Workspace:           runtime.workspace,
 			Mode:                "ide",
 			IdleTimeout:         agentIdleTimeout(runtime.cfg),
+			ToolResultMaxBytes:  agentToolResultMaxBytes(runtime.cfg),
 			SystemPromptLog:     agent.BuildInstructionComposition(&runtime.cfg, runtime.state, runtime.ideTeller),
 			OnMutationsVerified: a.automationMutationCallback("ide_agent_post_run"),
 		}, emit)
@@ -320,7 +322,7 @@ func (s *ChatAppService) StartTask(req agent.ChatRequest) *Task {
 
 func agentIdleTimeout(cfg config.Config) time.Duration {
 	if cfg.AgentIdleTimeoutSeconds <= 0 {
-		return 180 * time.Second
+		return 0
 	}
 	return time.Duration(cfg.AgentIdleTimeoutSeconds) * time.Second
 }
@@ -412,7 +414,7 @@ func (s *ChatAppService) prepareIDEChatRuntime(req agent.ChatRequest, abortRunni
 	novaDir := runtime.cfg.NovaDir
 	a.mu.Unlock()
 
-	if layered, err := config.LoadLayered(novaDir, runtime.workspace); err == nil {
+	if layered, err := config.LoadLayeredWithStartupConfig(novaDir, runtime.workspace); err == nil {
 		applyLayeredSettingsToConfig(&runtime.cfg, layered)
 		applyRequestLocaleToConfig(&runtime.cfg, req.Locale)
 		runtime.cfg.IDEStoryTellerID = layered.Effective.IDEStoryTellerID
@@ -432,24 +434,55 @@ func (s *ChatAppService) prepareIDEChatRuntime(req agent.ChatRequest, abortRunni
 		log.Printf("[agent-task] load layered settings failed workspace=%s err=%v", runtime.workspace, err)
 		applyRequestLocaleToConfig(&runtime.cfg, req.Locale)
 	}
+	applyImagePresetRuntimePolicy(&runtime, &req)
 	if err := applyWritingSkillRuntimePolicy(&runtime, &req); err != nil {
 		return ideChatRuntime{}, req, err
 	}
 	return runtime, req, nil
 }
 
+func applyImagePresetRuntimePolicy(runtime *ideChatRuntime, req *agent.ChatRequest) {
+	if runtime == nil || req == nil {
+		return
+	}
+	presetID := imagepreset.NormalizeID(req.ImagePresetID)
+	if presetID == "" {
+		presetID = imagepreset.NormalizeID(runtime.cfg.IDEImagePresetID)
+	}
+	if presetID == "" {
+		presetID = imagepreset.DefaultID
+	}
+	req.ImagePresetID = presetID
+	preset := imagepreset.DefaultPreset()
+	if strings.TrimSpace(runtime.cfg.NovaDir) != "" {
+		loaded, err := imagepreset.NewLibrary(runtime.cfg.NovaDir).Get(presetID)
+		if err != nil {
+			log.Printf("[agent-task] load image preset failed id=%s workspace=%s err=%v; fallback=%s", presetID, runtime.workspace, err, imagepreset.DefaultID)
+		} else {
+			preset = loaded
+		}
+	}
+	agentSystemPrompt := preset.PromptForTargets(imagepreset.TargetAgentSystem)
+	toolRequestPrompt := preset.PromptForTargets(imagepreset.TargetToolRequest)
+	req.ImagePreset = agent.ImagePresetContext{
+		ID:                preset.ID,
+		Name:              preset.Name,
+		AgentSystemPrompt: agentSystemPrompt,
+		ToolRequestPrompt: toolRequestPrompt,
+	}
+	runtime.cfg.ImagePresetToolPrompt = toolRequestPrompt
+	runtime.ideTeller.ImagePresetID = preset.ID
+	runtime.ideTeller.ImagePresetName = preset.Name
+	runtime.ideTeller.ImagePresetSystemPrompt = agentSystemPrompt
+	log.Printf("[agent-task] selected image preset id=%s name=%q workspace=%s agent_system_chars=%d tool_request_chars=%d", req.ImagePreset.ID, req.ImagePreset.Name, runtime.workspace, len([]rune(agentSystemPrompt)), len([]rune(toolRequestPrompt)))
+}
+
 func applyWritingSkillRuntimePolicy(runtime *ideChatRuntime, req *agent.ChatRequest) error {
 	if runtime == nil || req == nil {
 		return nil
 	}
-	writingSkill, err := agent.ResolveWritingSkillContext(context.Background(), &runtime.cfg, req.WritingSkill)
-	if err != nil {
-		return err
-	}
-	req.WritingSkill = writingSkill.Name
-	req.WritingSkillContext = writingSkill
-	agent.ApplyWritingSkillRolePolicy(&runtime.cfg, writingSkill.Name)
-	log.Printf("[agent-task] selected writing skill name=%s scope=%s source=%s path=%s truncated=%v workspace=%s", writingSkill.Name, writingSkill.Scope, writingSkill.Source, writingSkill.Path, writingSkill.Truncated, runtime.workspace)
+	req.WritingSkill = agent.ResolveWritingSkillName(&runtime.cfg, req.WritingSkill)
+	log.Printf("[agent-task] selected writing skill name=%s workspace=%s", req.WritingSkill, runtime.workspace)
 	return nil
 }
 

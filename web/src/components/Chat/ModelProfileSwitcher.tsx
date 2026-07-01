@@ -10,7 +10,7 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { fetchSettings, updateWorkspaceSettings } from '@/features/settings/api'
 import type { AgentModelOverride, LayeredSettings, ModelProfileSettings, Settings } from '@/features/settings/types'
-import { modelProfileID, modelProfileLabel } from '@/features/settings/model-profiles'
+import { modelProfileID, modelProfileLabel, modelProfilesWithDefault } from '@/features/settings/model-profiles'
 import type { VisibleAgentKey } from '@/features/agents/agent-registry'
 
 interface ModelProfileSwitcherProps {
@@ -102,8 +102,8 @@ function useModelProfileSelector({ agentKey, workspace, disabled = false }: Mode
     [settings, t],
   )
   const currentProfile = useMemo(
-    () => agentKey ? resolveCurrentProfileID(settings?.effective ?? {}, agentKey) : 'default',
-    [agentKey, settings?.effective],
+    () => agentKey ? resolveCurrentProfileID(settings?.effective ?? {}, agentKey, options) : 'default',
+    [agentKey, options, settings?.effective],
   )
   const currentLabel = options.find((option) => option.id === currentProfile)?.label || currentProfile
 
@@ -179,7 +179,7 @@ function ModelProfileOptions({ selector }: { selector: ModelProfileSelector }) {
   )
 }
 
-function buildModelProfileOptions(settings: LayeredSettings | null, t: (key: string, options?: Record<string, unknown>) => string): ModelProfileOption[] {
+export function buildModelProfileOptions(settings: LayeredSettings | null, t: (key: string, options?: Record<string, unknown>) => string): ModelProfileOption[] {
   if (!settings) return []
   const profiles = new Map<string, string>()
   const add = (profile?: ModelProfileSettings) => {
@@ -187,11 +187,8 @@ function buildModelProfileOptions(settings: LayeredSettings | null, t: (key: str
     if (!id) return
     profiles.set(id, modelProfileLabel(profile))
   }
-  profiles.set('default', settings.effective.openai_model || t('chat.modelProfile.defaultModel'))
-  ;(settings.effective.model_profiles ?? []).forEach(add)
-  ;(settings.workspace.model_profiles ?? []).forEach(add)
-  const currentDefault = settings.effective.agent_models?.default?.profile_id
-  if (currentDefault && !profiles.has(currentDefault)) profiles.set(currentDefault, currentDefault)
+  modelProfilesWithDefault(settings.effective).forEach(add)
+  if (!profiles.has('default')) profiles.set('default', t('chat.modelProfile.defaultModel'))
   return Array.from(profiles.entries()).map(([id, label]) => ({
     id,
     label: id === 'default'
@@ -200,9 +197,10 @@ function buildModelProfileOptions(settings: LayeredSettings | null, t: (key: str
   }))
 }
 
-function resolveCurrentProfileID(settings: Settings, agentKey: VisibleAgentKey): string {
+export function resolveCurrentProfileID(settings: Settings, agentKey: VisibleAgentKey, options: ModelProfileOption[]): string {
   const merged = mergeAgentModelOverride(settings.agent_models?.default ?? {}, settings.agent_models?.[agentKey] ?? {})
-  return merged.profile_id || 'default'
+  const profileID = merged.profile_id || 'default'
+  return options.some((option) => option.id === profileID) ? profileID : 'default'
 }
 
 function mergeAgentModelOverride(parent: AgentModelOverride, child: AgentModelOverride): AgentModelOverride {

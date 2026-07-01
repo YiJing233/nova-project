@@ -8,9 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"nova/config"
-	"nova/internal/book"
-	"nova/internal/prompts"
+	"denova/config"
+	"denova/internal/book"
+	"denova/internal/prompts"
 )
 
 func TestBuildInteractiveStoryInstructionIsIsolatedFromIDEPrompt(t *testing.T) {
@@ -27,10 +27,13 @@ func TestBuildInteractiveStoryInstructionIsIsolatedFromIDEPrompt(t *testing.T) {
 			t.Fatalf("interactive story instruction should not contain IDE-only prompt %q:\n%s", forbidden, instruction)
 		}
 	}
-	for _, required := range []string{"互动故事模式", "<NARRATIVE>", "<HOT_STATE>", "<STATE_DELTA>", "禁止使用写文件工具", "write_todos", "<invoke>", "文字小说 RPG", "回合裁定循环", "可选择", "一致性自检", "list_lore_items", "read_lore_items", "list_interactive_memories", "read_interactive_memories"} {
+	for _, required := range []string{"游戏模式", "互动文字冒险", "只输出本回合可展示在故事舞台上的故事正文", "<HOT_STATE>", "<STATE_DELTA>", "禁止使用写文件工具", "write_todos", "<invoke>", "文字小说 RPG", "回合裁定循环", "可选择", "一致性自检", "list_lore_items", "read_lore_items", "list_interactive_memories", "read_interactive_memories"} {
 		if !strings.Contains(instruction, required) {
 			t.Fatalf("interactive story instruction should contain %q:\n%s", required, instruction)
 		}
+	}
+	if strings.Contains(instruction, "<NARRATIVE>") {
+		t.Fatalf("interactive story instruction should not require narrative XML wrapper:\n%s", instruction)
 	}
 	if !strings.Contains(instruction, "导演系统规则") || !strings.Contains(instruction, "经典叙事者") {
 		t.Fatalf("interactive story instruction should include teller system rules:\n%s", instruction)
@@ -174,6 +177,31 @@ func TestBuildInstructionKeepsWorkspaceStateOutOfSystemPrompt(t *testing.T) {
 	}
 }
 
+func TestIDEContextRuntimeContextIsBoundedPathOnlyState(t *testing.T) {
+	longName := strings.Repeat("长", ideContextMaxPathRunes+8) + ".md"
+	context := IDEContextRuntimeContext(IDEContextRef{
+		CurrentFile: "/chapters/ch01.md",
+		OpenFiles: []string{
+			"chapters/ch01.md",
+			"chapters/ch01.md",
+			"../outside.md",
+			longName,
+		},
+	})
+
+	for _, want := range []string{"当前聚焦文件：chapters/ch01.md", "当前打开文件：chapters/ch01.md、", "不包含文件正文", "必须按路径显式使用工具读取", "[已截断]"} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("IDE context missing %q:\n%s", want, context)
+		}
+	}
+	if strings.Contains(context, "../outside.md") {
+		t.Fatalf("IDE context should drop unsafe relative paths:\n%s", context)
+	}
+	if strings.Count(context, "chapters/ch01.md") != 2 {
+		t.Fatalf("IDE context should dedupe open files while preserving current file:\n%s", context)
+	}
+}
+
 func TestBuildInstructionIncludesStyleRulesInSystemPrompt(t *testing.T) {
 	state := book.NewState(t.TempDir())
 	cfg := &config.Config{Workspace: state.Workspace()}
@@ -187,6 +215,23 @@ func TestBuildInstructionIncludesStyleRulesInSystemPrompt(t *testing.T) {
 	for _, required := range []string{"## 场景化风格规则", "场景：激烈打斗", "短句留白", "触发规则", "system prompt 注入了场景化风格规则"} {
 		if !strings.Contains(instruction, required) {
 			t.Fatalf("system prompt should include style rule %q:\n%s", required, instruction)
+		}
+	}
+}
+
+func TestBuildInstructionIncludesImagePresetSystemPrompt(t *testing.T) {
+	state := book.NewState(t.TempDir())
+	cfg := &config.Config{Workspace: state.Workspace()}
+
+	instruction := BuildInstruction(cfg, state, IDEStoryTeller{
+		ImagePresetID:           "realistic",
+		ImagePresetName:         "写实",
+		ImagePresetSystemPrompt: "构造图像提示词时保持真实光影。",
+	})
+
+	for _, required := range []string{"## 图像方案系统规则（仅用于图像生成）", "realistic", "写实", "构造图像提示词时保持真实光影", "普通正文写作"} {
+		if !strings.Contains(instruction, required) {
+			t.Fatalf("system prompt should include image preset system rule %q:\n%s", required, instruction)
 		}
 	}
 }
@@ -245,14 +290,17 @@ func TestBuiltinAgentPromptsExposeInteractiveMemoryToolsWithoutCustomPrompt(t *t
 	if !strings.Contains(interactive.RuntimeContract, "运行时契约") {
 		t.Fatalf("runtime contract should be populated: %#v", interactive)
 	}
-	if !strings.Contains(interactive.OutputProtocol, "<NARRATIVE>") {
-		t.Fatalf("output protocol should contain narrative format: %#v", interactive)
+	if !strings.Contains(interactive.OutputProtocol, "只输出本回合可展示在故事舞台上的故事正文") {
+		t.Fatalf("output protocol should require direct narrative text: %#v", interactive)
+	}
+	if strings.Contains(interactive.OutputProtocol, "<NARRATIVE>") {
+		t.Fatalf("output protocol should not require narrative XML wrapper: %#v", interactive)
 	}
 	if !strings.Contains(interactive.EditableSystemPrompt, "list_interactive_memories") || !strings.Contains(interactive.EditableSystemPrompt, "read_interactive_memories") {
 		t.Fatalf("editable prompt should include memory recall flow: %#v", interactive)
 	}
-	if strings.Contains(interactive.EditableSystemPrompt, "必须只输出 <NARRATIVE>") {
-		t.Fatalf("editable prompt should not include protected output protocol: %s", interactive.EditableSystemPrompt)
+	if strings.Contains(interactive.EditableSystemPrompt, "<NARRATIVE>") {
+		t.Fatalf("editable prompt should not include legacy narrative XML wrapper: %s", interactive.EditableSystemPrompt)
 	}
 	if !strings.Contains(interactive.EditableSystemPrompt, "story 级运行参数") || strings.Contains(interactive.EditableSystemPrompt, "2000 个中文字") {
 		t.Fatalf("editable prompt should describe dynamic story reply target without fixed fallback: %s", interactive.EditableSystemPrompt)
@@ -271,8 +319,8 @@ func TestBuiltinAgentPromptsExposeInteractiveMemoryToolsWithoutCustomPrompt(t *t
 	if !strings.Contains(flowSource.Content, "list_interactive_memories") || !strings.Contains(flowSource.Content, "read_interactive_memories") {
 		t.Fatalf("flow source should include memory recall flow: %#v", flowSource)
 	}
-	if strings.Contains(flowSource.Content, "必须只输出 <NARRATIVE>") {
-		t.Fatalf("flow source should not include protected output protocol: %s", flowSource.Content)
+	if strings.Contains(flowSource.Content, "<NARRATIVE>") {
+		t.Fatalf("flow source should not include legacy narrative XML wrapper: %s", flowSource.Content)
 	}
 	customSource := findPromptSource(interactiveSources, "custom")
 	if customSource == nil || !customSource.Editable || customSource.Field != "system_prompt" {

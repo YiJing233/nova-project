@@ -8,8 +8,8 @@ import (
 
 	"github.com/cloudwego/eino/schema"
 
-	"nova/internal/book"
-	"nova/internal/session"
+	"denova/internal/book"
+	"denova/internal/session"
 )
 
 func TestMergeToolCalls(t *testing.T) {
@@ -67,6 +67,25 @@ func TestParseWriteLoreItemsToolResultReturnsChangedIDs(t *testing.T) {
 	}
 }
 
+func TestComposeAgentInputDoesNotInjectImagePresetContext(t *testing.T) {
+	composition := composeAgentInput(ChatRequest{
+		Message:       "给当前章节生成插画",
+		ImagePresetID: "realistic",
+		ImagePreset: ImagePresetContext{
+			ID:                "realistic",
+			Name:              "写实",
+			AgentSystemPrompt: "系统理解规则。",
+			ToolRequestPrompt: "真实光影和摄影感。",
+		},
+	}, nil, nil, DefaultLoopPolicy())
+	if strings.Contains(composition.AgentMessage, "真实光影和摄影感") || strings.Contains(composition.AgentMessage, "图像方案预设") {
+		t.Fatalf("image preset should not be injected into turn message:\n%s", composition.AgentMessage)
+	}
+	if composition.ContextLog != nil && strings.Contains(composition.ContextLog.String(), "图像方案预设") {
+		t.Fatalf("context log should not record image preset as turn context:\n%s", composition.ContextLog.String())
+	}
+}
+
 func TestAppendReferenceContextDedupesAndReportsReadFailure(t *testing.T) {
 	workspace := t.TempDir()
 	mustWriteTestFile(t, workspace, "chapters/ch01.md", "第一章正文")
@@ -105,13 +124,20 @@ func TestAppendSelectionContextIncludesFileAndLineRange(t *testing.T) {
 	assertContains(t, got, "```\n选中的正文\n```")
 }
 
-func TestAppendPlanModeInstructionForbidsWriteTools(t *testing.T) {
+func TestAppendPlanModeInstructionUsesStructuredPlanningProtocol(t *testing.T) {
 	got := appendPlanModeInstruction("重构章节")
 
-	assertContains(t, got, "[规划模式]")
-	assertContains(t, got, "可以使用 read_file 工具")
-	assertContains(t, got, "禁止使用 write_file、edit_file、delete_file")
+	assertContains(t, got, "[Plan Mode / 规划模式]")
+	assertContains(t, got, "不要直接执行")
+	assertContains(t, got, "<plan_questions>")
+	assertContains(t, got, "<proposed_plan>")
+	assertContains(t, got, "# 计划标题")
+	assertContains(t, got, "## Summary")
+	assertContains(t, got, "## Key Changes")
 	assertContains(t, got, "用户需求：\n重构章节")
+	if strings.Contains(got, "Tests、Assumptions") || strings.Contains(got, "Test Plan") {
+		t.Fatalf("Plan Mode 最终方案模板不应强制输出测试或假设小节:\n%s", got)
+	}
 }
 
 func TestAppendContextBoundaryInstructionEmphasizesCurrentRequest(t *testing.T) {

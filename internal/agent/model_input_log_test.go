@@ -17,13 +17,17 @@ func TestLogFullModelInputWritesUntruncatedMessages(t *testing.T) {
 	oldPath := modelInputLogPath
 	oldSeq := modelInputLogSeq.Load()
 	oldEnabled := modelInputLogEnabled.Load()
+	oldPending := modelInputLogPending
 	modelInputLogPath = filepath.Join(t.TempDir(), "llm-inputs.jsonl")
 	modelInputLogSeq.Store(0)
 	modelInputLogEnabled.Store(true)
+	modelInputLogPending = map[modelInputLogPendingKey][]string{}
 	t.Cleanup(func() {
+		modelInputLogWG.Wait()
 		modelInputLogPath = oldPath
 		modelInputLogSeq.Store(oldSeq)
 		modelInputLogEnabled.Store(oldEnabled)
+		modelInputLogPending = oldPending
 	})
 
 	longContent := strings.Repeat("完整输入", 12000)
@@ -50,6 +54,7 @@ func TestLogFullModelInputWritesUntruncatedMessages(t *testing.T) {
 			},
 		},
 	})
+	modelInputLogWG.Wait()
 
 	payload, err := os.ReadFile(modelInputLogPath)
 	if err != nil {
@@ -80,17 +85,204 @@ func TestLogFullModelInputWritesUntruncatedMessages(t *testing.T) {
 	}
 }
 
+func TestLogModelProviderRequestIDUpdatesModelInputRecord(t *testing.T) {
+	oldPath := modelInputLogPath
+	oldSeq := modelInputLogSeq.Load()
+	oldEnabled := modelInputLogEnabled.Load()
+	oldPending := modelInputLogPending
+	modelInputLogPath = filepath.Join(t.TempDir(), "llm-inputs.jsonl")
+	modelInputLogSeq.Store(0)
+	modelInputLogEnabled.Store(true)
+	modelInputLogPending = map[modelInputLogPendingKey][]string{}
+	t.Cleanup(func() {
+		modelInputLogWG.Wait()
+		modelInputLogPath = oldPath
+		modelInputLogSeq.Store(oldSeq)
+		modelInputLogEnabled.Store(oldEnabled)
+		modelInputLogPending = oldPending
+	})
+
+	callID := logFullModelInput(modelInputLogOptions{
+		AgentKind: "test_agent",
+		Source:    "test",
+		Mode:      "generate",
+		Config: openai.ChatModelConfig{
+			Model: "test-model",
+		},
+		Messages: []*schema.Message{
+			schema.UserMessage("hello"),
+		},
+	})
+	if callID == "" {
+		t.Fatal("expected model input call id")
+	}
+	msg := schema.AssistantMessage("world", nil)
+	msg.Extra = map[string]any{"openai-request-id": " req-provider-123 "}
+
+	got := logModelProviderRequestIDForCall(callID, "test_agent", "test", "generate", "test-model", "", 0, msg)
+	if got != "req-provider-123" {
+		t.Fatalf("provider request id = %q, want req-provider-123", got)
+	}
+	modelInputLogWG.Wait()
+
+	payload, err := os.ReadFile(modelInputLogPath)
+	if err != nil {
+		t.Fatalf("read model input log: %v", err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(payload), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("line count = %d, want 2\n%s", len(lines), string(payload))
+	}
+	var provider modelInputLogProviderRequestIDRecord
+	if err := json.Unmarshal(lines[1], &provider); err != nil {
+		t.Fatalf("unmarshal provider request id log: %v", err)
+	}
+	if provider.Type != "llm_provider_request_id" || provider.CallID != callID || provider.ProviderID != "req-provider-123" {
+		t.Fatalf("provider request id event was not persisted: %#v", provider)
+	}
+}
+
+func TestLogModelProviderRequestIDUsesPendingModelInputRecord(t *testing.T) {
+	oldPath := modelInputLogPath
+	oldSeq := modelInputLogSeq.Load()
+	oldEnabled := modelInputLogEnabled.Load()
+	oldPending := modelInputLogPending
+	modelInputLogPath = filepath.Join(t.TempDir(), "llm-inputs.jsonl")
+	modelInputLogSeq.Store(0)
+	modelInputLogEnabled.Store(true)
+	modelInputLogPending = map[modelInputLogPendingKey][]string{}
+	t.Cleanup(func() {
+		modelInputLogWG.Wait()
+		modelInputLogPath = oldPath
+		modelInputLogSeq.Store(oldSeq)
+		modelInputLogEnabled.Store(oldEnabled)
+		modelInputLogPending = oldPending
+	})
+
+	logFullModelInput(modelInputLogOptions{
+		AgentKind: "main_agent",
+		Source:    "adk",
+		Mode:      "stream",
+		Config: openai.ChatModelConfig{
+			Model: "test-model",
+		},
+		Messages: []*schema.Message{
+			schema.UserMessage("hello"),
+		},
+	})
+	msg := schema.AssistantMessage("world", nil)
+	msg.Extra = map[string]any{"openai-request-id": "req-adk-456"}
+
+	logModelProviderRequestID("main_agent", "adk", "response", "", "run-1", 1, msg)
+	modelInputLogWG.Wait()
+
+	payload, err := os.ReadFile(modelInputLogPath)
+	if err != nil {
+		t.Fatalf("read model input log: %v", err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(payload), []byte{'\n'})
+	if len(lines) != 2 {
+		t.Fatalf("line count = %d, want 2\n%s", len(lines), string(payload))
+	}
+	var input modelInputLogRecord
+	if err := json.Unmarshal(lines[0], &input); err != nil {
+		t.Fatalf("unmarshal model input log: %v", err)
+	}
+	var provider modelInputLogProviderRequestIDRecord
+	if err := json.Unmarshal(lines[1], &provider); err != nil {
+		t.Fatalf("unmarshal provider request id log: %v", err)
+	}
+	if provider.Type != "llm_provider_request_id" || provider.CallID != input.CallID || provider.ProviderID != "req-adk-456" {
+		t.Fatalf("provider request id was not persisted from pending call: input=%#v provider=%#v", input, provider)
+	}
+}
+
+func TestLogModelProviderRequestIDWithoutIDConsumesPendingModelInputRecord(t *testing.T) {
+	oldPath := modelInputLogPath
+	oldSeq := modelInputLogSeq.Load()
+	oldEnabled := modelInputLogEnabled.Load()
+	oldPending := modelInputLogPending
+	modelInputLogPath = filepath.Join(t.TempDir(), "llm-inputs.jsonl")
+	modelInputLogSeq.Store(0)
+	modelInputLogEnabled.Store(true)
+	modelInputLogPending = map[modelInputLogPendingKey][]string{}
+	t.Cleanup(func() {
+		modelInputLogWG.Wait()
+		modelInputLogPath = oldPath
+		modelInputLogSeq.Store(oldSeq)
+		modelInputLogEnabled.Store(oldEnabled)
+		modelInputLogPending = oldPending
+	})
+
+	logFullModelInput(modelInputLogOptions{
+		AgentKind: "main_agent",
+		Source:    "adk",
+		Mode:      "stream",
+		Config: openai.ChatModelConfig{
+			Model: "test-model",
+		},
+		Messages: []*schema.Message{
+			schema.UserMessage("first"),
+		},
+	})
+	logFullModelInput(modelInputLogOptions{
+		AgentKind: "main_agent",
+		Source:    "adk",
+		Mode:      "stream",
+		Config: openai.ChatModelConfig{
+			Model: "test-model",
+		},
+		Messages: []*schema.Message{
+			schema.UserMessage("second"),
+		},
+	})
+
+	logModelProviderRequestID("main_agent", "adk", "response", "", "run-1", 1, schema.AssistantMessage("first response", nil))
+	msg := schema.AssistantMessage("second response", nil)
+	msg.Extra = map[string]any{"openai-request-id": "req-second"}
+	logModelProviderRequestID("main_agent", "adk", "response", "", "run-1", 2, msg)
+	modelInputLogWG.Wait()
+
+	payload, err := os.ReadFile(modelInputLogPath)
+	if err != nil {
+		t.Fatalf("read model input log: %v", err)
+	}
+	lines := bytes.Split(bytes.TrimSpace(payload), []byte{'\n'})
+	if len(lines) != 3 {
+		t.Fatalf("line count = %d, want 3\n%s", len(lines), string(payload))
+	}
+	var first modelInputLogRecord
+	if err := json.Unmarshal(lines[0], &first); err != nil {
+		t.Fatalf("unmarshal first model input log: %v", err)
+	}
+	var second modelInputLogRecord
+	if err := json.Unmarshal(lines[1], &second); err != nil {
+		t.Fatalf("unmarshal second model input log: %v", err)
+	}
+	var provider modelInputLogProviderRequestIDRecord
+	if err := json.Unmarshal(lines[2], &provider); err != nil {
+		t.Fatalf("unmarshal provider request id log: %v", err)
+	}
+	if provider.CallID != second.CallID || provider.ProviderID != "req-second" {
+		t.Fatalf("provider request id event = %#v, want second call id %q", provider, second.CallID)
+	}
+}
+
 func TestLogFullModelInputSkipsWhenDisabled(t *testing.T) {
 	oldPath := modelInputLogPath
 	oldSeq := modelInputLogSeq.Load()
 	oldEnabled := modelInputLogEnabled.Load()
+	oldPending := modelInputLogPending
 	modelInputLogPath = filepath.Join(t.TempDir(), "llm-inputs.jsonl")
 	modelInputLogSeq.Store(0)
 	modelInputLogEnabled.Store(false)
+	modelInputLogPending = map[modelInputLogPendingKey][]string{}
 	t.Cleanup(func() {
+		modelInputLogWG.Wait()
 		modelInputLogPath = oldPath
 		modelInputLogSeq.Store(oldSeq)
 		modelInputLogEnabled.Store(oldEnabled)
+		modelInputLogPending = oldPending
 	})
 
 	logFullModelInput(modelInputLogOptions{

@@ -3,20 +3,29 @@ import { toast } from 'sonner'
 import type { ReactNode } from 'react'
 import { ChevronDown, ChevronUp, Download, ExternalLink, Loader2, PanelLeft, Plus, RefreshCw, Save, Settings as SettingsIcon, Trash2, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
-import type { LayeredSettings, ModelProfileSettings, Settings, SettingsLayer, UpdateCheckResult, UpdateInstallProgress, UpdateInstallResult } from './types'
-import { checkForUpdate, fetchSettings, installUpdateStream, updateUserSettings, updateWorkspaceSettings } from './api'
+import type { ImageAPIProfileSettings, LayeredSettings, ModelProfileSettings, Settings, SettingsLayer, UpdateApplyResult, UpdateCheckResult, UpdateInstallProgress, UpdateInstallResult } from './types'
+import { applyUpdate, checkForUpdate, fetchSettings, installUpdateStream, updateUserSettings, updateWorkspaceSettings } from './api'
 import { FONT_OPTIONS, fontLabelKeyFor } from './font-options'
-import { settingsForLayer, useAutoSaveSettings } from './use-auto-save-settings'
+import { settingsForLayer, settingsRevisionForLayer, useAutoSaveSettings } from './use-auto-save-settings'
 import { getInteractiveTellers } from '@/features/interactive/api'
 import type { Teller } from '@/features/interactive/types'
 import { InlineErrorNotice } from '@/components/common/inline-error-notice'
 import { AdaptiveSurface } from '@/components/layout/adaptive-surface'
+import { Badge } from '@/components/ui/badge'
+import { Button } from '@/components/ui/button'
+import { Input } from '@/components/ui/input'
+import { Separator } from '@/components/ui/separator'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { LOCALE_OPTIONS } from '@/i18n'
 import { APP_VERSION } from '@/app-version'
 import { markAutoUpdateChecked, notifyUpdateCheckResult, shouldRunAutoUpdateCheck } from './update-check-cache'
-import { modelProfileID } from './model-profiles'
+import { DEFAULT_MODEL_PROFILE_ID, modelProfileID, modelProfileLabel, modelProfilesWithDefault } from './model-profiles'
+import { DEFAULT_IMAGE_API_BASE_URL, DEFAULT_IMAGE_API_MODEL, DEFAULT_IMAGE_API_PROFILE_ID, DEFAULT_IMAGE_API_PROVIDER, imageAPIProfileID, imageAPIProfileLabel, imageAPIProfilesWithDefault } from './image-profiles'
+import { ONBOARDING_OPEN_EVENT, SETTINGS_SECTION_EVENT, type SettingsSectionRequest } from '@/features/onboarding/events'
 
-type SettingsSectionId = 'model' | 'paths' | 'access' | 'appearance' | 'updates' | 'agent' | 'ide-editor' | 'versions' | 'interactive'
+type SettingsSectionId = 'model' | 'image' | 'paths' | 'access' | 'appearance' | 'updates' | 'agent' | 'debug' | 'ide-editor' | 'ide-output' | 'versions' | 'interactive'
+
+const SETTINGS_SECTION_IDS: SettingsSectionId[] = ['model', 'image', 'paths', 'access', 'appearance', 'updates', 'agent', 'debug', 'ide-editor', 'ide-output', 'versions', 'interactive']
 
 type SettingsSection = {
   id: SettingsSectionId
@@ -32,6 +41,12 @@ const DEFAULT_CONTEXT_WINDOW_TOKENS = 400000
 const MIN_CONTEXT_WINDOW_TOKENS = 1024
 const MAX_CONTEXT_WINDOW_TOKENS = 2000000
 const CONTEXT_WINDOW_PRESETS = [200000, DEFAULT_CONTEXT_WINDOW_TOKENS, 1000000]
+const CONTEXT_WINDOW_INHERIT_VALUE = 'inherit'
+const IMAGE_API_INHERIT_VALUE = '__inherit__'
+const IMAGE_API_PROVIDER_DEFAULT_VALUE = '__provider_default__'
+const IMAGE_API_QUALITY_OPTIONS = ['auto', 'high', 'medium', 'low', 'standard', 'hd']
+const IMAGE_API_FORMAT_OPTIONS = ['png', 'jpeg']
+let nextSettingsEventSourceID = 1
 
 export function SettingsView({ onClose }: { onClose?: () => void }) {
   const { t } = useTranslation()
@@ -43,19 +58,29 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
   const [availableTellers, setAvailableTellers] = useState<Teller[]>([])
   const [updateStatus, setUpdateStatus] = useState<UpdateCheckResult | null>(null)
   const [updateInstallResult, setUpdateInstallResult] = useState<UpdateInstallResult | null>(null)
+  const [updateApplyResult, setUpdateApplyResult] = useState<UpdateApplyResult | null>(null)
   const [updateInstallProgress, setUpdateInstallProgress] = useState<UpdateInstallProgress | null>(null)
+  const [settingsEventSource] = useState(() => {
+    const source = `settings-view-${nextSettingsEventSourceID}`
+    nextSettingsEventSourceID += 1
+    return source
+  })
   const [checkingUpdate, setCheckingUpdate] = useState(false)
   const [installingUpdate, setInstallingUpdate] = useState(false)
+  const [applyingUpdate, setApplyingUpdate] = useState(false)
   const [updateError, setUpdateError] = useState<string | null>(null)
   const [activeSection, setActiveSection] = useState<SettingsSectionId>('appearance')
   const [expandedSections, setExpandedSections] = useState<Record<SettingsSectionId, boolean>>({
     model: true,
+    image: true,
     paths: true,
     access: true,
     appearance: true,
     updates: true,
     agent: true,
+    debug: true,
     'ide-editor': true,
+    'ide-output': true,
     versions: true,
     interactive: true,
   })
@@ -75,6 +100,16 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
   useEffect(() => { void load() }, [load])
 
   useEffect(() => {
+    const onSettingsUpdated = (event: Event) => {
+      const source = (event as CustomEvent<{ source?: string }>).detail?.source
+      if (source === settingsEventSource) return
+      void load()
+    }
+    window.addEventListener('nova:settings-updated', onSettingsUpdated)
+    return () => window.removeEventListener('nova:settings-updated', onSettingsUpdated)
+  }, [load, settingsEventSource])
+
+  useEffect(() => {
     if (activeLayer !== 'workspace') return
     getInteractiveTellers()
       .then((items) => setAvailableTellers(items))
@@ -87,11 +122,13 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
   }, [activeLayer])
 
   const effective = layered?.effective ?? {}
+  const showDebugSettings = layered?.runtime?.dev_mode === true
 
   const runUpdateCheck = useCallback(async (source: 'auto' | 'manual' = 'manual') => {
     setCheckingUpdate(true)
     setUpdateError(null)
     setUpdateInstallResult(null)
+    setUpdateApplyResult(null)
     setUpdateInstallProgress(null)
     try {
       const result = await checkForUpdate()
@@ -114,6 +151,7 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
   const runUpdateInstall = useCallback(async () => {
     setInstallingUpdate(true)
     setUpdateError(null)
+    setUpdateApplyResult(null)
     setUpdateInstallProgress(null)
     try {
       const stream = await installUpdateStream()
@@ -127,7 +165,7 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
         } else if (value.event === 'update_result') {
           const result = data as unknown as UpdateInstallResult
           setUpdateInstallResult(result)
-          setUpdateInstallProgress((prev) => prev ? { ...prev, phase: 'installed', percent: 100 } : { phase: 'installed', percent: 100 })
+          setUpdateInstallProgress((prev) => prev ? { ...prev, phase: 'staged', percent: 100 } : { phase: 'staged', percent: 100 })
         } else if (value.event === 'error') {
           throw new Error(readStreamError(data, t))
         }
@@ -139,24 +177,37 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
     }
   }, [t])
 
-  const saveDraft = useCallback(async (settings: Settings) => {
+  const runUpdateApply = useCallback(async () => {
+    setApplyingUpdate(true)
+    setUpdateError(null)
+    try {
+      const result = await applyUpdate()
+      setUpdateApplyResult(result)
+    } catch (e) {
+      setUpdateError((e as Error).message)
+    } finally {
+      setApplyingUpdate(false)
+    }
+  }, [])
+
+  const saveDraft = useCallback(async (settings: Settings, baseRevision?: string) => {
     const updater = activeLayer === 'user' ? updateUserSettings : updateWorkspaceSettings
-    return updater(settings)
+    return baseRevision ? updater(settings, baseRevision) : updater(settings)
   }, [activeLayer])
 
   const applySavedSettings = useCallback((next: LayeredSettings) => {
     setLayered(next)
     // 通知应用层重新读取分层配置（如 max_open_tabs 等需要立即生效的设置）
     if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('nova:settings-updated'))
+      window.dispatchEvent(new CustomEvent('nova:settings-updated', { detail: { source: settingsEventSource } }))
     }
-  }, [])
+  }, [settingsEventSource])
 
   const onSave = async () => {
     setSaving(true)
     setError(null)
     try {
-      const next = await saveDraft(draft)
+      const next = await saveDraft(draft, settingsRevisionForLayer(layered, activeLayer))
       applySavedSettings(next)
       toast.success(t('common.saved'))
     } catch (e) {
@@ -170,12 +221,30 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
     setDraft((d) => ({ ...d, [k]: v }))
 
   const setModelProfiles = (profiles: ModelProfileSettings[]) => {
-    setField('model_profiles', profiles)
+    setDraft((d) => ({
+      ...d,
+      openai_api_key: '',
+      openai_base_url: '',
+      openai_model: '',
+      openai_context_window_tokens: null,
+      model_profiles: profiles,
+    }))
+  }
+
+  const setImageAPIProfiles = (profiles: ImageAPIProfileSettings[]) => {
+    setDraft((d) => ({
+      ...d,
+      image_api_key: '',
+      image_api_base_url: '',
+      image_api_model: '',
+      image_api_profiles: profiles,
+    }))
   }
 
   useAutoSaveSettings({
     draft,
     saved: layered ? settingsForLayer(layered, activeLayer) : {},
+    baseRevision: settingsRevisionForLayer(layered, activeLayer),
     ready: Boolean(layered),
     save: saveDraft,
     onSavingChange: setSaving,
@@ -223,6 +292,21 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
                min={14}
                max={28}
                onChange={(v) => setField('reading_font_size', v)} />
+          <div data-onboarding-anchor="settings-onboarding" className="flex items-center justify-between gap-3 rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2">
+            <div className="min-w-0">
+              <div className="text-xs font-medium text-[var(--nova-text)]">{t('settings.onboarding.title')}</div>
+              <div className="mt-0.5 text-[11px] leading-4 text-[var(--nova-text-faint)]">{t('settings.onboarding.description')}</div>
+            </div>
+            <Button
+              type="button"
+              size="xs"
+              variant="ghost"
+              className="shrink-0 text-[var(--nova-text-muted)]"
+              onClick={() => window.dispatchEvent(new CustomEvent(ONBOARDING_OPEN_EVENT))}
+            >
+              {t('settings.onboarding.reopen')}
+            </Button>
+          </div>
         </>
       ),
     },
@@ -239,16 +323,19 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
           ) : (
             <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-xs leading-5 text-[var(--nova-text-faint)]">{t('settings.updates.userOnly')}</div>
           )}
-          <UpdatePanel
-            status={updateStatus}
-            installResult={updateInstallResult}
-            installProgress={updateInstallProgress}
-            checking={checkingUpdate}
-            installing={installingUpdate}
-            error={updateError}
-            onCheck={() => void runUpdateCheck()}
-            onInstall={() => void runUpdateInstall()}
-          />
+	          <UpdatePanel
+	            status={updateStatus}
+	            installResult={updateInstallResult}
+	            applyResult={updateApplyResult}
+	            installProgress={updateInstallProgress}
+	            checking={checkingUpdate}
+	            installing={installingUpdate}
+	            applying={applyingUpdate}
+	            error={updateError}
+	            onCheck={() => void runUpdateCheck()}
+	            onInstall={() => void runUpdateInstall()}
+	            onApply={() => void runUpdateApply()}
+	          />
         </>
       ),
     },
@@ -258,23 +345,27 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
       title: t('settings.section.model'),
       children: (
         <>
-          <Text label="API Key" value={draft.openai_api_key} placeholder={placeholderFor('openai_api_key')}
-                onChange={(v) => setField('openai_api_key', v)} type="password" />
-          <Text label="Base URL" value={draft.openai_base_url} placeholder={placeholderFor('openai_base_url')}
-                onChange={(v) => setField('openai_base_url', v)} />
-          <Text label={t('common.model')} value={draft.openai_model} placeholder={placeholderFor('openai_model')}
-                onChange={(v) => setField('openai_model', v)} />
-          <ContextWindowField
-            label={t('settings.model.contextWindow')}
-            value={draft.openai_context_window_tokens ?? null}
-            effective={effective.openai_context_window_tokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS}
-            allowInherit
-            onChange={(v) => setField('openai_context_window_tokens', v)}
-          />
           <ModelProfilesEditor
-            profiles={draft.model_profiles ?? []}
-            effectiveProfiles={effective.model_profiles ?? []}
+            profiles={modelProfilesForEditor(draft, effective)}
+            effectiveProfiles={modelProfilesWithDefault(effective)}
             onChange={setModelProfiles}
+          />
+        </>
+      ),
+    },
+    {
+      id: 'image',
+      group: t('settings.group.common'),
+      title: t('settings.section.imageApi'),
+      children: (
+        <>
+          <ImageAPIProfilesEditor
+            profiles={imageAPIProfilesForEditor(draft, effective)}
+            effectiveProfiles={imageAPIProfilesWithDefault(effective)}
+            defaultProfileID={draft.default_image_api_profile_id ?? ''}
+            effectiveDefaultProfileID={effective.default_image_api_profile_id || DEFAULT_IMAGE_API_PROFILE_ID}
+            onDefaultProfileChange={(v) => setField('default_image_api_profile_id', v)}
+            onChange={setImageAPIProfiles}
           />
         </>
       ),
@@ -287,21 +378,7 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
         <>
           <Text label={t('settings.paths.skillsDir')} value={draft.skills_dir} placeholder={placeholderFor('skills_dir')}
                 onChange={(v) => setField('skills_dir', v)} />
-          {activeLayer === 'user' && (
-            <>
-              <Num label={t('settings.paths.backendPort')} value={draft.backend_port ?? null}
-                   placeholder={placeholderFor('backend_port')}
-                   min={1}
-                   max={65535}
-                   onChange={(v) => setField('backend_port', v)} />
-              <Num label={t('settings.paths.frontendPort')} value={draft.frontend_port ?? null}
-                   placeholder={placeholderFor('frontend_port')}
-                   min={1}
-                   max={65535}
-                   onChange={(v) => setField('frontend_port', v)} />
-            </>
-          )}
-          <ReadOnly label={t('settings.paths.novaDir')} value={layered?.paths?.nova_dir} />
+          <ReadOnly label={t('settings.paths.novaDir')} value={layered?.paths?.denova_dir || layered?.paths?.nova_dir} />
           <ReadOnly label={t('settings.paths.userConfig')} value={layered?.paths?.user_config} />
           <ReadOnly label={t('settings.paths.workspaceConfig')} value={layered?.paths?.workspace_config} />
         </>
@@ -325,8 +402,6 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
                   : t('settings.access.passwordPlaceholder')}
                 onChange={(v) => setField('remote_access_password', v)}
                 type="password" />
-          <ReadOnly label={t('settings.access.localUrl')} value={layered?.access?.local_url} />
-          <ReadOnly label={t('settings.access.lanUrl')} value={layered?.access?.lan_url} />
           <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-xs leading-5 text-[var(--nova-text-faint)]">
             {t('settings.access.restartHint')}
           </div>
@@ -349,9 +424,12 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
                onChange={(v) => setField('model_max_retries', v)} />
           <Num label={t('settings.agent.idleTimeoutSeconds')} value={draft.agent_idle_timeout_seconds ?? null}
                placeholder={placeholderFor('agent_idle_timeout_seconds')}
-               min={1}
-               max={3600}
+               min={0}
                onChange={(v) => setField('agent_idle_timeout_seconds', v)} />
+          <Num label={t('settings.agent.toolResultLimitKB')} value={draft.agent_tool_result_limit_kb ?? null}
+               placeholder={placeholderFor('agent_tool_result_limit_kb')}
+               min={0}
+               onChange={(v) => setField('agent_tool_result_limit_kb', v)} />
           <BoolTri label={t('settings.agent.planModeDefault')} value={draft.plan_mode_default ?? null}
                    effective={effective.plan_mode_default}
                    onChange={(v) => setField('plan_mode_default', v)} />
@@ -361,6 +439,23 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
         </>
       ),
     },
+    ...(showDebugSettings ? [{
+      id: 'debug' as const,
+      group: t('settings.group.common'),
+      title: t('settings.section.debug'),
+      children: activeLayer === 'user' ? (
+        <>
+          <BoolTri label={t('settings.debug.llmInputLog')} value={draft.llm_input_log_enabled ?? null}
+                   effective={effective.llm_input_log_enabled}
+                   onChange={(v) => setField('llm_input_log_enabled', v)} />
+          <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-xs leading-5 text-[var(--nova-text-faint)]">
+            {t('settings.debug.llmInputLogHelp')}
+          </div>
+        </>
+      ) : (
+        <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-xs leading-5 text-[var(--nova-text-faint)]">{t('settings.debug.userOnly')}</div>
+      ),
+    }] : []),
     {
       id: 'ide-editor',
       group: t('settings.group.ide'),
@@ -382,9 +477,6 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
           <Num label={t('settings.ide.maxOpenTabs')} value={draft.max_open_tabs ?? null}
                placeholder={placeholderFor('max_open_tabs')}
                onChange={(v) => setField('max_open_tabs', v)} />
-          <BoolTri label={t('settings.ide.draftFlow')} value={draft.draft_flow_enabled ?? null}
-                   effective={effective.draft_flow_enabled}
-                   onChange={(v) => setField('draft_flow_enabled', v)} />
           <Num label={t('settings.ide.chapterGroupMin')} value={draft.chapter_group_min ?? null}
                placeholder={placeholderFor('chapter_group_min')}
                onChange={(v) => setField('chapter_group_min', v)} />
@@ -400,6 +492,21 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
               onChange={(v) => setField('ide_story_teller_id', v)}
             />
           )}
+        </>
+      ),
+    },
+    {
+      id: 'ide-output',
+      group: t('settings.group.ide'),
+      title: t('settings.section.liveOutput'),
+      children: (
+        <>
+          <BoolTri label={t('settings.ide.hideNovelChapterBodyInLiveOutput')} value={draft.hide_novel_chapter_body_in_live_output ?? null}
+                   effective={effective.hide_novel_chapter_body_in_live_output}
+                   onChange={(v) => setField('hide_novel_chapter_body_in_live_output', v)} />
+          <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-xs leading-5 text-[var(--nova-text-faint)]">
+            {t('settings.ide.hideNovelChapterBodyInLiveOutputHelp')}
+          </div>
         </>
       ),
     },
@@ -454,17 +561,31 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
     },
   ]
 
-  const jumpToSection = (id: SettingsSectionId) => {
+  const jumpToSection = useCallback((id: SettingsSectionId) => {
     setActiveSection(id)
     setExpandedSections((prev) => ({ ...prev, [id]: true }))
     requestAnimationFrame(() => {
       sectionRefs.current[id]?.scrollIntoView({ block: 'start', behavior: 'smooth' })
     })
-  }
+  }, [])
 
   const toggleSection = (id: SettingsSectionId) => {
     setExpandedSections((prev) => ({ ...prev, [id]: !prev[id] }))
   }
+
+  useEffect(() => {
+    const openSection = (event: Event) => {
+      const detail = (event as CustomEvent<SettingsSectionRequest>).detail
+      if (detail?.layer === 'user' || detail?.layer === 'workspace') setActiveLayer(detail.layer)
+      const section = detail?.section
+      if (!isSettingsSectionId(section)) return
+      requestAnimationFrame(() => {
+        jumpToSection(section)
+      })
+    }
+    window.addEventListener(SETTINGS_SECTION_EVENT, openSection)
+    return () => window.removeEventListener(SETTINGS_SECTION_EVENT, openSection)
+  }, [jumpToSection])
 
   const onContentScroll = () => {
     const container = contentRef.current
@@ -498,16 +619,11 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
                 key={section.id}
                 type="button"
                 onClick={() => jumpToSection(section.id)}
-                className={`nova-nav-item flex w-full items-center justify-between rounded-[var(--nova-radius)] px-2.5 py-1.5 text-left ${
+                className={`nova-nav-item flex w-full items-center rounded-[var(--nova-radius)] px-2.5 py-1.5 text-left ${
                   activeSection === section.id ? 'is-active' : ''
                 }`}
               >
                 <span className="truncate">{section.title}</span>
-                {expandedSections[section.id] ? (
-                  <ChevronUp className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-faint)]" />
-                ) : (
-                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-faint)]" />
-                )}
               </button>
             ))}
           </div>
@@ -583,6 +699,7 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
               {sections.map((section) => (
                 <Section
                   key={section.id}
+                  id={section.id}
                   ref={(node) => {
                     sectionRefs.current[section.id] = node
                   }}
@@ -602,8 +719,57 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
   )
 }
 
+export function modelProfilesForEditor(draft: Settings, effective: Settings): ModelProfileSettings[] {
+  const localProfiles = draft.model_profiles ?? []
+  const hasLocalDefault = localProfiles.some((profile) => modelProfileID(profile) === DEFAULT_MODEL_PROFILE_ID)
+  const hasLegacyDefault = Boolean(draft.openai_api_key || draft.openai_base_url || draft.openai_model || draft.openai_context_window_tokens)
+  if (hasLocalDefault || hasLegacyDefault) {
+    return preserveDraftOnlyModelProfiles(modelProfilesWithDefault(draft), localProfiles)
+  }
+  const inherited = modelProfilesWithDefault(effective)
+  const localIDs = new Set(localProfiles.map(modelProfileID).filter(Boolean))
+  return [
+    ...inherited.filter((profile) => !localIDs.has(modelProfileID(profile))).map(stripInheritedModelSecret),
+    ...localProfiles,
+  ]
+}
+
+function isSettingsSectionId(value: unknown): value is SettingsSectionId {
+  return typeof value === 'string' && SETTINGS_SECTION_IDS.includes(value as SettingsSectionId)
+}
+
+function preserveDraftOnlyModelProfiles(profiles: ModelProfileSettings[], draftProfiles: ModelProfileSettings[]): ModelProfileSettings[] {
+  const draftOnlyProfiles = draftProfiles.filter((profile) => !modelProfileID(profile))
+  if (draftOnlyProfiles.length === 0) return profiles
+  return [...profiles, ...draftOnlyProfiles]
+}
+
+function stripInheritedModelSecret(profile: ModelProfileSettings): ModelProfileSettings {
+  return { ...profile, openai_api_key: '' }
+}
+
+function imageAPIProfilesForEditor(draft: Settings, effective: Settings): ImageAPIProfileSettings[] {
+  const localProfiles = draft.image_api_profiles ?? []
+  const hasLocalDefault = localProfiles.some((profile) => imageAPIProfileID(profile) === DEFAULT_IMAGE_API_PROFILE_ID)
+  const hasLegacyDefault = Boolean(draft.image_api_key || draft.image_api_base_url || draft.image_api_model)
+  if (hasLocalDefault || hasLegacyDefault) {
+    return imageAPIProfilesWithDefault(draft)
+  }
+  const inherited = imageAPIProfilesWithDefault(effective)
+  const localIDs = new Set(localProfiles.map(imageAPIProfileID).filter(Boolean))
+  return [
+    ...inherited.filter((profile) => !localIDs.has(imageAPIProfileID(profile))).map(stripInheritedImageAPISecret),
+    ...localProfiles,
+  ]
+}
+
+function stripInheritedImageAPISecret(profile: ImageAPIProfileSettings): ImageAPIProfileSettings {
+  return { ...profile, openai_api_key: '' }
+}
+
 function Section({
   ref,
+  id,
   group,
   title,
   expanded,
@@ -611,6 +777,7 @@ function Section({
   children,
 }: {
   ref?: (node: HTMLElement | null) => void
+  id: SettingsSectionId
   group: string
   title: string
   expanded: boolean
@@ -618,7 +785,7 @@ function Section({
   children: ReactNode
 }) {
   return (
-    <section ref={ref} className="scroll-mt-4 border-b border-[var(--nova-border)] py-4 first:pt-0 last:border-b-0">
+    <section ref={ref} data-onboarding-anchor={id === 'model' ? 'settings-model' : undefined} className="scroll-mt-4 border-b border-[var(--nova-border)] py-4 first:pt-0 last:border-b-0">
       <button
         type="button"
         onClick={onToggle}
@@ -642,28 +809,37 @@ function Section({
   )
 }
 
-function UpdatePanel({
+export function UpdatePanel({
   status,
   installResult,
+  applyResult,
   installProgress,
   checking,
   installing,
+  applying,
   error,
   onCheck,
   onInstall,
+  onApply,
 }: {
   status: UpdateCheckResult | null
   installResult: UpdateInstallResult | null
+  applyResult: UpdateApplyResult | null
   installProgress: UpdateInstallProgress | null
   checking: boolean
   installing: boolean
+  applying: boolean
   error: string | null
   onCheck: () => void
   onInstall: () => void
+  onApply: () => void
 }) {
   const { t } = useTranslation()
   const releaseDate = status?.published_at ? new Date(status.published_at).toLocaleString() : ''
-  const installDisabled = installing || checking || !status?.can_install
+  const applyReady = Boolean(installResult?.apply_ready)
+  const restarting = Boolean(applyResult)
+  const installDisabled = installing || checking || applying || restarting || !status?.can_install || applyReady
+  const applyDisabled = checking || installing || applying || restarting || !applyReady
   const progressPercent = clampPercent(installProgress?.percent ?? 0)
   const progressLabel = installProgress ? updatePhaseLabel(installProgress.phase, t) : ''
   return (
@@ -712,9 +888,14 @@ function UpdatePanel({
               </div>
             </div>
           )}
-          {installResult?.installed && (
+          {installResult?.apply_ready && (
             <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] px-2.5 py-1.5 text-[var(--nova-text-muted)]">
-              {installResult.staged_path ? t('settings.updates.stagedRestart') : t('settings.updates.installedRestart')}
+              {t('settings.updates.stagedRestart')}
+            </div>
+          )}
+          {applyResult && (
+            <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] px-2.5 py-1.5 text-[var(--nova-text-muted)]">
+              {t('settings.updates.applyingRestart')}
             </div>
           )}
           {error && <InlineErrorNotice className="mt-2" message={error} title={t('settings.updates.error')} />}
@@ -734,7 +915,7 @@ function UpdatePanel({
           <button
             type="button"
             onClick={onCheck}
-            disabled={checking || installing}
+            disabled={checking || installing || applying || restarting}
             className="nova-nav-item inline-flex items-center gap-1.5 rounded-[var(--nova-radius)] border border-[var(--nova-border)] px-2.5 py-1 text-[var(--nova-text)] disabled:opacity-50"
           >
             <RefreshCw className={`h-3.5 w-3.5 ${checking ? 'animate-spin' : ''}`} />
@@ -749,6 +930,17 @@ function UpdatePanel({
             {installing ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Download className="h-3.5 w-3.5" />}
             {installing ? t('settings.updates.installing') : t('settings.updates.install')}
           </button>
+          {applyReady && (
+            <button
+              type="button"
+              onClick={onApply}
+              disabled={applyDisabled}
+              className="nova-nav-item inline-flex items-center gap-1.5 rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-active)] px-2.5 py-1 text-[var(--nova-text)] disabled:opacity-50"
+            >
+              {applying ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+              {applying ? t('settings.updates.applying') : t('settings.updates.apply')}
+            </button>
+          )}
         </div>
       </div>
     </div>
@@ -774,6 +966,8 @@ function updatePhaseLabel(phase: string, t: (key: string, args?: Record<string, 
       return t('settings.updates.phase.replacing')
     case 'staging':
       return t('settings.updates.phase.staging')
+    case 'staged':
+      return t('settings.updates.phase.staged')
     case 'installed':
       return t('settings.updates.phase.installed')
     default:
@@ -1073,7 +1267,6 @@ function ModelProfilesEditor({ profiles, effectiveProfiles, onChange }: {
     const shouldSyncID = !previousID || previousID === previousModel
     updateProfile(index, {
       id: shouldSyncID ? openaiModel : profile?.id,
-      name: undefined,
       openai_model: openaiModel,
     })
   }
@@ -1090,81 +1283,325 @@ function ModelProfilesEditor({ profiles, effectiveProfiles, onChange }: {
             {t('settings.model.profileEmpty', { count: effectiveProfiles.length || 1 })}
           </div>
         )}
-        {profiles.map((profile, index) => (
-          <div key={profileKeys[index]} className="grid gap-2 rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] p-2 md:grid-cols-3">
-            <input
-              value={profile.openai_base_url ?? ''}
-              placeholder={t('common.baseUrl')}
-              onChange={(e) => updateProfile(index, { openai_base_url: e.target.value })}
-              className={fieldCls}
-            />
-            <input
-              value={profile.openai_model ?? ''}
-              placeholder={t('settings.model.profileModelPlaceholder')}
-              onChange={(e) => updateProfileModel(index, e.target.value)}
-              className={fieldCls}
-            />
-            <input
-              type="password"
-              value={profile.openai_api_key ?? ''}
-              placeholder={t('settings.model.profileKeyInheritPlaceholder')}
-              onChange={(e) => updateProfile(index, { openai_api_key: e.target.value })}
-              className={fieldCls}
-            />
-            <input
-              type="number"
-              step={0.1}
-              min={0}
-              max={2}
-              value={profile.temperature ?? ''}
-              placeholder={t('settings.model.profileTemperatureDefaultPlaceholder')}
-              onChange={(e) => updateProfile(index, { temperature: e.target.value === '' ? null : Number(e.target.value) })}
-              className={fieldCls}
-            />
-            <div className="flex min-w-0 flex-col gap-1">
-              <span className="text-[11px] leading-none text-[var(--nova-text-faint)]">{t('settings.model.contextWindow')}</span>
-              <ContextWindowInput
-                value={profile.context_window_tokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS}
-                onChange={(value) => updateProfile(index, { context_window_tokens: value })}
-              />
-            </div>
-            <div className="flex justify-end md:col-span-3">
-              <button
+        {profiles.map((profile, index) => {
+          const isDefaultProfile = modelProfileID(profile) === DEFAULT_MODEL_PROFILE_ID
+          return (
+          <div key={profileKeys[index]} className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)]">
+            <div className="flex items-center gap-2 px-2.5 py-2">
+              <Badge variant="outline" className="shrink-0">
+                {isDefaultProfile ? t('settings.model.defaultProfileName') : t('settings.model.profileName', { index: index + 1 })}
+              </Badge>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-xs font-medium text-[var(--nova-text)]">
+                  {modelProfileLabel(profile) || t('settings.model.profileUntitled')}
+                </div>
+                <div className="truncate text-[11px] text-[var(--nova-text-faint)]">
+                  {profile.openai_model?.trim() || t('settings.model.profileModelMissing')}
+                </div>
+              </div>
+              <Button
                 type="button"
+                variant="outline"
+                size="icon-sm"
                 onClick={() => removeProfile(index)}
-                className={`${iconButtonCls} shrink-0 border border-[var(--nova-border)] p-1.5`}
                 aria-label={t('settings.model.deleteProfile')}
                 title={t('settings.model.deleteProfile')}
               >
-                <Trash2 className="h-3.5 w-3.5" />
-              </button>
+                <Trash2 data-icon="inline-start" />
+              </Button>
+            </div>
+            <Separator />
+            <div className="grid gap-2 p-2.5 md:grid-cols-12">
+              <ModelProfileInput label={t('common.baseUrl')} className="md:col-span-5">
+                <Input
+                  value={profile.openai_base_url ?? ''}
+                  placeholder={t('common.baseUrl')}
+                  onChange={(e) => updateProfile(index, { openai_base_url: e.target.value })}
+                />
+              </ModelProfileInput>
+              <ModelProfileInput label={t('settings.model.profileModelLabel')} className="md:col-span-4">
+                <Input
+                  value={profile.openai_model ?? ''}
+                  placeholder={t('settings.model.profileModelPlaceholder')}
+                  onChange={(e) => updateProfileModel(index, e.target.value)}
+                />
+              </ModelProfileInput>
+              <ModelProfileInput label={t('settings.model.profileAliasLabel')} className="md:col-span-3">
+                <Input
+                  value={profile.name ?? ''}
+                  placeholder={t('settings.model.profileAliasPlaceholder')}
+                  onChange={(e) => updateProfile(index, { name: e.target.value })}
+                />
+              </ModelProfileInput>
+              <ModelProfileInput label={t('settings.model.profileKeyLabel')} className="md:col-span-5">
+                <Input
+                  type="password"
+                  value={profile.openai_api_key ?? ''}
+                  placeholder={t('settings.model.profileKeyInheritPlaceholder')}
+                  onChange={(e) => updateProfile(index, { openai_api_key: e.target.value })}
+                />
+              </ModelProfileInput>
+              <ModelProfileInput label={t('settings.model.profileTemperatureLabel')} className="md:col-span-2">
+                <Input
+                  type="number"
+                  step={0.01}
+                  min={0}
+                  max={1}
+                  value={profile.temperature ?? ''}
+                  placeholder="0-1"
+                  onChange={(e) => updateProfile(index, { temperature: e.target.value === '' ? null : Number(e.target.value) })}
+                  className="max-w-24"
+                />
+              </ModelProfileInput>
+              <ModelProfileInput label={t('settings.model.contextWindow')} className="md:col-span-5">
+                <ContextWindowInput
+                  value={profile.context_window_tokens ?? DEFAULT_CONTEXT_WINDOW_TOKENS}
+                  onChange={(value) => updateProfile(index, { context_window_tokens: value })}
+                />
+              </ModelProfileInput>
             </div>
           </div>
-        ))}
-        <button
+          )
+        })}
+        <Button
           type="button"
           onClick={addProfile}
-          className="nova-nav-item inline-flex w-fit items-center gap-1.5 rounded-[var(--nova-radius)] border border-[var(--nova-border)] px-2.5 py-1 text-[var(--nova-text)]"
+          variant="outline"
+          size="sm"
         >
-          <Plus className="h-3.5 w-3.5" />
+          <Plus data-icon="inline-start" />
           {t('settings.model.addProfile')}
-        </button>
+        </Button>
       </div>
     </div>
   )
 }
 
-function ContextWindowField({ label, value, effective, allowInherit, onChange }: {
+function ImageAPIProfilesEditor({ profiles, effectiveProfiles, defaultProfileID, effectiveDefaultProfileID, onDefaultProfileChange, onChange }: {
+  profiles: ImageAPIProfileSettings[]
+  effectiveProfiles: ImageAPIProfileSettings[]
+  defaultProfileID: string
+  effectiveDefaultProfileID: string
+  onDefaultProfileChange: (profileID: string) => void
+  onChange: (profiles: ImageAPIProfileSettings[]) => void
+}) {
+  const { t } = useTranslation()
+  const profileKeysRef = useRef<string[]>([])
+  const profileKeys = useMemo(() => {
+    if (profileKeysRef.current.length > profiles.length) {
+      profileKeysRef.current = profileKeysRef.current.slice(0, profiles.length)
+    }
+    while (profileKeysRef.current.length < profiles.length) {
+      profileKeysRef.current.push(`image-profile-${Date.now()}-${profileKeysRef.current.length}`)
+    }
+    return profileKeysRef.current
+  }, [profiles.length])
+  const profileOptions = imageProfileOptions(profiles, effectiveProfiles)
+  const effectiveDefaultLabel = profileOptions.find((profile) => profile.id === effectiveDefaultProfileID)?.label || effectiveDefaultProfileID || DEFAULT_IMAGE_API_PROFILE_ID
+  const addProfile = () => {
+    onChange([...profiles, {
+      provider: DEFAULT_IMAGE_API_PROVIDER,
+      openai_base_url: DEFAULT_IMAGE_API_BASE_URL,
+      openai_model: DEFAULT_IMAGE_API_MODEL,
+    }])
+  }
+  const updateProfile = (index: number, patch: Partial<ImageAPIProfileSettings>) => {
+    onChange(profiles.map((profile, i) => (i === index ? { ...profile, ...patch } : profile)))
+  }
+  const updateProfileModel = (index: number, openaiModel: string) => {
+    const profile = profiles[index]
+    const previousID = imageAPIProfileID(profile)
+    const previousModel = profile?.openai_model?.trim() ?? ''
+    const shouldSyncID = !previousID || previousID === previousModel
+    updateProfile(index, {
+      id: shouldSyncID ? openaiModel : profile?.id,
+      openai_model: openaiModel,
+    })
+  }
+  const removeProfile = (index: number) => {
+    const removedID = imageAPIProfileID(profiles[index])
+    onChange(profiles.filter((_, i) => i !== index))
+    if (removedID && defaultProfileID === removedID) onDefaultProfileChange('')
+  }
+
+  return (
+    <div className="nova-settings-row rounded-md px-2 py-1.5">
+      <div className="mb-1.5 text-[var(--nova-text-muted)]">{t('settings.imageApi.profiles')}</div>
+      <div className="flex flex-col gap-2">
+        <ModelProfileInput label={t('settings.imageApi.defaultProfile')}>
+          <Select
+            value={defaultProfileID || IMAGE_API_INHERIT_VALUE}
+            onValueChange={(value) => onDefaultProfileChange(value === IMAGE_API_INHERIT_VALUE ? '' : value)}
+          >
+            <SelectTrigger size="sm" className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent className="nova-panel border text-[var(--nova-text)]">
+              <SelectGroup>
+                <SelectItem value={IMAGE_API_INHERIT_VALUE}>{t('common.inherit', { value: effectiveDefaultLabel })}</SelectItem>
+                {profileOptions.map((profile) => (
+                  <SelectItem key={profile.id} value={profile.id}>{profile.label}</SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </ModelProfileInput>
+        {profiles.length === 0 && (
+          <div className="rounded-[var(--nova-radius)] border border-dashed border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-2.5 py-2 text-[var(--nova-text-faint)]">
+            {t('settings.imageApi.profileEmpty', { count: effectiveProfiles.length || 1 })}
+          </div>
+        )}
+        {profiles.map((profile, index) => (
+          <div key={profileKeys[index]} className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)]">
+            <div className="flex items-center gap-2 px-2.5 py-2">
+              <Badge variant="outline" className="shrink-0">
+                {t('settings.imageApi.profileName', { index: index + 1 })}
+              </Badge>
+              <div className="min-w-0 flex-1">
+                <div className="truncate text-xs font-medium text-[var(--nova-text)]">
+                  {imageAPIProfileLabel(profile) || t('settings.imageApi.profileUntitled')}
+                </div>
+                <div className="truncate text-[11px] text-[var(--nova-text-faint)]">
+                  {profile.openai_model?.trim() || t('settings.imageApi.profileModelMissing')}
+                </div>
+              </div>
+              <Button
+                type="button"
+                variant="outline"
+                size="icon-sm"
+                onClick={() => removeProfile(index)}
+                aria-label={t('settings.imageApi.deleteProfile')}
+                title={t('settings.imageApi.deleteProfile')}
+              >
+                <Trash2 data-icon="inline-start" />
+              </Button>
+            </div>
+            <Separator />
+            <div className="grid gap-2 p-2.5 md:grid-cols-12">
+              <ModelProfileInput label={t('settings.imageApi.provider')} className="md:col-span-3">
+                <Select
+                  value={profile.provider || DEFAULT_IMAGE_API_PROVIDER}
+                  onValueChange={(value) => updateProfile(index, { provider: value })}
+                >
+                  <SelectTrigger size="sm" className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent className="nova-panel border text-[var(--nova-text)]">
+                    <SelectGroup>
+                      <SelectItem value={DEFAULT_IMAGE_API_PROVIDER}>OpenAI</SelectItem>
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
+              </ModelProfileInput>
+              <ModelProfileInput label={t('common.baseUrl')} className="md:col-span-5">
+                <Input
+                  value={profile.openai_base_url ?? ''}
+                  placeholder={DEFAULT_IMAGE_API_BASE_URL}
+                  onChange={(e) => updateProfile(index, { openai_base_url: e.target.value })}
+                />
+              </ModelProfileInput>
+              <ModelProfileInput label={t('settings.imageApi.profileModelLabel')} className="md:col-span-4">
+                <Input
+                  value={profile.openai_model ?? ''}
+                  placeholder={DEFAULT_IMAGE_API_MODEL}
+                  onChange={(e) => updateProfileModel(index, e.target.value)}
+                />
+              </ModelProfileInput>
+              <ModelProfileInput label={t('settings.imageApi.profileAliasLabel')} className="md:col-span-3">
+                <Input
+                  value={profile.name ?? ''}
+                  placeholder={t('settings.imageApi.profileAliasPlaceholder')}
+                  onChange={(e) => updateProfile(index, { name: e.target.value })}
+                />
+              </ModelProfileInput>
+              <ModelProfileInput label={t('settings.imageApi.profileKeyLabel')} className="md:col-span-5">
+                <Input
+                  type="password"
+                  value={profile.openai_api_key ?? ''}
+                  placeholder={t('settings.imageApi.profileKeyInheritPlaceholder')}
+                  onChange={(e) => updateProfile(index, { openai_api_key: e.target.value })}
+                />
+              </ModelProfileInput>
+              <ImageOptionSelect
+                label={t('settings.imageApi.defaultQuality')}
+                value={profile.default_quality ?? ''}
+                options={IMAGE_API_QUALITY_OPTIONS}
+                placeholder={t('settings.imageApi.providerDefault')}
+                className="md:col-span-3"
+                onChange={(value) => updateProfile(index, { default_quality: value })}
+              />
+              <ImageOptionSelect
+                label={t('settings.imageApi.defaultOutputFormat')}
+                value={profile.default_output_format ?? ''}
+                options={IMAGE_API_FORMAT_OPTIONS}
+                placeholder={t('settings.imageApi.providerDefault')}
+                className="md:col-span-3"
+                onChange={(value) => updateProfile(index, { default_output_format: value })}
+              />
+            </div>
+          </div>
+        ))}
+        <Button
+          type="button"
+          onClick={addProfile}
+          variant="outline"
+          size="sm"
+        >
+          <Plus data-icon="inline-start" />
+          {t('settings.imageApi.addProfile')}
+        </Button>
+      </div>
+    </div>
+  )
+}
+
+function ImageOptionSelect({ label, value, options, placeholder, className, onChange }: {
   label: string
-  value: number | null
-  effective?: number | null
-  allowInherit?: boolean
-  onChange: (value: number | null) => void
+  value: string
+  options: string[]
+  placeholder: string
+  className?: string
+  onChange: (value: string) => void
 }) {
   return (
-    <FieldRow label={label}>
-      <ContextWindowInput value={value} effective={effective} allowInherit={allowInherit} onChange={onChange} />
-    </FieldRow>
+    <ModelProfileInput label={label} className={className}>
+      <Select value={value || IMAGE_API_PROVIDER_DEFAULT_VALUE} onValueChange={(next) => onChange(next === IMAGE_API_PROVIDER_DEFAULT_VALUE ? '' : next)}>
+        <SelectTrigger size="sm" className="w-full">
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent className="nova-panel border text-[var(--nova-text)]">
+          <SelectGroup>
+            <SelectItem value={IMAGE_API_PROVIDER_DEFAULT_VALUE}>{placeholder}</SelectItem>
+            {options.map((option) => (
+              <SelectItem key={option} value={option}>{option}</SelectItem>
+            ))}
+          </SelectGroup>
+        </SelectContent>
+      </Select>
+    </ModelProfileInput>
+  )
+}
+
+function imageProfileOptions(localProfiles: ImageAPIProfileSettings[], effectiveProfiles: ImageAPIProfileSettings[]) {
+  const options: Array<{ id: string; label: string }> = []
+  const seen = new Set<string>()
+  const add = (profile?: ImageAPIProfileSettings) => {
+    const id = imageAPIProfileID(profile)
+    if (!id || seen.has(id)) return
+    seen.add(id)
+    options.push({ id, label: imageAPIProfileLabel(profile) || id })
+  }
+  effectiveProfiles.forEach(add)
+  localProfiles.forEach(add)
+  return options
+}
+
+function ModelProfileInput({ label, className, children }: { label: string; className?: string; children: ReactNode }) {
+  return (
+    <label className={`flex min-w-0 flex-col gap-1 ${className ?? ''}`}>
+      <span className="text-[11px] leading-none text-[var(--nova-text-faint)]">{label}</span>
+      {children}
+    </label>
   )
 }
 
@@ -1179,42 +1616,51 @@ function ContextWindowInput({ value, effective, allowInherit = false, onChange }
   const selectedValue = value ?? DEFAULT_CONTEXT_WINDOW_TOKENS
   const customEditing = customDraft !== null
   const preset = value === null && allowInherit && !customEditing
-    ? ''
+    ? CONTEXT_WINDOW_INHERIT_VALUE
     : (!customEditing && CONTEXT_WINDOW_PRESETS.includes(selectedValue) ? String(selectedValue) : 'custom')
   const custom = preset === 'custom'
   const inheritedValue = effective ?? DEFAULT_CONTEXT_WINDOW_TOKENS
   const customValue = customDraft ?? (value === null ? '' : String(value))
   return (
     <div className="flex min-w-0 flex-1 flex-col gap-2 sm:flex-row">
-      <select
+      <Select
         value={preset}
-        onChange={(e) => {
-          if (e.target.value === '') {
+        onValueChange={(nextValue) => {
+          if (nextValue === CONTEXT_WINDOW_INHERIT_VALUE) {
             setCustomDraft(null)
             onChange(null)
             return
           }
-          if (e.target.value === 'custom') {
+          if (nextValue === 'custom') {
             setCustomDraft(value === null ? '' : String(value))
             return
           }
           setCustomDraft(null)
-          onChange(Number(e.target.value))
+          onChange(Number(nextValue))
         }}
-        className={fieldCls}
-        aria-label={t('settings.model.contextWindow')}
-        title={t('settings.model.contextWindow')}
       >
-        {allowInherit && (
-          <option value="">{t('common.inherit', { value: formatContextWindow(inheritedValue) })}</option>
-        )}
-        <option value="200000">{t('settings.model.contextWindow200k')}</option>
-        <option value={String(DEFAULT_CONTEXT_WINDOW_TOKENS)}>{t('settings.model.contextWindow400k')}</option>
-        <option value="1000000">{t('settings.model.contextWindow1m')}</option>
-        <option value="custom">{t('settings.model.contextWindowCustom')}</option>
-      </select>
+        <SelectTrigger
+          size="sm"
+          className="min-w-0 flex-1"
+          aria-label={t('settings.model.contextWindow')}
+          title={t('settings.model.contextWindow')}
+        >
+          <SelectValue />
+        </SelectTrigger>
+        <SelectContent className="nova-panel border text-[var(--nova-text)]">
+          <SelectGroup>
+            {allowInherit && (
+              <SelectItem value={CONTEXT_WINDOW_INHERIT_VALUE}>{t('common.inherit', { value: formatContextWindow(inheritedValue) })}</SelectItem>
+            )}
+            <SelectItem value="200000">{t('settings.model.contextWindow200k')}</SelectItem>
+            <SelectItem value={String(DEFAULT_CONTEXT_WINDOW_TOKENS)}>{t('settings.model.contextWindow400k')}</SelectItem>
+            <SelectItem value="1000000">{t('settings.model.contextWindow1m')}</SelectItem>
+            <SelectItem value="custom">{t('settings.model.contextWindowCustom')}</SelectItem>
+          </SelectGroup>
+        </SelectContent>
+      </Select>
       {custom && (
-        <input
+        <Input
           type="number"
           min={MIN_CONTEXT_WINDOW_TOKENS}
           max={MAX_CONTEXT_WINDOW_TOKENS}
@@ -1241,7 +1687,7 @@ function ContextWindowInput({ value, effective, allowInherit = false, onChange }
               onChange(Math.trunc(numeric))
             }
           }}
-          className={`${fieldCls} sm:max-w-40`}
+          className="sm:max-w-40"
         />
       )}
     </div>

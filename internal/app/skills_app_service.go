@@ -20,12 +20,20 @@ func (a *App) SkillDocument(ctx context.Context, scope novaskills.Scope, name st
 	return a.skills().Document(ctx, scope, name)
 }
 
+func (a *App) SkillFileDocument(ctx context.Context, scope novaskills.Scope, name, path string) (novaskills.FileDocument, error) {
+	return a.skills().FileDocument(ctx, scope, name, path)
+}
+
 func (a *App) CreateSkillDocument(ctx context.Context, scope novaskills.Scope, name, description string, agents []string) (novaskills.Document, error) {
 	return a.skills().Create(ctx, scope, name, description, agents)
 }
 
 func (a *App) SaveSkillDocument(ctx context.Context, scope novaskills.Scope, name, content string) (novaskills.Document, error) {
 	return a.skills().Save(ctx, scope, name, content)
+}
+
+func (a *App) SaveSkillFileDocument(ctx context.Context, scope novaskills.Scope, name, path, content string) (novaskills.FileDocument, error) {
+	return a.skills().SaveFile(ctx, scope, name, path, content)
 }
 
 func (a *App) SaveSkillDocumentAs(ctx context.Context, scope novaskills.Scope, name string, targetScope novaskills.Scope, targetName, content string) (novaskills.Document, error) {
@@ -36,12 +44,32 @@ func (a *App) DeleteSkillDocument(ctx context.Context, scope novaskills.Scope, n
 	return a.skills().Delete(ctx, scope, name)
 }
 
+func (a *App) PreviewSkillZip(ctx context.Context, scope novaskills.Scope, data []byte) (novaskills.InstallPreview, error) {
+	return a.skills().PreviewZip(ctx, scope, data)
+}
+
+func (a *App) InstallSkillZip(ctx context.Context, scope novaskills.Scope, data []byte, candidateIDs []string) (novaskills.InstallResult, error) {
+	return a.skills().InstallZip(ctx, scope, data, candidateIDs)
+}
+
+func (a *App) PreviewSkillGitHub(ctx context.Context, scope novaskills.Scope, source novaskills.GitHubSource) (novaskills.InstallPreview, error) {
+	return a.skills().PreviewGitHub(ctx, scope, source)
+}
+
+func (a *App) InstallSkillGitHub(ctx context.Context, scope novaskills.Scope, source novaskills.GitHubSource, candidateIDs []string) (novaskills.InstallResult, error) {
+	return a.skills().InstallGitHub(ctx, scope, source, candidateIDs)
+}
+
 func (s *SkillsAppService) Snapshot(ctx context.Context) (novaskills.Snapshot, error) {
 	return novaskills.SnapshotFor(ctx, s.directories())
 }
 
 func (s *SkillsAppService) Document(ctx context.Context, scope novaskills.Scope, name string) (novaskills.Document, error) {
 	return novaskills.ReadDocument(ctx, s.directories(), scope, name)
+}
+
+func (s *SkillsAppService) FileDocument(ctx context.Context, scope novaskills.Scope, name, path string) (novaskills.FileDocument, error) {
+	return novaskills.ReadSkillFile(ctx, s.directories(), scope, name, path)
 }
 
 func (s *SkillsAppService) Create(ctx context.Context, scope novaskills.Scope, name, description string, agents []string) (novaskills.Document, error) {
@@ -62,6 +90,15 @@ func (s *SkillsAppService) Save(ctx context.Context, scope novaskills.Scope, nam
 	return doc, nil
 }
 
+func (s *SkillsAppService) SaveFile(ctx context.Context, scope novaskills.Scope, name, path, content string) (novaskills.FileDocument, error) {
+	doc, err := novaskills.SaveSkillFile(ctx, s.directories(), scope, name, path, content)
+	if err != nil {
+		return novaskills.FileDocument{}, err
+	}
+	log.Printf("[skills] Skill file saved scope=%s name=%s file=%s", scope, name, path)
+	return doc, nil
+}
+
 func (s *SkillsAppService) SaveAs(ctx context.Context, scope novaskills.Scope, name string, targetScope novaskills.Scope, targetName, content string) (novaskills.Document, error) {
 	doc, err := novaskills.SaveDocumentAs(ctx, s.directories(), scope, name, targetScope, targetName, content)
 	if err != nil {
@@ -77,6 +114,32 @@ func (s *SkillsAppService) Delete(ctx context.Context, scope novaskills.Scope, n
 	}
 	log.Printf("[skills] Skill deleted scope=%s name=%s", scope, name)
 	return nil
+}
+
+func (s *SkillsAppService) PreviewZip(ctx context.Context, scope novaskills.Scope, data []byte) (novaskills.InstallPreview, error) {
+	return novaskills.PreviewZip(ctx, s.directories(), scope, data)
+}
+
+func (s *SkillsAppService) InstallZip(ctx context.Context, scope novaskills.Scope, data []byte, candidateIDs []string) (novaskills.InstallResult, error) {
+	result, err := novaskills.InstallZip(ctx, s.directories(), scope, data, candidateIDs)
+	if err != nil {
+		return novaskills.InstallResult{}, err
+	}
+	log.Printf("[skills] Skills installed from zip scope=%s count=%d", scope, len(result.Installed))
+	return result, nil
+}
+
+func (s *SkillsAppService) PreviewGitHub(ctx context.Context, scope novaskills.Scope, source novaskills.GitHubSource) (novaskills.InstallPreview, error) {
+	return novaskills.PreviewGitHub(ctx, s.directories(), scope, source)
+}
+
+func (s *SkillsAppService) InstallGitHub(ctx context.Context, scope novaskills.Scope, source novaskills.GitHubSource, candidateIDs []string) (novaskills.InstallResult, error) {
+	result, err := novaskills.InstallGitHub(ctx, s.directories(), scope, source, candidateIDs)
+	if err != nil {
+		return novaskills.InstallResult{}, err
+	}
+	log.Printf("[skills] Skills installed from github scope=%s url=%q count=%d", scope, source.URL, len(result.Installed))
+	return result, nil
 }
 
 func (s *SkillsAppService) directories() []novaskills.Directory {

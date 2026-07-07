@@ -37,9 +37,10 @@ type ChatRequest struct {
 	PlanMode       bool               `json:"plan_mode"`
 	WritingSkill   string             `json:"writing_skill"`
 	ImagePresetID  string             `json:"image_preset_id"`
+	TellerID       string             `json:"teller_id"`
 	Locale         string             `json:"-"`
 
-	// StyleRules 由后端按当前导演配置注入（场景 → 风格内容）。
+	// StyleRules 由后端按当前导演配置注入（场景 → 共享文风参考索引）。
 	// StyleScenes 非空时只注入用户本轮通过 # 指定的场景；为空时作为场景化建议参与本轮上下文。
 	StyleRules []StyleRule `json:"-"`
 
@@ -49,6 +50,9 @@ type ChatRequest struct {
 
 // StyleRule 是 prompts.StyleRule 的镜像，避免调用方直接依赖 prompts 包。
 type StyleRule = prompts.StyleRule
+
+// StyleReference 是 prompts.StyleReference 的镜像，避免调用方直接依赖 prompts 包。
+type StyleReference = prompts.StyleReference
 
 // IDEContextRef carries lightweight, model-visible IDE state for one turn.
 // It must describe UI focus only and must not include editor file content.
@@ -187,6 +191,7 @@ func (r *Runtime) Run(
 	}
 	subAgentSessions := newSubAgentSessionTracker(runID)
 	recorder := newDisplayEventRecorder(conversation)
+	toolContextRecorder := newToolResultContextRecorder(conversation)
 	mutations := newMutationTracker()
 	rawEmit := emit
 	emit = func(ev Event) {
@@ -426,6 +431,7 @@ func (r *Runtime) Run(
 			} else if target := parseGeneratedImageToolTarget(mv.Message.ToolName, fullToolContent); target != "" {
 				data["target"] = target
 			}
+			toolContextRecorder.RecordToolResult(mv.Message.ToolName, mv.Message.ToolCallID, content, eventMeta)
 			emit(Event{Type: "tool_result", Data: data})
 			continue
 		}
@@ -435,7 +441,6 @@ func (r *Runtime) Run(
 		}
 		if mv.IsStreaming && mv.MessageStream != nil {
 			msg, streamErr := processStreamingEvent(runCtx, mv, &fullContent, &fullThinking, options.IdleTimeout, options.ToolResultMaxBytes, eventMeta, planParser, emit)
-			usageCollector.AddMessage(msg)
 			if streamErr != nil {
 				flushPlanProtocolParser(planParser, &fullContent, emit)
 				discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
@@ -451,6 +456,8 @@ func (r *Runtime) Run(
 				finishRun("error", streamErr.Error(), len(generated))
 				return
 			}
+			toolContextRecorder.RecordAssistantToolCalls(msg, eventMeta)
+			usageCollector.AddMessage(msg)
 			if req.PlanMode && planParser != nil && planParser.HasSuccessfulBlock() {
 				cancelRun()
 				break
@@ -459,6 +466,7 @@ func (r *Runtime) Run(
 		}
 		if mv.Message != nil {
 			processNonStreamingEvent(mv, &fullContent, &fullThinking, options.ToolResultMaxBytes, eventMeta, planParser, emit)
+			toolContextRecorder.RecordAssistantToolCalls(mv.Message, eventMeta)
 			usageCollector.AddMessage(mv.Message)
 			if req.PlanMode && planParser != nil && planParser.HasSuccessfulBlock() {
 				cancelRun()

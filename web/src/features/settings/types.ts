@@ -85,7 +85,7 @@ export interface AgentModelSettings {
   interactive_story?: AgentModelOverride
   image?: AgentModelOverride
   config_manager?: AgentModelOverride
-  interactive_state?: AgentModelOverride
+  interactive_director?: AgentModelOverride
   interactive_hot_choices?: AgentModelOverride
   version_summary?: AgentModelOverride
   tool_agent?: AgentModelOverride
@@ -106,7 +106,7 @@ export interface AgentToolSettings {
   interactive_story?: AgentToolOverride
   image?: AgentToolOverride
   config_manager?: AgentToolOverride
-  interactive_state?: AgentToolOverride
+  interactive_director?: AgentToolOverride
   interactive_hot_choices?: AgentToolOverride
   version_summary?: AgentToolOverride
   tool_agent?: AgentToolOverride
@@ -120,7 +120,7 @@ export interface AgentSkillSettings {
   interactive_story?: AgentSkillOverride
   image?: AgentSkillOverride
   config_manager?: AgentSkillOverride
-  interactive_state?: AgentSkillOverride
+  interactive_director?: AgentSkillOverride
   interactive_hot_choices?: AgentSkillOverride
   version_summary?: AgentSkillOverride
   tool_agent?: AgentSkillOverride
@@ -136,7 +136,7 @@ export interface AgentContextSettings {
   interactive_story?: AgentContextOverride
   image?: AgentContextOverride
   config_manager?: AgentContextOverride
-  interactive_state?: AgentContextOverride
+  interactive_director?: AgentContextOverride
   interactive_hot_choices?: AgentContextOverride
   version_summary?: AgentContextOverride
   tool_agent?: AgentContextOverride
@@ -146,10 +146,15 @@ export interface AgentContextSettings {
 
 export interface AgentContextOverride {
   compaction_enabled?: boolean | null
+  compaction_strategy?: string | null
   compaction_threshold?: number | null
   compaction_recent_turns?: number | null
   compaction_target_min_ratio?: number | null
   compaction_target_max_ratio?: number | null
+  tool_result_retention_enabled?: boolean | null
+  tool_result_keep_recent?: number | null
+  tool_result_context_budget_kb?: number | null
+  tool_result_preview_chars?: number | null
 }
 
 export interface AgentGeneralSubAgentSettings {
@@ -191,7 +196,7 @@ export interface AgentPromptSettings {
   interactive_story?: AgentPromptOverride
   image?: AgentPromptOverride
   config_manager?: AgentPromptOverride
-  interactive_state?: AgentPromptOverride
+  interactive_director?: AgentPromptOverride
   interactive_hot_choices?: AgentPromptOverride
   version_summary?: AgentPromptOverride
   tool_agent?: AgentPromptOverride
@@ -223,7 +228,7 @@ export interface AgentPromptSourceSettings {
   interactive_story?: AgentPromptSourceList
   image?: AgentPromptSourceList
   config_manager?: AgentPromptSourceList
-  interactive_state?: AgentPromptSourceList
+  interactive_director?: AgentPromptSourceList
   interactive_hot_choices?: AgentPromptSourceList
   version_summary?: AgentPromptSourceList
   tool_agent?: AgentPromptSourceList
@@ -243,7 +248,7 @@ export interface AgentPromptBlockSettings {
   interactive_story?: AgentPromptBlocks
   image?: AgentPromptBlocks
   config_manager?: AgentPromptBlocks
-  interactive_state?: AgentPromptBlocks
+  interactive_director?: AgentPromptBlocks
   interactive_hot_choices?: AgentPromptBlocks
   version_summary?: AgentPromptBlocks
   tool_agent?: AgentPromptBlocks

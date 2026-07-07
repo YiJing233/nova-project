@@ -6,28 +6,105 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"path/filepath"
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
 	"github.com/cloudwego/eino/schema"
+
+	"denova/config"
 )
 
 // toolOrchestratorMiddleware centralizes Nova's internal tool execution policy.
 type toolOrchestratorMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
-	agentKind          string
-	policyKind         string
-	toolResultMaxBytes int
+	agentKind           string
+	policyKind          string
+	toolSettings        config.ResolvedAgentToolSettings
+	enforceToolSettings bool
+	toolResultMaxBytes  int
 }
 
 type interactiveStoryToolMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
 }
 
+type interactiveDirectorPlanFileMiddleware struct {
+	*adk.BaseChatModelAgentMiddleware
+	allowedPaths map[string]bool
+}
+
 func newInteractiveStoryToolMiddleware() *interactiveStoryToolMiddleware {
 	return &interactiveStoryToolMiddleware{}
+}
+
+func newInteractiveDirectorPlanFileMiddleware(allowedPaths []string) *interactiveDirectorPlanFileMiddleware {
+	allowed := make(map[string]bool, len(allowedPaths))
+	for _, path := range allowedPaths {
+		cleaned := cleanDirectorPlanToolPath(path)
+		if cleaned != "" {
+			allowed[cleaned] = true
+		}
+	}
+	return &interactiveDirectorPlanFileMiddleware{allowedPaths: allowed}
+}
+
+func (m *interactiveDirectorPlanFileMiddleware) WrapInvokableToolCall(
+	_ context.Context,
+	endpoint adk.InvokableToolCallEndpoint,
+	toolCtx *adk.ToolContext,
+) (adk.InvokableToolCallEndpoint, error) {
+	return func(ctx context.Context, args string, opts ...tool.Option) (string, error) {
+		if msg := m.blockedDirectorToolMessage(toolName(toolCtx), args); msg != "" {
+			return msg, nil
+		}
+		return endpoint(ctx, args, opts...)
+	}, nil
+}
+
+func (m *interactiveDirectorPlanFileMiddleware) WrapStreamableToolCall(
+	_ context.Context,
+	endpoint adk.StreamableToolCallEndpoint,
+	toolCtx *adk.ToolContext,
+) (adk.StreamableToolCallEndpoint, error) {
+	return func(ctx context.Context, args string, opts ...tool.Option) (*schema.StreamReader[string], error) {
+		if msg := m.blockedDirectorToolMessage(toolName(toolCtx), args); msg != "" {
+			return singleChunkReader(msg), nil
+		}
+		return endpoint(ctx, args, opts...)
+	}, nil
+}
+
+func (m *interactiveDirectorPlanFileMiddleware) blockedDirectorToolMessage(name, args string) string {
+	name = strings.ToLower(strings.TrimSpace(name))
+	switch name {
+	case "read_file", "write_file", "edit_file":
+		target := cleanDirectorPlanToolPath(toolPathFromArgs(args))
+		if target == "" {
+			return fmt.Sprintf("[tool error] interactive_director 工具 %q 必须提供 file_path。", name)
+		}
+		if m == nil || !m.allowedPaths[target] {
+			return fmt.Sprintf("[tool error] interactive_director 只能访问当前分支导演规划文件，拒绝路径: %s", target)
+		}
+		return ""
+	case "apply_actor_state_patch", "apply_story_memory_patches":
+		return ""
+	default:
+		return fmt.Sprintf("[tool error] interactive_director 只能使用 read_file、write_file、edit_file、apply_actor_state_patch、apply_story_memory_patches 维护当前分支后台状态，拒绝工具: %s", name)
+	}
+}
+
+func cleanDirectorPlanToolPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	return filepath.Clean(path)
 }
 
 func (m *interactiveStoryToolMiddleware) WrapInvokableToolCall(
@@ -86,6 +163,7 @@ type ToolDecision struct {
 	ToolName          string     `json:"tool_name"`
 	ToolCallID        string     `json:"tool_call_id,omitempty"`
 	Source            ToolSource `json:"source"`
+	Capability        string     `json:"capability,omitempty"`
 	Action            string     `json:"action"`
 	Reason            string     `json:"reason,omitempty"`
 	MutatesWorkspace  bool       `json:"mutates_workspace"`
@@ -97,6 +175,7 @@ type ToolExecutionRecord struct {
 	ToolName       string `json:"tool_name"`
 	ToolCallID     string `json:"tool_call_id,omitempty"`
 	Status         string `json:"status"`
+	Capability     string `json:"capability,omitempty"`
 	OriginalBytes  int    `json:"original_bytes,omitempty"`
 	ReturnedBytes  int    `json:"returned_bytes,omitempty"`
 	Truncated      bool   `json:"truncated,omitempty"`
@@ -124,6 +203,7 @@ func (m *toolOrchestratorMiddleware) WrapInvokableToolCall(
 				ToolName:   decision.ToolName,
 				ToolCallID: decision.ToolCallID,
 				Status:     "blocked",
+				Capability: decision.Capability,
 				Target:     decision.Target,
 				Error:      msg,
 			})
@@ -139,6 +219,7 @@ func (m *toolOrchestratorMiddleware) WrapInvokableToolCall(
 				ToolName:   decision.ToolName,
 				ToolCallID: decision.ToolCallID,
 				Status:     "error",
+				Capability: decision.Capability,
 				Target:     decision.Target,
 				Error:      err.Error(),
 			})
@@ -149,6 +230,7 @@ func (m *toolOrchestratorMiddleware) WrapInvokableToolCall(
 			ToolName:       filtered.Manifest.Name,
 			ToolCallID:     decision.ToolCallID,
 			Status:         "success",
+			Capability:     filtered.Manifest.Capability,
 			OriginalBytes:  filtered.OriginalBytes,
 			ReturnedBytes:  filtered.ReturnedBytes,
 			Truncated:      filtered.Truncated,
@@ -178,6 +260,7 @@ func (m *toolOrchestratorMiddleware) WrapStreamableToolCall(
 				ToolName:   decision.ToolName,
 				ToolCallID: decision.ToolCallID,
 				Status:     "blocked",
+				Capability: decision.Capability,
 				Target:     decision.Target,
 				Error:      msg,
 			})
@@ -192,6 +275,7 @@ func (m *toolOrchestratorMiddleware) WrapStreamableToolCall(
 				ToolName:   decision.ToolName,
 				ToolCallID: decision.ToolCallID,
 				Status:     "error",
+				Capability: decision.Capability,
 				Target:     decision.Target,
 				Error:      err.Error(),
 			})
@@ -245,6 +329,7 @@ func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string]
 					ToolName:       filtered.Manifest.Name,
 					ToolCallID:     toolCallID(toolCtx),
 					Status:         "success",
+					Capability:     filtered.Manifest.Capability,
 					OriginalBytes:  filtered.OriginalBytes,
 					ReturnedBytes:  filtered.ReturnedBytes,
 					Truncated:      filtered.Truncated,
@@ -259,6 +344,7 @@ func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string]
 					ToolName:   manifest.Name,
 					ToolCallID: toolCallID(toolCtx),
 					Status:     "error",
+					Capability: manifest.Capability,
 					Target:     toolPathFromArgs(args),
 					Error:      err.Error(),
 				})
@@ -299,6 +385,7 @@ func (m *toolOrchestratorMiddleware) buildToolDecision(toolCtx *adk.ToolContext,
 		ToolName:          manifest.Name,
 		ToolCallID:        toolCallID(toolCtx),
 		Source:            manifest.Source,
+		Capability:        manifest.Capability,
 		Action:            "allowed",
 		MutatesWorkspace:  manifest.MutatesWorkspace,
 		RequiresPostCheck: manifest.RequiresPostCheck,
@@ -307,8 +394,17 @@ func (m *toolOrchestratorMiddleware) buildToolDecision(toolCtx *adk.ToolContext,
 	if m != nil && m.effectivePolicyKind() == AgentKindInteractiveStory && isInteractiveStoryWriteTool(name) {
 		decision.Action = "blocked"
 		decision.Reason = interactiveStoryWriteToolBlockedMessage(name)
+		return decision
+	}
+	if m != nil && m.enforceToolSettings && manifest.Capability != "" && !config.AgentToolAllowed(m.toolSettings, manifest.Capability) {
+		decision.Action = "blocked"
+		decision.Reason = disabledToolCapabilityMessage(manifest.Name, manifest.Capability)
 	}
 	return decision
+}
+
+func disabledToolCapabilityMessage(name, capability string) string {
+	return fmt.Sprintf("[tool error] 工具 %q 需要当前 Agent 启用 %s 能力，但该能力已关闭。请改用已授权工具，或请用户在 Agent Tools 中开启该能力。 / Tool %q requires capability %s, which is disabled for this Agent.", name, capability, name, capability)
 }
 
 func applyToolArgumentValidation(decision ToolDecision, args string) ToolDecision {

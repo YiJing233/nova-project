@@ -17,6 +17,7 @@ import (
 	"github.com/cloudwego/eino/compose"
 
 	"denova/config"
+	agenttools "denova/internal/agent/tools"
 	"denova/internal/book"
 	"denova/internal/prompts"
 	"denova/internal/providercompat"
@@ -61,7 +62,25 @@ func BuildInteractiveStory(ctx context.Context, cfg *config.Config, state *book.
 		Instruction:       BuildInteractiveStoryInstruction(cfg, state, teller),
 		EnableSkills:      true,
 		DisableWriteTodos: true,
+		ExtraHandlers:     []adk.ChatModelAgentMiddleware{newInteractiveStoryToolMiddleware()},
 		ExtraToolsFactory: interactiveStoryToolsFactory(cfg, toolContexts...),
+	})
+}
+
+func BuildInteractiveDirector(ctx context.Context, cfg *config.Config, state *book.State, toolContexts ...InteractiveStoryToolContext) (adk.Agent, error) {
+	var allowedPaths []string
+	if len(toolContexts) > 0 {
+		allowedPaths = toolContexts[0].DirectorPlanAllowedPaths
+	}
+	return buildDeepAgent(ctx, cfg, deepAgentSpec{
+		Kind:              config.AgentKindInteractiveDirector,
+		Name:              "DenovaInteractiveDirectorAgent",
+		Description:       "AI 互动故事后台导演",
+		Instruction:       protectedSystemInstruction(cfg, config.AgentKindInteractiveDirector, prompts.BuildInteractiveDirectorSystemInstruction()),
+		EnableSkills:      false,
+		DisableWriteTodos: true,
+		ExtraHandlers:     []adk.ChatModelAgentMiddleware{newInteractiveDirectorPlanFileMiddleware(allowedPaths)},
+		ExtraToolsFactory: interactiveDirectorToolsFactory(cfg, toolContexts...),
 	})
 }
 
@@ -196,66 +215,125 @@ func buildChatModelAgentAssembly(ctx context.Context, cfg *config.Config, spec c
 		return chatModelAgentAssembly{}, fmt.Errorf("创建 backend 失败: %w", err)
 	}
 	backend := newAgentFilesystemBackend(localBackend)
-
-	var handlers []adk.ChatModelAgentMiddleware
-	filesystemHandler, err := newFilesystemMiddleware(ctx, backend, newAgentStreamingShell(), spec.ToolSettings)
+	settings := spec.ToolSettings
+	middlewares := []agenttools.MiddlewareRegistration{
+		{
+			Name:    "filesystem",
+			Enabled: agenttools.FilesystemAllowed,
+			Build: func(ctx context.Context, _ agenttools.Settings) (adk.ChatModelAgentMiddleware, error) {
+				return newFilesystemMiddleware(ctx, backend, newAgentStreamingShell(), spec.ToolSettings)
+			},
+		},
+		{
+			Name:    "skills",
+			Enabled: agenttools.CapabilityAllowed(config.AgentToolSkills),
+			Build: func(ctx context.Context, settings agenttools.Settings) (adk.ChatModelAgentMiddleware, error) {
+				return newSkillMiddleware(ctx, cfg, spec.Kind, spec.EnableSkills, settings)
+			},
+		},
+	}
+	middlewares = append(middlewares, staticMiddlewareRegistrations("extra_handler", spec.ExtraHandlers)...)
+	middlewares = append(middlewares,
+		agenttools.MiddlewareRegistration{
+			Name: "context_compaction",
+			Enabled: func(agenttools.Settings) bool {
+				return spec.IncludeCompaction
+			},
+			Build: func(context.Context, agenttools.Settings) (adk.ChatModelAgentMiddleware, error) {
+				return &contextCompactionMiddleware{
+					BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+					agentKind:                    spec.Kind,
+				}, nil
+			},
+		},
+		agenttools.MiddlewareRegistration{
+			Name: "tool_orchestrator",
+			Build: func(context.Context, agenttools.Settings) (adk.ChatModelAgentMiddleware, error) {
+				return &toolOrchestratorMiddleware{
+					agentKind:           spec.Kind,
+					policyKind:          firstNonEmpty(spec.ToolPolicyKind, spec.Kind),
+					toolSettings:        spec.ToolSettings,
+					enforceToolSettings: true,
+					toolResultMaxBytes:  configToolResultMaxBytes(cfg),
+				}, nil
+			},
+		},
+		agenttools.MiddlewareRegistration{
+			Name: "model_input_logging",
+			Build: func(context.Context, agenttools.Settings) (adk.ChatModelAgentMiddleware, error) {
+				return &modelInputLoggingMiddleware{
+					BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
+					agentKind:                    spec.Kind,
+					config:                       spec.ModelCfg,
+				}, nil
+			},
+		},
+	)
+	toolRegistrations := []agenttools.ToolRegistration{
+		agenttools.StaticTools("extra_tools", spec.ExtraTools...),
+	}
+	if spec.ExtraToolsFactory != nil {
+		toolRegistrations = append(toolRegistrations, agenttools.ToolRegistration{
+			Name:  "extra_tools_factory",
+			Build: spec.ExtraToolsFactory,
+		})
+	}
+	toolRegistrations = append(toolRegistrations, agenttools.ToolRegistration{
+		Name:    "web_search",
+		Enabled: stableWebSearchSchemaAllowed(firstNonEmpty(spec.ToolPolicyKind, spec.Kind)),
+		Build: func(agenttools.Settings) ([]tool.BaseTool, error) {
+			return newWebSearchTools()
+		},
+	})
+	assembly, err := agenttools.Build(ctx, agenttools.BuildRequest{
+		Settings:    settings,
+		Middlewares: middlewares,
+		Tools:       toolRegistrations,
+	})
 	if err != nil {
 		return chatModelAgentAssembly{}, err
 	}
-	if filesystemHandler != nil {
-		handlers = append(handlers, filesystemHandler)
-	}
-	if spec.EnableSkills && spec.ToolSettings.Skills && cfg != nil {
-		skillBackend := novaskills.NewAgentBackend(
-			novaskills.NewDirectories(cfg.SkillsDir, cfg.NovaDir, cfg.Workspace),
-			spec.Kind,
-			config.ResolveAgentSkillOverrides(cfg, spec.Kind),
-		)
-		availableSkills, listErr := skillBackend.List(ctx)
-		if listErr != nil {
-			log.Printf("[agent] 加载 Skills 列表失败 agent=%s err=%v", spec.Kind, listErr)
-		} else if len(availableSkills) > 0 {
-			skillMw, smErr := skill.NewMiddleware(ctx, &skill.Config{Backend: skillBackend})
-			if smErr != nil {
-				log.Printf("[agent] 创建 Skill middleware 失败 agent=%s err=%v", spec.Kind, smErr)
-			} else {
-				handlers = append(handlers, skillMw)
-			}
-		}
-	}
-	tools := append([]tool.BaseTool{}, spec.ExtraTools...)
-	if spec.ExtraToolsFactory != nil {
-		extraTools, extraErr := spec.ExtraToolsFactory(spec.ToolSettings)
-		if extraErr != nil {
-			return chatModelAgentAssembly{}, extraErr
-		}
-		tools = append(tools, extraTools...)
-	}
-	if spec.ToolSettings.WebSearch {
-		webSearchTools, wsErr := newWebSearchTools()
-		if wsErr != nil {
-			return chatModelAgentAssembly{}, wsErr
-		}
-		tools = append(tools, webSearchTools...)
-	}
-	handlers = append(handlers, spec.ExtraHandlers...)
-	if spec.IncludeCompaction {
-		handlers = append(handlers, &contextCompactionMiddleware{
-			BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
-			agentKind:                    spec.Kind,
+	return chatModelAgentAssembly{Tools: assembly.Tools, Handlers: assembly.Handlers}, nil
+}
+
+func staticMiddlewareRegistrations(prefix string, handlers []adk.ChatModelAgentMiddleware) []agenttools.MiddlewareRegistration {
+	registrations := make([]agenttools.MiddlewareRegistration, 0, len(handlers))
+	for i, handler := range handlers {
+		handler := handler
+		name := fmt.Sprintf("%s_%d", prefix, i+1)
+		registrations = append(registrations, agenttools.MiddlewareRegistration{
+			Name: name,
+			Build: func(context.Context, agenttools.Settings) (adk.ChatModelAgentMiddleware, error) {
+				return handler, nil
+			},
 		})
 	}
-	handlers = append(handlers, &toolOrchestratorMiddleware{
-		agentKind:          spec.Kind,
-		policyKind:         firstNonEmpty(spec.ToolPolicyKind, spec.Kind),
-		toolResultMaxBytes: configToolResultMaxBytes(cfg),
-	})
-	handlers = append(handlers, &modelInputLoggingMiddleware{
-		BaseChatModelAgentMiddleware: &adk.BaseChatModelAgentMiddleware{},
-		agentKind:                    spec.Kind,
-		config:                       spec.ModelCfg,
-	})
-	return chatModelAgentAssembly{Tools: tools, Handlers: handlers}, nil
+	return registrations
+}
+
+func newSkillMiddleware(ctx context.Context, cfg *config.Config, agentKind string, enabled bool, settings agenttools.Settings) (adk.ChatModelAgentMiddleware, error) {
+	if !enabled || !settings.Skills || cfg == nil {
+		return nil, nil
+	}
+	skillBackend := novaskills.NewAgentBackend(
+		novaskills.NewDirectories(cfg.SkillsDir, cfg.NovaDir, cfg.Workspace),
+		agentKind,
+		config.ResolveAgentSkillOverrides(cfg, agentKind),
+	)
+	availableSkills, listErr := skillBackend.List(ctx)
+	if listErr != nil {
+		log.Printf("[agent] 加载 Skills 列表失败 agent=%s err=%v", agentKind, listErr)
+		return nil, nil
+	}
+	if len(availableSkills) == 0 {
+		return nil, nil
+	}
+	skillMw, err := skill.NewMiddleware(ctx, &skill.Config{Backend: skillBackend})
+	if err != nil {
+		log.Printf("[agent] 创建 Skill middleware 失败 agent=%s err=%v", agentKind, err)
+		return nil, nil
+	}
+	return skillMw, nil
 }
 
 func buildConfiguredSubAgents(ctx context.Context, cfg *config.Config, parent deepAgentSpec, parentTools config.ResolvedAgentToolSettings) ([]adk.Agent, error) {
@@ -356,42 +434,37 @@ func buildSubAgentInstruction(parent deepAgentSpec, sub config.SubAgentConfig) s
 }
 
 func loreToolsFactory(cfg *config.Config, forceReadOnly bool) func(config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
-	return func(settings config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
-		if cfg == nil || !settings.LoreRead {
+	return func(_ config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
+		if cfg == nil {
 			return nil, nil
 		}
-		allowWrite := settings.LoreWrite && !forceReadOnly
+		allowWrite := !forceReadOnly
 		return newLoreTools(cfg.Workspace, allowWrite)
 	}
 }
 
 func ideToolsFactory(cfg *config.Config) func(config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
-	return func(settings config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
+	return func(_ config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
 		if cfg == nil {
 			return nil, nil
 		}
-		var tools []tool.BaseTool
-		if settings.LoreRead {
-			loreTools, err := newLoreTools(cfg.Workspace, settings.LoreWrite)
-			if err != nil {
-				return nil, err
-			}
-			tools = append(tools, loreTools...)
+		loreTools, err := newLoreTools(cfg.Workspace, true)
+		if err != nil {
+			return nil, err
 		}
-		if settings.ImageGeneration {
-			imageTools, err := newIllustrationTools(cfg)
-			if err != nil {
-				return nil, err
-			}
-			tools = append(tools, imageTools...)
+		imageTools, err := newIllustrationTools(cfg)
+		if err != nil {
+			return nil, err
 		}
+		tools := append([]tool.BaseTool{}, loreTools...)
+		tools = append(tools, imageTools...)
 		return tools, nil
 	}
 }
 
 func imageToolsFactory(cfg *config.Config) func(config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
-	return func(settings config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
-		if cfg == nil || !settings.ImageGeneration {
+	return func(_ config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
+		if cfg == nil {
 			return nil, nil
 		}
 		return newIllustrationTools(cfg)
@@ -399,9 +472,9 @@ func imageToolsFactory(cfg *config.Config) func(config.ResolvedAgentToolSettings
 }
 
 func interactiveStoryToolsFactory(cfg *config.Config, toolContexts ...InteractiveStoryToolContext) func(config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
-	return func(settings config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
+	return func(_ config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
 		var tools []tool.BaseTool
-		if cfg != nil && settings.LoreRead {
+		if cfg != nil {
 			loreTools, err := newLoreTools(cfg.Workspace, false)
 			if err != nil {
 				return nil, err
@@ -414,7 +487,34 @@ func interactiveStoryToolsFactory(cfg *config.Config, toolContexts ...Interactiv
 				return nil, err
 			}
 			tools = append(tools, memoryTools...)
+			turnTools, err := newInteractiveTurnTools(toolContexts[0])
+			if err != nil {
+				return nil, err
+			}
+			tools = append(tools, turnTools...)
 		}
+		return tools, nil
+	}
+}
+
+func interactiveDirectorToolsFactory(cfg *config.Config, toolContexts ...InteractiveStoryToolContext) func(config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
+	return func(settings config.ResolvedAgentToolSettings) ([]tool.BaseTool, error) {
+		_ = cfg
+		_ = settings
+		if len(toolContexts) == 0 {
+			return nil, nil
+		}
+		var tools []tool.BaseTool
+		actorTools, err := newInteractiveActorStateTools(toolContexts[0])
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, actorTools...)
+		memoryPatchTools, err := newInteractiveStoryMemoryPatchTools(toolContexts[0])
+		if err != nil {
+			return nil, err
+		}
+		tools = append(tools, memoryPatchTools...)
 		return tools, nil
 	}
 }
@@ -424,21 +524,24 @@ func configManagerToolsFactory(cfg *config.Config) func(config.ResolvedAgentTool
 		if cfg == nil {
 			return nil, nil
 		}
-		var tools []tool.BaseTool
-		if settings.LoreRead {
-			loreTools, err := newLoreTools(cfg.Workspace, settings.LoreWrite)
-			if err != nil {
-				return nil, err
-			}
-			tools = append(tools, loreTools...)
+		if !configManagerFactoryAllowed(settings) {
+			return nil, nil
 		}
 		configTools, err := newConfigManagerTools(cfg, settings)
 		if err != nil {
 			return nil, err
 		}
-		tools = append(tools, configTools...)
-		return tools, nil
+		return configTools, nil
 	}
+}
+
+func configManagerFactoryAllowed(settings config.ResolvedAgentToolSettings) bool {
+	return settings.LoreRead ||
+		settings.LoreWrite ||
+		settings.Todo ||
+		settings.Skills ||
+		settings.AgentConfigRead ||
+		settings.AgentConfigWrite
 }
 
 func newFilesystemMiddleware(ctx context.Context, backend filesystem.Backend, streamingShell filesystem.StreamingShell, settings config.ResolvedAgentToolSettings) (adk.ChatModelAgentMiddleware, error) {
@@ -449,31 +552,34 @@ func newFilesystemMiddleware(ctx context.Context, backend filesystem.Backend, st
 		return nil, nil
 	}
 	mwConfig := &filesystemmw.MiddlewareConfig{
-		Backend: backend,
-		LsToolConfig: &filesystemmw.ToolConfig{
-			Disable: !settings.FileRead,
-		},
+		Backend:      backend,
+		LsToolConfig: &filesystemmw.ToolConfig{},
 		ReadFileToolConfig: &filesystemmw.ToolConfig{
-			Disable: !settings.FileRead,
-			Desc:    &novaReadFileToolDesc,
+			Desc: &novaReadFileToolDesc,
 		},
-		GlobToolConfig: &filesystemmw.ToolConfig{
-			Disable: !settings.FileRead,
-		},
-		GrepToolConfig: &filesystemmw.ToolConfig{
-			Disable: !settings.FileRead,
-		},
-		WriteFileToolConfig: &filesystemmw.ToolConfig{
-			Disable: !settings.FileWrite,
-		},
-		EditFileToolConfig: &filesystemmw.ToolConfig{
-			Disable: !settings.FileWrite,
-		},
+		GlobToolConfig:      &filesystemmw.ToolConfig{},
+		GrepToolConfig:      &filesystemmw.ToolConfig{},
+		WriteFileToolConfig: &filesystemmw.ToolConfig{},
+		EditFileToolConfig:  &filesystemmw.ToolConfig{},
 	}
-	if settings.ShellExecute {
+	if streamingShell != nil {
 		mwConfig.StreamingShell = streamingShell
 	}
 	return filesystemmw.New(ctx, mwConfig)
+}
+
+func stableWebSearchSchemaAllowed(agentKind string) func(config.ResolvedAgentToolSettings) bool {
+	return func(settings config.ResolvedAgentToolSettings) bool {
+		if settings.WebSearch {
+			return true
+		}
+		switch agentKind {
+		case config.AgentKindIDE, config.AgentKindInteractiveStory, config.AgentKindConfigManager, config.AgentKindAutomation:
+			return true
+		default:
+			return false
+		}
+	}
 }
 
 func configMaxIteration(cfg *config.Config) int {

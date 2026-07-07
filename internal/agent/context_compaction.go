@@ -32,6 +32,7 @@ const (
 type contextCompactionPolicy struct {
 	AgentKind           string
 	Enabled             bool
+	Strategy            string
 	ContextWindowTokens int
 	Threshold           float64
 	RetainedTurns       int
@@ -46,6 +47,7 @@ type ContextCompactionResult struct {
 	TokensBefore        int
 	TokensAfter         int
 	ContextWindowTokens int
+	Strategy            string
 	Threshold           float64
 	Epoch               int
 	Summary             string
@@ -106,6 +108,7 @@ func resolveContextCompactionPolicy(cfg *config.Config, agentKind string) contex
 	return contextCompactionPolicy{
 		AgentKind:           agentKind,
 		Enabled:             contextSettings.CompactionEnabled,
+		Strategy:            contextSettings.CompactionStrategy,
 		ContextWindowTokens: modelSettings.ContextWindowTokens,
 		Threshold:           contextSettings.CompactionThreshold,
 		RetainedTurns:       compactionSettings.CompactionRecentTurns,
@@ -155,6 +158,7 @@ func BuildContextCompaction(ctx context.Context, cfg *config.Config, agentKind s
 		Phase:               phase,
 		TokensBefore:        tokensBefore,
 		ContextWindowTokens: policy.ContextWindowTokens,
+		Strategy:            policy.Strategy,
 		Threshold:           policy.Threshold,
 		MessageCountBefore:  len(input.Messages),
 		RetainedTurns:       policy.RetainedTurns,
@@ -497,7 +501,8 @@ func contextCompactionSystemInstruction() string {
 - 必须保留角色关系、角色状态、世界/阵营状态、物品资源、能力、线索、秘密、伏笔、任务、危险、倒计时和当前阶段信息。
 - 可以删除或合并氛围描写、重复心理描写、无后果闲聊、纯修辞性文本。
 - 不要写成小说文风；要写成清晰、紧凑、可供后续模型继续创作的事实账本。
-- 排除 thinking/reasoning 内容、传输噪音、展示用日志、重复工具卡片和无结果的实现过程，除非其结果会改变后续行为。
+- 排除 thinking/reasoning 内容、传输噪音、展示用日志、重复工具卡片和无结果的实现过程。
+- 必须保留会改变后续行为的工具证据：文件读取/搜索发现、资料库查询结论、工具报错原因、文件/状态写入结果、版本恢复/工作区状态变化，以及需要后续复用的 tool_result metadata（target、idempotency_key、truncated 等）。
 - 禁止编造事实；不确定时明确标记“不确定”。
 - 目标长度由用户消息配置控制，并按 existing_memory、reference_context 与 new_context 的合计字符数计算，默认是输入字符数的 5%-20%。信息密度高时使用目标范围的上半区，不要为了短而丢长期影响信息。
 
@@ -624,6 +629,7 @@ func emitContextCompactionEvent(emit func(Event), phase, status string, result C
 		"tokens_before":         result.TokensBefore,
 		"tokens_after":          result.TokensAfter,
 		"context_window_tokens": result.ContextWindowTokens,
+		"strategy":              result.Strategy,
 		"threshold":             result.Threshold,
 		"target_ratio":          result.TargetRatio,
 		"epoch":                 result.Epoch,
@@ -646,6 +652,7 @@ func emitContextCompactionDeltaEvent(emit func(Event), phase string, result Cont
 		"delta":                 delta,
 		"tokens_before":         result.TokensBefore,
 		"context_window_tokens": result.ContextWindowTokens,
+		"strategy":              result.Strategy,
 		"threshold":             result.Threshold,
 		"message_count_before":  result.MessageCountBefore,
 	}})
@@ -720,6 +727,7 @@ func contextCompactionRecordFromResult(result ContextCompactionResult, agentKind
 		TokensAfter:         result.TokensAfter,
 		TargetRatio:         result.TargetRatio,
 		ContextWindowTokens: result.ContextWindowTokens,
+		Strategy:            result.Strategy,
 		Threshold:           result.Threshold,
 		Reason:              contextCompactionReasonLimit,
 		Phase:               result.Phase,

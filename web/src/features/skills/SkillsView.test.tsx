@@ -1,8 +1,8 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import { createSkill, deleteSkillDocument, getSkillDocument, getSkills, saveSkillDocument } from '@/lib/api'
-import type { SkillDocument, SkillSnapshot } from '@/lib/api'
+import { createSkill, deleteSkillDocument, getSkillDocument, getSkillFileDocument, getSkills, installSkillGitHub, installSkillZip, previewSkillGitHubInstall, previewSkillZipInstall, saveSkillDocument, saveSkillFileDocument } from '@/lib/api'
+import type { SkillDocument, SkillFileDocument, SkillSnapshot } from '@/lib/api'
 import { SkillsView } from './SkillsView'
 
 vi.mock('@/components/Chat/ConfigManagerChat', () => ({
@@ -13,8 +13,14 @@ vi.mock('@/lib/api', () => ({
   createSkill: vi.fn(),
   deleteSkillDocument: vi.fn(),
   getSkillDocument: vi.fn(),
+  getSkillFileDocument: vi.fn(),
   getSkills: vi.fn(),
+  installSkillGitHub: vi.fn(),
+  installSkillZip: vi.fn(),
+  previewSkillGitHubInstall: vi.fn(),
+  previewSkillZipInstall: vi.fn(),
   saveSkillDocument: vi.fn(),
+  saveSkillFileDocument: vi.fn(),
 }))
 
 describe('SkillsView', () => {
@@ -22,8 +28,14 @@ describe('SkillsView', () => {
     vi.mocked(createSkill).mockReset()
     vi.mocked(deleteSkillDocument).mockReset()
     vi.mocked(getSkillDocument).mockReset()
+    vi.mocked(getSkillFileDocument).mockReset()
     vi.mocked(getSkills).mockReset()
+    vi.mocked(installSkillGitHub).mockReset()
+    vi.mocked(installSkillZip).mockReset()
+    vi.mocked(previewSkillGitHubInstall).mockReset()
+    vi.mocked(previewSkillZipInstall).mockReset()
     vi.mocked(saveSkillDocument).mockReset()
+    vi.mocked(saveSkillFileDocument).mockReset()
     vi.mocked(getSkills).mockResolvedValue(skillsSnapshot())
     vi.mocked(createSkill).mockImplementation(async (scope, name, description, agents = []) => skillDocument({
       scope,
@@ -37,7 +49,7 @@ describe('SkillsView', () => {
     const user = userEvent.setup()
     render(<SkillsView workspace="/books/demo" />)
 
-    await user.click(await screen.findByRole('button', { name: /新建 Skill/ }))
+    await user.click(await screen.findByRole('button', { name: '新建' }))
     await user.type(screen.getByLabelText('Skill 名称'), 'draft-plan')
     await user.type(screen.getByLabelText('触发说明'), '规划章节草稿')
     await user.click(screen.getByRole('button', { name: '创建 SKILL.md' }))
@@ -86,7 +98,7 @@ describe('SkillsView', () => {
     await user.click(await screen.findByRole('button', { name: '创建用户覆盖' }))
 
     await waitFor(() => {
-      expect(vi.mocked(saveSkillDocument)).toHaveBeenCalledWith('user', 'outline', content)
+      expect(vi.mocked(saveSkillDocument)).toHaveBeenCalledWith('builtin', 'outline', content, { scope: 'user', name: 'outline' })
     })
   })
 
@@ -132,6 +144,124 @@ describe('SkillsView', () => {
       )
     })
     expect(vi.mocked(saveSkillDocument).mock.calls[0][2]).toContain('description: "Beat planning"')
+  })
+
+  it('opens and saves supporting files inside a Skill directory', async () => {
+    const user = userEvent.setup()
+    const doc = skillDocument({
+      name: 'draft-plan',
+      description: 'Planning',
+      scope: 'user',
+      path: '/nova/skills/draft-plan/SKILL.md',
+      editable: true,
+      active: true,
+      content: '---\nname: draft-plan\ndescription: Planning\n---\n\n# Draft Plan\n',
+      files: [
+        { path: 'SKILL.md', size: 64, entry: true, editable: true },
+        { path: 'references/style.md', size: 8, entry: false, editable: true },
+      ],
+    })
+    const refDoc = skillFileDocument({
+      skill: doc,
+      file: { path: 'references/style.md', size: 8, entry: false, editable: true },
+      content: '# Style\n',
+    })
+    vi.mocked(getSkills).mockResolvedValue(skillsSnapshot({ skills: [doc] }))
+    vi.mocked(getSkillDocument).mockResolvedValue(doc)
+    vi.mocked(getSkillFileDocument).mockResolvedValue(refDoc)
+    vi.mocked(saveSkillFileDocument).mockResolvedValue({
+      ...refDoc,
+      content: '# Updated\n',
+      file: { ...refDoc.file, size: 10 },
+    })
+
+    render(<SkillsView workspace="/books/demo" />)
+
+    await user.click(await screen.findByRole('button', { name: /references\/style\.md/ }))
+    await waitFor(() => {
+      expect(vi.mocked(getSkillFileDocument)).toHaveBeenCalledWith('user', 'draft-plan', 'references/style.md')
+    })
+    const editor = screen.getByRole('textbox') as HTMLTextAreaElement
+    await waitFor(() => {
+      expect(editor.value).toContain('# Style')
+    })
+    await user.clear(editor)
+    await user.type(editor, '# Updated\n')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(vi.mocked(saveSkillFileDocument)).toHaveBeenCalledWith('user', 'draft-plan', 'references/style.md', '# Updated\n')
+    })
+    expect(vi.mocked(saveSkillDocument)).not.toHaveBeenCalled()
+  })
+
+  it('scans GitHub sources and installs only selected Skills', async () => {
+    const user = userEvent.setup()
+    vi.mocked(previewSkillGitHubInstall).mockResolvedValue({
+      candidates: [
+        { id: 'id-one', name: 'one', description: 'One skill', source_path: 'skills/one', conflict: false },
+        { id: 'id-two', name: 'two', description: 'Two skill', source_path: 'skills/two', conflict: false },
+      ],
+    })
+    vi.mocked(installSkillGitHub).mockResolvedValue({
+      installed: [skillDocument({ name: 'one', description: 'One skill', scope: 'user' })],
+    })
+
+    render(<SkillsView workspace="/books/demo" />)
+
+    await user.click(await screen.findByRole('button', { name: '导入' }))
+    await user.type(screen.getByLabelText('GitHub 地址'), 'owner/repo')
+    await user.click(screen.getByRole('button', { name: '扫描' }))
+
+    await waitFor(() => {
+      expect(vi.mocked(previewSkillGitHubInstall)).toHaveBeenCalledWith({
+        url: 'owner/repo',
+        ref: '',
+        subdir: '',
+        scope: 'user',
+      })
+    })
+    await user.click(screen.getByText('/one').closest('label')!)
+    await user.click(screen.getByRole('button', { name: '安装 1 个' }))
+
+    await waitFor(() => {
+      expect(vi.mocked(installSkillGitHub)).toHaveBeenCalledWith({
+        url: 'owner/repo',
+        ref: '',
+        subdir: '',
+        scope: 'user',
+        candidateIds: ['id-one'],
+      })
+    })
+  })
+
+  it('scans ZIP uploads and auto-selects a single installable Skill', async () => {
+    const user = userEvent.setup()
+    const file = new File(['zip'], 'skill.zip', { type: 'application/zip' })
+    vi.mocked(previewSkillZipInstall).mockResolvedValue({
+      candidates: [
+        { id: 'zip-one', name: 'zip-one', description: 'Zip skill', source_path: 'skills/zip-one', conflict: false },
+      ],
+    })
+    vi.mocked(installSkillZip).mockResolvedValue({
+      installed: [skillDocument({ name: 'zip-one', description: 'Zip skill', scope: 'user' })],
+    })
+
+    render(<SkillsView workspace="/books/demo" />)
+
+    await user.click(await screen.findByRole('button', { name: '导入' }))
+    await user.click(screen.getByRole('button', { name: 'ZIP' }))
+    await user.upload(screen.getByLabelText('ZIP 文件'), file)
+    await user.click(screen.getByRole('button', { name: '扫描' }))
+
+    await waitFor(() => {
+      expect(vi.mocked(previewSkillZipInstall)).toHaveBeenCalledWith(file, 'user')
+    })
+    await user.click(screen.getByRole('button', { name: '安装 1 个' }))
+
+    await waitFor(() => {
+      expect(vi.mocked(installSkillZip)).toHaveBeenCalledWith(file, 'user', ['zip-one'])
+    })
   })
 
   it('restores built-in Skill by deleting the active override', async () => {
@@ -192,6 +322,17 @@ function skillDocument(patch: Partial<SkillDocument>): SkillDocument {
     editable: true,
     active: true,
     content: '---\nname: draft-plan\ndescription: Planning\n---\n',
+    files: [{ path: 'SKILL.md', size: 48, entry: true, editable: true }],
+    ...patch,
+  }
+}
+
+function skillFileDocument(patch: Partial<SkillFileDocument>): SkillFileDocument {
+  const baseSkill = skillDocument({})
+  return {
+    skill: baseSkill,
+    file: { path: 'references/style.md', size: 0, entry: false, editable: true },
+    content: '',
     ...patch,
   }
 }

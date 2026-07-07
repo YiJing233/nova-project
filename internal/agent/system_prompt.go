@@ -88,10 +88,10 @@ func outputProtocolForAgent(agentKind string) string {
 	case config.AgentKindInteractiveStory:
 		return strings.Join([]string{
 			"- 必须只输出本回合可展示在故事舞台上的故事正文。",
-			"- 正文只写场景、动作、对白和后果；不要输出计划、解释、工具说明、Markdown 标题、XML 包装、<HOT_STATE>、<STATE_DELTA> 或任何 JSON。",
+			"- 正文只写场景、动作、对白和后果；不要输出计划、解释、工具说明、Markdown 标题、XML 包装、隐藏状态块、快捷选择块或任何 JSON。",
 		}, "\n")
-	case config.AgentKindInteractiveState:
-		return "- 必须只输出符合互动记忆 schema 的 JSON object，格式为 {\"story_memory_patches\":[...]}；每条 patch 必须按目标表的字段协议填写完整 values，所有字段都必须出现且不能为空，不得输出 Markdown、解释或代码块。"
+	case config.AgentKindInteractiveDirector:
+		return "- 必须通过专用工具维护 Story Memory 和 Actor State，并只通过受限文件工具更新当前分支 director.md；完成后只输出一句简短摘要，不得续写剧情或输出 JSON patch。"
 	case config.AgentKindInteractiveHotChoices:
 		return "- 必须只输出 JSON object，格式为 {\"choices\":[\"...\"]}；不得续写剧情或修改故事状态。"
 	case config.AgentKindVersionSummary:
@@ -119,7 +119,7 @@ func agentRuntimeContract(agentKind string) string {
 		return "- 写作 Agent 必须遵守文件工具安全边界和作品工作区边界；书籍内容规则仍以 CREATOR.md 和用户本轮明确要求为准。"
 	case config.AgentKindInteractiveStory:
 		return strings.Join([]string{
-			"- 互动叙事 Agent 禁止修改 workspace 文件，禁止输出或调用写文件、删除文件、任务计划等工具。",
+			"- 互动叙事 Agent 可以使用只读文件工具读取 system prompt 明确给出的共享文风参考；禁止修改 workspace 文件，禁止输出或调用写文件、删除文件、任务计划等工具。",
 			"- 互动叙事 Agent 必须遵守内置输出协议，面向故事舞台的正文必须直接作为最终回复输出，不得夹带状态 JSON、工具说明或 XML 包装。",
 			"- 互动叙事 Agent 的篇幅必须以当前 story 的每轮目标字数为最高约束；其它内置提示、CREATOR.md 章节篇幅、导演规则或用户自定义提示中的篇幅倾向都不得要求超过该目标。",
 		}, "\n")
@@ -133,8 +133,14 @@ func agentRuntimeContract(agentKind string) string {
 			"- 删除、隐藏、覆盖和大范围重写必须来自用户明确指令；不确定时先说明将如何修改并请求用户确认。",
 			"- 资料库只沉淀长期稳定设定；章节后的短期状态不默认写入资料库。",
 		}, "\n")
-	case config.AgentKindInteractiveState:
-		return "- 互动记忆 Agent 必须只输出符合内置 schema 的 story_memory_patches JSON object；structure_id、op、key、字段 ID 和内容边界仍由后端校验。"
+	case config.AgentKindInteractiveDirector:
+		return strings.Join([]string{
+			"- 互动导演 Agent 是后台回合维护 Agent，根据调用方提供的有界回合审计、RuleResolution、故事记忆、Actor State、资料库导演上下文和导演规划文件维护后台状态。",
+			"- Story Memory 与 Actor State 的真实写入必须通过专用工具完成；director.md 只能通过受限文件工具编辑当前分支规划文件。",
+			"- 互动导演 Agent 不得续写故事正文，不得替用户选择行动，不得使用 shell、todo、资料库写入或任意 workspace 写入。",
+			"- 互动导演 Agent 必须优先复用资料库中的重要角色、势力、规则、地点和既有关系，并通过高信息密度的角色关系、势力压力、信息揭示、爽点危机、检定代价和分支安排规划后续互动；固定数值、骰子和资源结算结果必须以 RuleResolution 为准。",
+			"- 互动导演 Agent 必须把可给正文 Agent 读取的信息放在“正文Agent可读”区，把隐藏真相和未来反转放在“后台导演私密”区。",
+		}, "\n")
 	case config.AgentKindInteractiveHotChoices:
 		return "- 快捷选项 Agent 必须只输出符合内置 schema 的 JSON object；不得续写剧情或修改故事状态。"
 	case config.AgentKindVersionSummary:

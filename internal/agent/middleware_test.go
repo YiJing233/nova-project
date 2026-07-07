@@ -78,6 +78,57 @@ func TestInteractiveStoryToolMiddlewareAllowsReadTools(t *testing.T) {
 	}
 }
 
+func TestInteractiveDirectorPlanFileMiddlewareAllowsStateTools(t *testing.T) {
+	middleware := newInteractiveDirectorPlanFileMiddleware([]string{"/tmp/story/director/main/director.md"})
+	for _, name := range []string{"apply_actor_state_patch", "apply_story_memory_patches"} {
+		called := false
+		endpoint, err := middleware.WrapInvokableToolCall(
+			context.Background(),
+			func(context.Context, string, ...tool.Option) (string, error) {
+				called = true
+				return "ok", nil
+			},
+			&adk.ToolContext{Name: name},
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		result, err := endpoint(context.Background(), `{}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !called || result != "ok" {
+			t.Fatalf("%s should pass through, called=%v result=%s", name, called, result)
+		}
+	}
+}
+
+func TestInteractiveDirectorPlanFileMiddlewareBlocksUnauthorizedTools(t *testing.T) {
+	middleware := newInteractiveDirectorPlanFileMiddleware([]string{"/tmp/story/director/main/director.md"})
+	called := false
+	endpoint, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...tool.Option) (string, error) {
+			called = true
+			return "ok", nil
+		},
+		&adk.ToolContext{Name: "execute_shell"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := endpoint(context.Background(), `{"cmd":"ls"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("unauthorized director tool should be blocked before endpoint is called")
+	}
+	if !strings.Contains(result, "拒绝工具: execute_shell") {
+		t.Fatalf("unexpected block result: %s", result)
+	}
+}
+
 func TestToolOrchestratorBlocksInteractiveWriteTools(t *testing.T) {
 	middleware := &toolOrchestratorMiddleware{agentKind: AgentKindInteractiveStory}
 	called := false
@@ -263,6 +314,36 @@ func TestToolOrchestratorBlocksMalformedJSONArgumentsForStream(t *testing.T) {
 	}
 }
 
+func TestToolOrchestratorBlocksDisabledCapability(t *testing.T) {
+	middleware := &toolOrchestratorMiddleware{
+		agentKind:           AgentKindIDE,
+		enforceToolSettings: true,
+		toolSettings:        config.ResolvedAgentToolSettings{FileRead: true},
+	}
+	called := false
+	endpoint, err := middleware.WrapInvokableToolCall(
+		context.Background(),
+		func(context.Context, string, ...tool.Option) (string, error) {
+			called = true
+			return "ok", nil
+		},
+		&adk.ToolContext{Name: "write_file", CallID: "call-1"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := endpoint(context.Background(), `{"file_path":"chapters/ch01.md"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("disabled file_write capability should block before endpoint is called")
+	}
+	if !strings.Contains(result, "file_write") || !strings.Contains(result, "disabled for this Agent") {
+		t.Fatalf("unexpected disabled capability result: %s", result)
+	}
+}
+
 func TestToolOrchestratorTruncatesStreamResultWhenLimitConfigured(t *testing.T) {
 	middleware := &toolOrchestratorMiddleware{agentKind: AgentKindIDE, toolResultMaxBytes: 64}
 	endpoint, err := middleware.WrapStreamableToolCall(
@@ -326,8 +407,8 @@ func TestNewFilesystemMiddlewareRespectsToolSettings(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"write_file", "edit_file", "execute"} {
-		if names[name] {
-			t.Fatalf("tool %s should be disabled, names=%v", name, names)
+		if !names[name] {
+			t.Fatalf("tool %s should keep a stable schema and be blocked by orchestrator, names=%v", name, names)
 		}
 	}
 }

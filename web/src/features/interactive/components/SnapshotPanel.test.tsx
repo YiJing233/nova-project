@@ -10,6 +10,76 @@ describe('SnapshotPanel', () => {
           story_id: 'st_1',
           branch_id: 'main',
           turns: [],
+          director_plan_status: {
+            story_id: 'st_1',
+            branch_id: 'main',
+            status: 'ready',
+            summary: '已更新近期规划',
+            updated_at: '2026-05-17T00:00:00Z',
+            planned_docs: 1,
+            completed_docs: 1,
+            doc_bytes: 30,
+            visible_bytes: 20,
+            start_ready: true,
+            blocking: false,
+            revision: 'rev-1',
+          },
+          current_turn: {
+            id: 'turn-2',
+            parent_id: null,
+            branch_id: 'main',
+            ts: '2026-05-17T00:00:00Z',
+            user: '我强行闯入藏书阁',
+            narrative: '守阁长老拦在门前。',
+            rule_resolution: {
+              id: 'rr_1',
+              created_at: '2026-05-17T00:00:00Z',
+              request: {
+                action: '强行闯入藏书阁',
+                intent: '冒险',
+                challenge: '潜入检定',
+                cost: '失败会损失体力并暴露行踪',
+                state: '守阁长老正在靠近',
+                rule: { template: 'dice_check', dice: '1d20', roll_mode: 'normal' },
+                bonuses: [{ reason: '熟悉地形', value: 2 }],
+                difficulty: 'hard',
+                outcomes: {
+                  critical_success: { result: '无声潜入。' },
+                  success: { result: '成功潜入。' },
+                  failure: { result: '强闯失败导致主线中断', state_changes: [{ path: 'resources.hp', change: -10 }] },
+                  critical_failure: { result: '被当场抓住。' },
+                },
+              },
+              result: {
+                id: 'check_1',
+                label: '潜入检定',
+                kind: 'skill',
+                dice: '1d20',
+                roll_mode: 'normal',
+                rolls: [4],
+                roll_total: 4,
+                kept_roll: 4,
+                bonus_total: 2,
+                modifier: 2,
+                difficulty: 18,
+                target: 18,
+                total: 6,
+                outcome: 'failure',
+                result: '强闯失败导致主线中断',
+                state_changes: [{ path: 'resources.hp', change: -10 }],
+                constraints: ['潜入检定失败，总值 6 / 难度 18。'],
+              },
+              terminal_candidate: { type: 'bad_end', reason: '强闯失败导致主线中断', check_id: 'check_1' },
+              rule_constraints: ['潜入检定失败，总值 6 / 难度 18。'],
+            },
+            terminal_outcome: {
+              terminal: true,
+              type: 'bad_end',
+              reason: '强闯失败导致主线中断',
+              final_narrative_summary: '主角被逐出学院。',
+              restart_suggestions: ['从上一安全回合创建新分支'],
+            },
+          },
           state: {
             on_stage: ['林川'],
             scene: {
@@ -72,7 +142,7 @@ describe('SnapshotPanel', () => {
     expect(screen.getByText('物品与资源')).toBeInTheDocument()
     expect(screen.getAllByText('火把').length).toBeGreaterThan(0)
     expect(screen.getByText('资源')).toBeInTheDocument()
-    expect(screen.getByText('2')).toBeInTheDocument()
+    expect(screen.getAllByText('2').length).toBeGreaterThan(0)
     expect(screen.getByText('规则与暗线')).toBeInTheDocument()
     expect(screen.getByText('黄泉酒馆会回应火光')).toBeInTheDocument()
     expect(screen.getByText('午夜后只进不出')).toBeInTheDocument()
@@ -83,6 +153,21 @@ describe('SnapshotPanel', () => {
     expect(screen.getByText('线索')).toBeInTheDocument()
     expect(screen.getByText('来源事件')).toBeInTheDocument()
     expect(screen.getByText('酒馆门自行关上')).toBeInTheDocument()
+    expect(screen.getByText('导演编排')).toBeInTheDocument()
+    expect(screen.getAllByText('ready').length).toBeGreaterThan(0)
+    expect(screen.getByText('1/1')).toBeInTheDocument()
+    expect(screen.getByText('已更新近期规划')).toBeInTheDocument()
+    expect(screen.queryByText('青云逆袭主线')).not.toBeInTheDocument()
+    expect(screen.queryByText('外门比拼前夜，制造排名压力。')).not.toBeInTheDocument()
+    expect(screen.getByText('规则审计')).toBeInTheDocument()
+    expect(screen.getByText('本次检定')).toBeInTheDocument()
+    expect(screen.getByText('强行闯入藏书阁')).toBeInTheDocument()
+    expect(screen.getAllByText('潜入检定').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('failure').length).toBeGreaterThan(0)
+    expect(screen.getByText('终局候选')).toBeInTheDocument()
+    expect(screen.getAllByText('强闯失败导致主线中断').length).toBeGreaterThan(0)
+    expect(screen.getByText('重开建议')).toBeInTheDocument()
+    expect(screen.getByText('从上一安全回合创建新分支')).toBeInTheDocument()
     expect(document.body).not.toHaveTextContent(/current_goal|last_seen_at|relationship_score|from_event/)
   })
 })

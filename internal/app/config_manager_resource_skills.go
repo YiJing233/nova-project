@@ -15,12 +15,14 @@ const (
 	configManagerResourceSkillMaxBytes      = 12 * 1024
 	configManagerResourceSkillMaxTotalBytes = 32 * 1024
 
-	configManagerAutomationSkill  = "automation-config"
-	configManagerStoryMemorySkill = "story-memory-config"
-	configManagerTellerSkill      = "teller-config"
-	configManagerImagePresetSkill = "image-preset-config"
-	configManagerSkillsSkill      = "skills-creator"
-	configManagerAgentConfigSkill = "agent-config"
+	configManagerAutomationSkill    = "automation-config"
+	configManagerStoryMemorySkill   = "story-memory-config"
+	configManagerTellerSkill        = "teller-config"
+	configManagerStoryDirectorSkill = "story-director-config"
+	configManagerImagePresetSkill   = "image-preset-config"
+	configManagerSkillsSkill        = "skills-creator"
+	configManagerAgentConfigSkill   = "agent-config"
+	configManagerLoreSkill          = "lore"
 )
 
 func loadConfigManagerResourceSkills(ctx context.Context, cfg *config.Config, req ConfigManagerRequest) []agent.ConfigManagerResourceSkill {
@@ -93,12 +95,15 @@ func configManagerResourceSkillNames(req ConfigManagerRequest) []string {
 
 	origin := normalizeConfigManagerSignal(req.Origin)
 	switch origin {
+	case "lore":
+		add(configManagerLoreSkill)
 	case "automation", "automations":
 		add(configManagerAutomationSkill)
 	case "story_memory", "story-memory", "storymemory", "interactive_memory", "interactive-memory":
 		add(configManagerStoryMemorySkill)
-	case "teller", "tellers", "director", "narrative":
+	case "teller", "tellers", "narrative", "style", "styles", "director", "story_director", "story-director", "story_directors", "story-directors", "actor_state", "actor-state", "actor_states", "actor-states", "memory_structure", "memory-structure", "memory_structures", "memory-structures", "story_memory_structure", "story-memory-structure", "story_memory_structures", "story-memory-structures":
 		add(configManagerTellerSkill)
+		add(configManagerStoryDirectorSkill)
 		add(configManagerImagePresetSkill)
 	case "image_preset", "image_preset_config", "image_presets", "image-preset", "image-presets", "preset", "presets":
 		add(configManagerTellerSkill)
@@ -118,6 +123,10 @@ func configManagerResourceSkillNames(req ConfigManagerRequest) []string {
 	}
 	text := normalizeConfigManagerSignal(strings.Join(signals, " "))
 	switch {
+	case strings.Contains(text, "write_lore_items") || strings.Contains(text, "lore_item") || strings.Contains(text, "selected_lore") || strings.Contains(text, "资料库"):
+		add(configManagerLoreSkill)
+	}
+	switch {
 	case strings.Contains(text, "automation") || strings.Contains(text, "write_automations") || strings.Contains(text, "active_automation"):
 		add(configManagerAutomationSkill)
 	}
@@ -126,8 +135,12 @@ func configManagerResourceSkillNames(req ConfigManagerRequest) []string {
 		add(configManagerStoryMemorySkill)
 	}
 	switch {
-	case strings.Contains(text, "teller") || strings.Contains(text, "director") || strings.Contains(text, "narrative"):
+	case strings.Contains(text, "teller") || strings.Contains(text, "narrative") || strings.Contains(text, "叙事风格"):
 		add(configManagerTellerSkill)
+	}
+	switch {
+	case strings.Contains(text, "story_director") || strings.Contains(text, "write_story_directors") || strings.Contains(text, "event_package") || strings.Contains(text, "event-packages") || strings.Contains(text, "actor_state") || strings.Contains(text, "actor_states") || strings.Contains(text, "memory_structure") || strings.Contains(text, "memory-structure") || strings.Contains(text, "story_memory_structure") || strings.Contains(text, "story-memory-structure") || strings.Contains(text, "故事导演") || strings.Contains(text, "导演策略") || strings.Contains(text, "事件包") || strings.Contains(text, "事件系统") || strings.Contains(text, "数值系统") || strings.Contains(text, "结构化状态") || strings.Contains(text, "记忆结构") || strings.Contains(text, "trpg"):
+		add(configManagerStoryDirectorSkill)
 	}
 	switch {
 	case strings.Contains(text, "image_preset") || strings.Contains(text, "image_presets") || strings.Contains(text, "图像方案") || strings.Contains(text, "方案预设") || strings.Contains(text, "preset"):

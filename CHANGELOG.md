@@ -6,12 +6,200 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- 游戏模式：右侧面板重设计为更克制的“导演控制台”，围绕单后台 Director Agent 提供运行、状态、记忆与规划视图；后台规划、上下文分析、记忆整理和工具调用过程统一收进“运行”页的剧透门，记忆页只展示记忆内容，规划页默认以 Markdown 阅读视图展示 `director.md` 并保留显式编辑入口。
+- Game Mode: Redesigned the right sidebar as a more restrained Director Console with Run, State, Memory, and Plan views around the single background Director Agent. Background planning, context analysis, memory generation, and tool-call process logs now live behind the Run view spoiler gate; Memory shows memory content only, and Plan renders `director.md` as Markdown by default with an explicit edit action.
+- 书籍管理：新增通用书籍导出入口，当前支持一键导出整本小说为 UTF-8 TXT；导出会按章节/分卷顺序拼接全部非空章节，并保留后续扩展 EPUB 等格式的接口形态。
+- Books: Added a generic book export entry point, currently supporting one-click full-novel UTF-8 TXT export. Exports assemble all non-empty chapters in chapter/volume order and keep the API shape ready for future formats such as EPUB.
+- 书籍管理：新建和编辑改为复用同一个弹窗，移除内嵌展开式新建表单；弹窗内支持上传 PNG/JPEG 封面，也可在新建书籍时直接选择上传封面或触发“新建并生成封面”。
+- Books: Book creation and editing now share one modal instead of the inline expanded create form. The modal supports PNG/JPEG cover uploads, and new books can be created with an uploaded cover or via the Create and Generate Cover action.
+- 游戏模式：导演编排面板新增“分析导演上下文”入口，不调用 LLM 即可查看后台互动导演 Agent 当前会收到的 SystemPrompt、director.md 快照、资料库导演上下文、回合审计、故事记忆和事件目录等来源片段。
+- Game Mode: Added an “Analyze director context” action to the Director orchestration panel, showing the background Director Agent’s current SystemPrompt, director.md snapshot, lore context, turn audit, story memory, event catalog, and other source-bounded context without calling the LLM.
+- 游戏模式：新增导演子模块 Actor State，支持关键 Actor 类型模板、字段 schema、初始 Actor、`/api/actor-states` CRUD、配置页资源入口和配置管理 Agent 读写工具；记忆整理 Agent 新增 `apply_actor_state_patch` 工具，用于按 schema 校验并写入可重放结构化状态。
+- Game Mode: Added the Actor State director submodule with key-actor templates, field schemas, initial actors, `/api/actor-states` CRUD, Presets resource editing, and Config Manager Agent tools. The memory continuity agent now has `apply_actor_state_patch` for schema-validated replayable structured state updates.
+- 游戏模式：新增故事导演子模块 Story Memory Structure，记忆结构定义进入方案预设并通过 `StoryDirector.module_refs.memory_structure_id` 统一引用/启停；新增 `/api/story-memory-structures` CRUD、内置恢复、revision conflict 校验、配置管理 Agent 读写工具和导演组合器节点。
+- Game Mode: Added the Story Memory Structure director submodule. Memory structure definitions now live in Presets and are referenced/toggled through `StoryDirector.module_refs.memory_structure_id`; added `/api/story-memory-structures` CRUD, built-in restore, revision-conflict checks, Config Manager Agent tools, and a Story Director composer node.
+- 游戏模式：导演编排右栏在当前分支没有导演规划或规则审计时提供手动触发规划入口，并在规划中复用 Chat 消息列表展示后台导演状态与 director.md 进度。
+- Game Mode: The Director sidebar now offers a manual planning action when the current branch has no Director plan or rule audit, and reuses the chat message list to show background Director status and director.md progress while planning.
+- WebUI：创作 Agent 与游戏模式输入框支持 `/Skill`、`@文件`、`@资料` 和 `#场景` 的文本内联 token 展示；选中后以主题蓝灰色加粗显示并可作为整体删除，发送协议保持兼容纯文本与现有引用字段。
+- WebUI: Writing Agent and Game Mode composers now render `/Skill`, `@file`, `@lore`, and `#scene` references as inline text tokens. Selected tokens use the theme-aligned blue-gray bold treatment, delete as a unit, and still send compatible plain text plus existing reference fields.
+- 游戏模式：导演规划新增安全状态接口与失败重试入口；开局后后台规划期间，舞台只显示状态、文档进度和错误摘要，不暴露具体规划正文。
+- Game Mode: Added safe Director planning status and retry endpoints. While background planning runs after the opening turn, the stage shows only status, document progress, and error summaries without exposing plan text.
+- 游戏模式：叙事风格的场景文风规则改为引用所有 Teller 共享的 `.denova/styles/*.md` 文风参考索引，System Prompt 只注入 name、description、path，互动正文 Agent 可按需通过只读文件工具读取参考正文。
+- Game Mode: Narrative-style scene rules now reference shared `.denova/styles/*.md` style-reference indexes across all Tellers. The System Prompt injects only name, description, and path, and the interactive prose agent can read the referenced files through read-only file tools when needed.
+- WebUI：Teller 编辑器新增共享文风参考上传流程，默认通过配置管理 Agent 提炼为 Markdown，也支持用户选择直接保存源文件为共享参考。
+- WebUI: The Teller editor now supports uploading shared style references, defaulting to Config Manager Agent extraction into Markdown while still allowing users to save the source file directly as a shared reference.
+- WebUI：Teller 编辑器中已选择或已上传的共享文风参考现在可以直接点开编辑，保存时会检测文件 revision，避免旧弹窗覆盖外部更新。
+- WebUI: Shared style references selected or uploaded in the Teller editor can now be opened and edited directly, with revision checks on save to avoid overwriting external updates from stale dialogs.
+- 方案预设：叙事风格编辑器将“场景风格规则”调整为统一的“文风参考”规则列表，默认第一行范围为“全局”，并将导入入口改为支持文件上传和直接粘贴文本的弹窗；全局范围在 IDE 写作与互动正文生成中默认适用于所有场景，具体场景仍可通过 # 场景选择。
+- Presets: The narrative-style editor now labels the section as a unified Style References rule list, with the first default row scoped to Global, and changes import into a modal that supports both file upload and pasted text. The Global scope applies by default to every scene in IDE writing and interactive prose generation, while specific scenes can still be selected with #scene.
+- Agent：开发模式 LLM 输入日志新增 cache attribution 指纹，记录完整消息、system prompt、工具 schema 的稳定哈希和工具名列表，便于定位 prompt cache 前缀变化而不把大 schema 复制进运行轨迹。
+- Agent: Developer LLM input logs now include cache-attribution fingerprints for full messages, system prompts, tool schemas, and tool names, making prompt-cache prefix changes easier to diagnose without copying large schemas into run traces.
+- Agent：运行轨迹摘要新增工具调用质量计数，包括调用数、成功数、阻断数、错误数、截断数和无效 JSON 参数数。
+- Agent: Run trace summaries now include tool quality counters for calls, successes, blocked calls, errors, truncations, and invalid JSON arguments.
+- Agent：上下文压缩配置新增显式 `compaction_strategy` 字段；当前支持的真实策略为 `summary_agent`，压缩事件和持久化记录会写入该策略，便于后续扩展时保持边界清晰。
+- Agent: Context compaction settings now include an explicit `compaction_strategy` field. The currently supported concrete strategy is `summary_agent`, and compaction events plus persisted records store it for clearer future extension boundaries.
+- Agent：IDE 写作 Agent 与互动 Agent 现在会把工具调用和工具结果作为隐藏的模型上下文保留到下一轮；新增按 Agent 配置的工具结果保留开关、最近完整结果数、上下文预算和单结果预览上限，旧结果超出预算后会替换为可追踪占位，同时 raw thinking 仍不进入下一轮模型输入。
+- Agent: IDE writing and interactive agents now retain tool calls and tool results as hidden model context for the next turn. Added per-agent settings for tool-result retention, recent full results, context budget, and per-result preview limits; old over-budget results become traceable placeholders while raw thinking remains excluded from the next model input.
+- 游戏模式：事件包新增玄幻、修仙、末世、西幻、都市和 TRPG 六个内置预设，每个预设包含结构化 Markdown 事件卡；导演事件目录会优先保留所选事件包事件卡，再用通用事件模板补齐后台规划上限。
+- Game Mode: Added six built-in Event Package presets for xuanhuan, cultivation, apocalypse, western fantasy, urban, and TRPG stories, each with structured Markdown event cards; Director event catalogs now prioritize selected package cards before filling remaining background-planning slots with generic event templates.
+- Skills：管理页现在按 Skill 目录展示文件，除入口 `SKILL.md` 外可查看并编辑目录内的 reference 文档；重命名、迁移或创建内置 Skill 覆盖时会保留原 Skill 目录下的附属文件。
+- Skills: The management page now exposes files inside each Skill directory, so reference documents alongside `SKILL.md` can be viewed and edited; renaming, moving, or creating built-in Skill overrides preserves supporting files in the Skill directory.
+- Skills：支持从 ZIP 上传或公开 GitHub 仓库扫描并选择安装 Skill；GitHub/ZIP 来源都会先列出候选项，用户只安装勾选的条目，同名目标默认拒绝覆盖。
+- Skills: Added selectable Skill installation from ZIP uploads or public GitHub repositories. GitHub and ZIP sources are scanned first, users install only checked candidates, and same-name targets are rejected by default.
+- 游戏模式：故事导演策略新增高级 Markdown 提示，作为结构化主线、失败、节奏和随机扰动策略的补充；该提示会以独立来源和 4000 bytes 上限注入互动正文 Agent 与后台 Director Agent。
+- Game Mode: Story Director strategy now supports an advanced Markdown prompt as a supplement to structured mainline, failure, pacing, and random-disturbance settings; the prompt is injected into both the interactive prose agent and background Director Agent with a separate source and a 4000-byte limit.
+- 版本管理：新增恢复预演接口与确认弹窗，整本回滚前会展示受影响文件、是否创建回滚前备份，以及备份说明。
+- Version management: Added restore preview support so full-workspace rollback shows affected files, rollback-backup behavior, and backup guidance before execution.
+- 资料库：资料项支持保存当前图片引用与生成元数据；编辑器内可单项生成、重新生成或清除当前图片，历史图片文件会保留。
+- Lore: Lore items now keep a current image reference with generation metadata; the editor supports per-item generate, regenerate, and clear while preserving historical image files.
+- 资料库：新增批量生成资料图片弹窗，由用户手动多选条目后串行生成；默认跳过已有图片，可切换为覆盖当前图片引用。
+- Lore: Added a manual multi-select batch dialog for serial lore image generation. Existing images are skipped by default, with an overwrite option for replacing the current image reference.
+- Skills：新增内置 `lore` Skill，简要说明 `list_lore_items`、`read_lore_items` 和 `write_lore_items` 的使用顺序、参数格式与长期设定边界。
+- Skills: Added the built-in `lore` Skill with concise guidance for `list_lore_items`, `read_lore_items`, and `write_lore_items` order, argument shape, and stable-lore boundaries.
+- 游戏模式：新增叙事编排基础能力，互动 Agent 可提交 TurnBrief，并通过 `prepare_interactive_turn` 执行固定数值、骰子、安全表达式、资源和终局候选检定；回合会持久化 RuleResolution 审计数据。新增独立 `interactive_director` 后台导演 Agent，按故事分支维护单份 `director.md` 导演规划文档和后端元数据；互动正文与热选项只注入有界可见区，导演私密区只供后台导演使用。前端支持导演规划读取、编辑、重建、规则重抽、开局词条抽取，以及在故事导演策略中配置主线强度、失败策略、节奏曲线、分支规划回合数、单文档规划模板和事件包。终局分支默认禁止继续追加普通回合，需要从历史节点创建新分支。
+- Game Mode: Added the narrative orchestration foundation. The interactive agent can submit a TurnBrief and use `prepare_interactive_turn` for fixed numeric, dice, safe-expression, resource, and terminal-candidate checks; turns now persist RuleResolution audit data. Added an independent `interactive_director` background Director Agent that maintains one branch-scoped `director.md` plan plus backend metadata; interactive prose and hot choices only receive bounded visible sections, while private director sections remain exclusive to the background director. The frontend now supports Director plan read/edit/rebuild, rule rerolls, opening-trait rolls, and Story Director strategy configuration for mainline strength, failure policy, pacing curve, branch planning turns, a single planning template, and event packages. Terminal branches now block normal continuation by default and require branching from history.
+- 游戏模式：事件包升级为只由事件卡组成的可编辑卡包，支持事件类型名、Markdown 事件描述、权重、冷却、强度和标签；配置 Agent 可读取有界资料库上下文并通过方案预设工具生成 12-24 张贴合世界观的事件卡。
+- Game Mode: Event packages now use editable event cards only, with type names, Markdown descriptions, weight, cooldown, intensity, and tags; the Config Manager Agent can read bounded lore context and generate 12-24 world-grounded event cards through teller preset tools.
+- 游戏模式：新增独立“故事导演 / Story Director”资源、`/api/story-directors` CRUD、配置管理 Agent 工具和设置页编辑器；故事导演集中管理导演策略、事件包、数值系统、TRPG 检定和开局选择器。
+- Game Mode: Added standalone Story Director resources, `/api/story-directors` CRUD, Config Manager Agent tools, and a settings editor. Story Directors now own strategy, event packages, stat systems, TRPG checks, and opening selectors.
+- 游戏模式：新增可独立配置的事件包、数值&TRPG系统、开局选择器模块资源，提供 `/api/event-packages`、`/api/rule-systems`、`/api/opening-selectors` CRUD，并在方案预设页形成“模块库 + 故事导演组合器”。
+- Game Mode: Added independently configurable Event Package, Rule/TRPG System, and Opening Selector module resources with `/api/event-packages`, `/api/rule-systems`, and `/api/opening-selectors` CRUD, surfaced in Presets as a module library plus Story Director composer.
+
+### Changed
+
+- WebUI：上下文分析弹窗减少最终消息的重复嵌套，单片段消息组直接展示为可展开片段；多片段组展开后内层片段默认展开，并使用更轻量的内层样式。
+- WebUI: Reduced duplicate nesting in the Context Analysis dialog. Single-part final-message groups now render directly as expandable parts, while multi-part groups open with inner parts expanded by default and lighter nested styling.
+- 游戏模式：后台导演 `director.md`、正文 Agent 可读区、导演上下文拼装片段和故事导演高级 Markdown 策略提示的上限统一放宽到至少 64KB，并移除导演 Prompt 中旧的硬编码字节上限文案。
+- Game Mode: Raised the background Director `director.md`, prose-agent visible section, Director context slices, and Story Director advanced Markdown strategy prompt limits to at least 64KB, and removed old hard-coded byte-limit wording from Director prompts.
+- 不兼容变更：游戏模式后台能力统一收敛到 `interactive_director`，移除独立 `interactive_state` Agent 配置、注册表和设置页入口；后台导演现在在同一次维护运行中通过工具写入 Actor State、Story Memory，并更新当前分支 `director.md`。
+- Breaking: Game Mode background maintenance is now unified under `interactive_director`; the standalone `interactive_state` Agent config, registry entry, and settings UI row have been removed. The background Director now writes Actor State, Story Memory, and the current branch `director.md` in one maintenance run through tools.
+- 游戏模式：Story Memory 页面改为只读展示结构来源，记录查看、编辑、归档、手动整理和故事级自动整理设置保留；旧故事级自定义记忆结构会迁移为故事专属 Memory Structure 预设，默认/共享导演会克隆为故事专属导演，历史记录不删除。
+- Game Mode: The Story Memory page now shows structure source read-only while keeping record viewing, editing, archiving, manual generation, and story-level auto-generation settings. Legacy story-local custom memory structures migrate into story-specific Memory Structure presets; default/shared directors are cloned per story, and historical records are preserved.
+- 不兼容变更：游戏模式结构化状态改为 Actor-centric 形态，旧 `resources.*`、`attributes.*`、`relations.*`、`conditions.*` 等全局状态路径会迁移到默认主角 Actor，例如 `actors.protagonist.state.resources.hp`；规则检定和数值计算以 Actor State 为真源，故事记忆中的 `current_state` 与 `rule_state_summary` 改为只读派生摘要，不再通过编辑记忆改变真实状态。
+- Breaking: Game Mode structured state is now actor-centric. Legacy global paths such as `resources.*`, `attributes.*`, `relations.*`, and `conditions.*` migrate to the default protagonist actor, for example `actors.protagonist.state.resources.hp`; rule checks and numeric calculations use Actor State as the source of truth, while story-memory `current_state` and `rule_state_summary` are read-only derived summaries and no longer mutate real state when edited.
+- 方案预设：进入页面时默认同时展开“故事导演”和“叙事风格”，目录标题与条目长文本会截断在侧栏内；内置事件包名称、事件卡展示文本和默认导演规划模板改为中文标题。
+- Presets: The directory now opens Story Directors and Narrative Styles by default, truncates long directory labels inside the sidebar, and defaults built-in event package names, event-card display text, and Director planning templates to Chinese headings.
+- 方案预设：默认“爽文核心事件包”的事件卡改为差异化预设内容，每类事件都有独立的背景融合、起承转合、回收、奖惩和约束说明。
+- Presets: The default Webnovel Core event package now uses differentiated preset content for each card, with event-specific fusion, arc, payoff, reward/cost, and guardrail guidance.
+- 资料库：新建资料项的自动 ID 不再在名称后追加随机 `_abcd` 后缀，改为稳定使用名称生成；普通资料写入会拒绝重名，酒馆角色卡导入遇到重名资料项时会自动使用 `-2`、`-3` 数字后缀。
+- Lore: Auto-generated lore item IDs no longer append random `_abcd` suffixes after the item name. Normal lore writes now reject duplicate names, while Tavern character-card imports resolve duplicate lore item names with `-2`, `-3` numeric suffixes.
+- WebUI：游戏模式顶部与新建故事线流程改为选择“故事导演”，叙事风格由导演方案自动决定；空开局页新增“配置导演”跳转入口。
+- WebUI: Game Mode now selects Story Directors in the top bar and new-story flow, with narrative style derived from the selected director; the empty opening screen adds a Configure Director jump entry.
+- WebUI：导演编排侧栏改为 Chat 式状态流展示后台导演进度和 `director.md` 文档状态；上下文分析弹窗的展开消息片段增加内缩层级与独立背景，避免和外层分组混淆。
+- WebUI: The Director sidebar now presents background director progress and `director.md` document status as a chat-style stream; expanded Context Analysis message parts now use nested indentation and distinct surfaces so they do not read as peer groups.
+- 不兼容变更：游戏模式后台导演规划从三份 Markdown 改为单份 `director.md`，`DirectorPlanDocs`、`visible_docs`、`StoryDirector.strategy.planning_templates` 和 `metadata.docs` 仅保留 `plan`；旧 `mainline/current_event/next_branches` API、配置和文件结构不再兼容。导演规划现在优先使用资料库中的重要角色、势力、规则和地点，并要求每个可玩回合保持更高信息密度、关系张力、节奏钩子、检定代价和失败推进；开局后的首次导演规划也改为后台非阻塞运行，输入区不再因导演状态锁住操作；导演写入 `director.md` 的工具进展会在右侧栏展示真实流式事件，并按实时输出隐藏配置仅显示路径和字数。
+- Breaking: Game Mode background Director planning now uses a single `director.md` instead of three Markdown docs. `DirectorPlanDocs`, `visible_docs`, `StoryDirector.strategy.planning_templates`, and `metadata.docs` now keep only `plan`; legacy `mainline/current_event/next_branches` APIs, config, and files are no longer compatible. Director planning now prioritizes important lore-library characters, factions, rules, and locations, and each playable turn must maintain higher information density, relationship tension, hooks, checks/costs, and fail-forward progress. The first post-opening Director plan now also runs as non-blocking background work, the composer no longer locks on Director status, and Director `director.md` tool writes stream into the right sidebar while respecting the live-output hide setting by showing only path and character count.
+- 方案预设：故事导演配置页重构为紧凑导演控制台，首屏展示模块链路、策略状态和资源摘要；事件包选择改为弹出面板，数值系统、TRPG 检定、开局选择和事件引用收进同一资源 Tab 区。
+- Presets: The Story Director settings page is now a compact director console with first-screen module links, strategy state, and resource summaries. Event package selection moved into a popover, and stats, TRPG checks, opening selection, and event references now live in one resource tab area.
+- 不兼容变更：游戏模式 `prepare_interactive_turn` 工具改为单次 1d20 检定输入，Agent 只需提交用户行为、意图、挑战、消耗、状态说明、优势/劣势、加成列表、5 档难度和四档后果；后端内置掷骰、加成求和和结果判定，seed 只做内部审计保存，工具返回简化后的命中后果。
+- Breaking: Game Mode `prepare_interactive_turn` now accepts a single 1d20 check request. The agent only submits action, intent, challenge, cost, state summary, advantage/disadvantage, bonus list, five-level difficulty, and four outcome definitions; the backend owns rolling, bonus summing, and outcome selection, keeps the seed only for internal audit, and returns a simplified selected consequence.
+- 不兼容变更：事件系统已扁平化为事件包；事件包直接包含 `events` 事件卡列表，故事导演改为通过 `module_refs.event_package_ids` 加载多个事件包，并使用 `event_packages_disabled` 控制开关。旧 `event_system_id`、`event_system_disabled`、`event_system.event_packages` 和 `custom_events` 会自动迁移为事件包/事件卡；前端和主 API 改用 `/api/event-packages`。
+- Breaking: Event Systems have been flattened into Event Packages. An Event Package directly contains an `events` card list; Story Directors now load multiple packages through `module_refs.event_package_ids` and use `event_packages_disabled` for the switch. Legacy `event_system_id`, `event_system_disabled`, `event_system.event_packages`, and `custom_events` are migrated into event packages/cards; the frontend and main API now use `/api/event-packages`.
+- 方案预设：图像方案、故事导演、事件包、数值规则系统和开局选择器编辑内置资源时改为与叙事风格一致的同 ID 覆盖；右上角“恢复内置”会删除覆盖并回到内置版本，不再自动复制为新的自定义预设。此变更不兼容旧的自动复制语义。
+- Presets: Image presets, Story Directors, Event Packages, Rule/TRPG Systems, and Opening Selectors now match Narrative Styles when editing built-ins: edits override the same built-in ID, and the top-right "Restore Built-in" action removes the override instead of creating a copied custom preset. This is incompatible with the previous auto-copy behavior.
+- 游戏模式：新建故事线时不再同步运行后台 Director Agent；导演会在用户完成第一回合开局正文后基于实际开局异步规划，首次规划未完成时也允许用户继续行动。Snapshot 与回合持久化事件默认只返回 `director_plan_status`，完整规划正文仍需在“导演编排”Tab 确认剧透后读取。
+- Game Mode: Creating a story no longer runs the background Director Agent synchronously. The Director now plans asynchronously from the user's persisted opening turn without blocking forward actions while the first plan is still running. Snapshots and turn-persisted events now return only `director_plan_status` by default; full plan text still requires spoiler confirmation in the Director Orchestration tab.
+- WebUI：游戏模式空故事线的开场控件改为“AI 生成开场 / 使用自定义开局 / 使用书籍预设”三种并列动作；书籍预设下拉改用 shadcn Select 并收进“使用书籍预设”组合内，按钮会直接使用当前选中的预设开场，不再把预设文本填入自定义输入框。
+- WebUI: The empty Game Mode story opening controls now present Generate with AI, Use custom opening, and Use book preset as peer actions; the book preset picker now uses shadcn Select inside the book-preset action group, and the button starts from the selected preset directly instead of copying preset text into the custom field.
+- WebUI：文风参考提炼弹窗右侧进展改用 Chat 消息组件渲染配置 Agent 流式输出；提炼完成后前端会读取生成的 `.denova/styles/*.md` 文件回填左侧编辑器，并支持基于 revision 保存用户二次编辑。
+- WebUI: The style-reference extraction dialog now renders Config Manager Agent streaming progress through the Chat message component. After extraction, the frontend reads the generated `.denova/styles/*.md` file back into the left editor and saves user follow-up edits with revision checks.
+- 游戏模式：右侧栏默认停留在故事记忆，并将导演编排移入独立 Tab；用户切到导演编排后需先确认剧透提示才会加载并显示导演规划、分支安排和规则审计内容。
+- Game Mode: The right sidebar now defaults to Story Memory and moves Director orchestration into its own tab; opening the Director tab requires confirming a spoiler warning before director plans, branch arrangements, and rule audits are loaded and shown.
+- 方案预设：编辑内置叙事风格时不再复制为新的自定义 ID，而是在用户空间以同一个内置 ID 覆盖当前叙事风格；覆盖后标题栏提供“恢复内置”按钮，可一键删除覆盖并回到代码内置版本。此变更不兼容旧的自动复制语义。
+- Presets: Editing a built-in narrative style no longer creates a copied custom ID. It now overrides the same built-in ID in user space, and the editor header shows a "Restore Built-in" action to remove the override and return to the code-defined default. This is incompatible with the previous auto-copy behavior.
+- Agent：本地工具 schema 改为尽量稳定注册；禁用文件、资料库、图像、Web 搜索、配置管理等能力时，相关工具会由 Denova orchestrator 在执行前按 capability 阻断，而不是总是从模型可见工具列表中移除。完全关闭配置管理相关能力的 SubAgent 仍不会注册配置管理工具。
+- Agent: Local tool schemas are now registered more stably. When file, lore, image, web search, or config-management capabilities are disabled, Denova's orchestrator blocks execution by capability before the tool runs instead of always removing the tool from the model-visible list. SubAgents with all config-management capabilities disabled still receive no config-manager tools.
+- 书籍管理：新建书籍、小说导入和角色卡导入到新书时默认写入用户级 `.denova/projects/<书名>`；旧版直接位于 `.denova/<书名>` 的书籍仍会被书架扫描和打开。
+- Books: New books, novel imports, and character-card imports into a new book now default to user-level `.denova/projects/<book>`; legacy books directly under `.denova/<book>` remain discoverable and openable.
+- 方案预设：预设页跟随顶部全局写作/游戏模式过滤模块类型；叙事风格和图像方案作为共享模块显示，故事导演、事件包、规则系统和开局选择器仅在游戏模式下显示，且故事导演在游戏模式模块列表中置顶。配置管理 Agent 文案同步固定模块归属，不新增资源字段或数据迁移。
+- Presets: The presets page now follows the top-level Writing/Game mode when filtering module types. Narrative styles and image presets are shared modules, while story directors, event packages, rule systems, and opening selectors appear only in Game Mode, with Story Directors listed first in the Game Mode module list. Config Manager Agent guidance now reflects fixed module ownership, with no new resource fields or data migration.
+- 方案预设：故事导演、事件包、规则系统和开局选择器的大型 JSON 配置改用 Monaco JSON 编辑器，支持直接编辑、滚动查看、代码折叠、默认自动换行，以及单按钮全折叠/全展开切换。
+- Presets: Large JSON configs for story directors, event packages, rule systems, and opening selectors now use the Monaco JSON editor with direct editing, scrolling, code folding, default line wrapping, and a single Collapse All / Expand All toggle.
+- 方案预设：故事导演内嵌数值系统、TRPG 检定、开局选择器，以及独立事件包、规则系统和开局选择器默认改为可视化编辑；仍可切换 JSON View，视图偏好会保存在浏览器本地，无效 JSON 会阻止保存和切换。
+- Presets: Story Director embedded Stat System, TRPG Checks, Opening Selector, plus standalone Event Package, Rule System, and Opening Selector now default to visual editing. JSON View remains available, view preference is stored locally in the browser, and invalid JSON blocks saving and switching.
+- 游戏模式：用户可见“叙事方案”更名为“叙事风格”，只负责文风、提示词槽位、场景风格和上下文策略；新建互动故事会分别保存 `story_teller_id` 与 `story_director_id`，开局抽取主路径改用故事导演，旧故事缺少 `story_director_id` 时回退 `default`，旧 Teller `orchestration` 仅作为兼容 fallback 保留。
+- Game Mode: Renamed user-visible "Narrative Plan" to "Narrative Style"; it now only owns prose style, prompt slots, scene style, and context policy. New interactive stories save both `story_teller_id` and `story_director_id`; opening rolls now use Story Directors, legacy stories without `story_director_id` fall back to `default`, and legacy Teller `orchestration` remains only as a compatibility fallback.
+- 游戏模式：故事导演改为保存叙事风格、事件包、规则系统、开局选择器和图像方案的实时引用；模块内容更新后会影响引用它的导演和后续故事回合，缺失或失效时使用最近一次成功解析快照并在组合器显示警告。内置叙事风格、故事导演、模块和图像方案支持同 ID 覆盖，并可从编辑器恢复为内置版本。故事导演组合器新增五类模块独立开关；关闭模块会保留原引用但停止解析、继承、上下文注入和默认事件回填。
+- Game Mode: Story Directors now store live references to narrative style, event packages, rule system, opening selector, and image preset. Module changes affect referencing directors and future story turns; missing or invalid modules fall back to the last successful resolved snapshot with composer warnings. Built-in narrative styles, directors, modules, and image presets support same-ID overrides and can be restored to built-in versions from the editor. The Story Director composer now has independent switches for all five module types; disabled modules keep their references but stop resolving, inheriting, injecting context, and refilling default events.
+- 方案预设：故事导演策略改为本地化枚举选择器，主线牵引、失败处理、节奏曲线和随机扰动会显示可读选项与说明，不再在编辑器中暴露裸英文标识。
+- Presets: Story Director strategy settings now use localized enum selectors with readable labels and descriptions for mainline guidance, failure handling, pacing, and random disturbance instead of exposing raw English identifiers in the editor.
+- Agent 架构：拆分 skills/session 大文件，新增 agent context 与 tool registry 模块，收敛模型上下文和工具装配的内部边界；不改变前端接口、配置字段或 workspace 数据格式。
+- Agent architecture: Split large skills/session files and added agent context plus tool registry modules to tighten internal model-context and tool-assembly seams, without changing frontend APIs, config fields, or workspace data formats.
+- 版本管理：支持从历史版本恢复单个文件；单文件恢复只作为当前工作区的未保存变更应用，不切换当前版本，也不会自动创建新版本。
+- Version management: Individual files can now be restored from historical versions. File restore is applied as unsaved workspace changes, without switching the current version or creating a new version automatically.
+- 消息中心：changelog 消息会按当前页面语言隔离中英内容，中文界面不再显示英文更新日志，英文界面不再显示中文更新日志；同一条 changelog 的已读状态继续跨语言共享。
+- Message center: Changelog messages are filtered by the current page language, so Chinese UI no longer shows English changelog text and English UI no longer shows Chinese changelog text; read state stays shared for the same changelog entry.
+- 资料库：`list_lore_items` 默认返回全量极简索引（ID、名称、简介），并支持 `query`/`type`/`limit` 检索；这是模型工具返回格式的行为变更。
+- Lore: `list_lore_items` now returns a compact all-item index by default (ID, name, brief) and supports `query`/`type`/`limit` lookup; this changes the model tool result format.
+- 发布流程：release brief 约定改为中英分组列表，避免用长段落混排双语说明。
+- Release workflow: Release briefs now use grouped bilingual bullet lists instead of long mixed-language paragraphs.
+
+### Fixed
+
+- Agent：修复 `interactive_director` 文件访问中间件误拦截 `apply_actor_state_patch` 和 `apply_story_memory_patches` 的问题；后台导演仍只允许读写当前分支 `director.md`，并继续拒绝 shell 等非授权工具。
+- Agent: Fixed the `interactive_director` file-access middleware incorrectly blocking `apply_actor_state_patch` and `apply_story_memory_patches`; the background Director still only reads/writes the current branch `director.md` and continues to reject shell and other unauthorized tools.
+- Agent：互动故事 `prepare_interactive_turn` 工具现在会在模型可见 schema 和提示词中明确 difficulty、rule.template、rule.roll_mode 等合法枚举，并将 `medium`、`moderate`、`very easy`、`d20_check` 等常见别名归一为标准值，减少互动回合因参数漂移导致的工具调用失败。
+- Agent: Interactive-story `prepare_interactive_turn` now exposes valid difficulty, rule.template, rule.roll_mode, and related enums in the model-visible schema and prompts, and normalizes common aliases such as `medium`, `moderate`, `very easy`, and `d20_check` to canonical values to reduce turn failures from argument drift.
+- WebUI：导演编排右栏的 Chat 状态流不再把 `director.md` 当作工具名展示；文件更新状态会显示为 `edit_file` 并把 `director.md` 放在 `file_path` 参数中，等待开局时不再伪造文件工具卡。
+- WebUI: The Director sidebar Chat status stream no longer displays `director.md` as a tool name. File-update status now uses `edit_file` with `director.md` as the `file_path`, and waiting-for-opening state no longer fabricates a file-tool card.
+- Agent：上下文分析的最终消息改为按对话回合分组展示，组内区分正文、工具调用和工具结果；保留到下一轮的 tool result 会移除 `[Denova tool result metadata]`，避免 Denova 内部元信息污染后续上下文。
+- Agent: Context Analysis now groups final messages by conversation turn and separates body, tool calls, and tool results inside each group. Retained tool results now strip `[Denova tool result metadata]` before entering the next-turn context.
+- 方案预设：左侧目录展开状态不再把故事导演作为特殊常开分组；切到或展开图像方案、叙事风格等其他分组时，不会自动带开故事导演。
+- Presets: The left directory no longer treats Story Directors as an always-open special group; switching to or expanding image presets, narrative styles, or other groups no longer auto-expands Story Directors.
+- WebUI：文风参考导入弹窗的 AI 提炼按钮改名为“AI提炼文风”，提炼时在右侧展示配置 Agent 流式进展；提炼完成后会把生成的 Markdown 回填到弹窗内容区，并由前端稳定保存和选中文风参考，不再因配置 Agent 未自行写入目标文件而失败。
+- WebUI: Renamed the style-reference extraction action to "AI Extract Style", added a right-side live Config Manager Agent progress panel, and now replaces the dialog content with the generated Markdown while saving/selecting the style reference through the frontend, avoiding failures when the Agent does not write the target file itself.
+- WebUI：修复文风参考提炼开始后右侧 Chat 进展列表没有可见高度，导致流式消息实际追加但用户看不到的问题；开始提炼后会立即显示连接状态。
+- WebUI: Fixed the style-reference extraction dialog's right-side Chat progress list having no visible height after extraction starts, which hid appended streaming messages; extraction now shows a connection status immediately.
+- 开发启动：`bootstrap.sh be/all` 现在把配置解析出的后端端口显式传给 Go 服务；`--dev`/`--dev-mode` 启动时目标端口被占用会直接暴露冲突，不再静默退到 8081 等新端口，避免 Vite `/api` 代理继续打到旧后端。
+- Dev startup: `bootstrap.sh be/all` now passes the resolved backend port explicitly to the Go service. `--dev`/`--dev-mode` startup surfaces target-port conflicts instead of silently falling back to 8081 or another port, preventing the Vite `/api` proxy from continuing to hit an old backend.
+- 导入：txt/md 小说导入与文风参考文件上传支持 UTF-8、UTF-16 和 GB18030/GBK 中文文本，避免 GBK 中文文件被解码成乱码。
+- Import: txt/md novel import and style-reference uploads now support UTF-8, UTF-16, and GB18030/GBK Chinese text, preventing GBK Chinese files from decoding as garbled text.
+- WebUI：修复项目文件树行内「更多操作」按钮打开菜单时偶发定位到页面左上角的问题；按钮现在保留可测量锚点，仅用透明度控制 hover 显示。
+- WebUI: Fixed project file-tree row "More actions" menus sometimes opening at the page's top-left; the trigger now keeps a measurable anchor and only uses opacity for hover visibility.
+- Agent：Gemini OpenAI 兼容端点不再发送不支持的 `enable_thinking` 字段，避免请求直接返回 400；Gemini 思考强度继续通过 `reasoning_effort` 配置。
+- Agent: Gemini OpenAI-compatible endpoints no longer receive the unsupported `enable_thinking` field, preventing immediate 400 errors; Gemini thinking strength remains configurable through `reasoning_effort`.
+- 游戏模式：互动正文 Agent 的输出链路只保留裸故事正文；正文落库不再解析内联状态或快捷选择块，状态与快捷选择继续由后台/独立流程生成。
+- Game Mode: The interactive prose agent output path now keeps only bare story text; prose persistence no longer parses inline state or quick-choice blocks, and state plus quick choices continue to be generated by backend/independent flows.
+- 启动配置：`bootstrap.sh` 现在会按配置层级读取 `backend_port` / `frontend_port`，不再用脚本硬编码默认值覆盖 `config.toml`；开发模式启动 Vite 时也会注入实际后端端口，且前端自动选端口会避开已选后端端口，避免端口冲突后代理或监听仍落到旧端口。
+- Startup config: `bootstrap.sh` now reads `backend_port` / `frontend_port` from the normal config layers instead of overriding `config.toml` with script defaults; dev-mode Vite startup also receives the actual backend port, and frontend port selection avoids the selected backend port so conflict fallback does not keep proxying or listening on the old port.
+- 工作区：修复同一本书同时存在 `.denova` 和旧 `.nova` 目录时，新建的空 `.denova` 状态会遮住 `.nova` 中已有资料库等工作区私有数据的问题。
+- Workspace: Fixed mixed `.denova` / legacy `.nova` book directories where newly generated empty `.denova` state could hide existing private workspace data such as lore.
+- WebUI：修复写作 Chat 和 SubAgent 详情在多条消息共用同一 `created_at` 时生成重复虚拟列表 key 的问题，避免 React 行复用异常导致底部锁定和“回到底部”行为不稳定。
+- WebUI: Fixed duplicate virtual-list keys in Writing Chat and SubAgent details when multiple messages share the same `created_at`, preventing React row reuse issues that could destabilize bottom locking and "Back to bottom" behavior.
+- WebUI：修复写作 Chat 与游戏模式 live 工具卡在流式工具事件先按 `index` 创建、后续才带 `id` 时无法回填 `execute` 结果的问题；后端展示历史会在正常完成时收敛 pending 工具，避免工具实际完成后卡片仍显示执行中。
+- WebUI: Fixed Writing Chat and Game Mode live tool cards failing to attach `execute` results when streaming tool events start with `index` and receive `id` later; persisted display history now also settles pending tools on successful completion so finished tools do not remain visually in progress.
+- 方案预设：左侧目录新增单图标按钮，可一键展开或折叠所有可见分组，减少逐个展开模块的重复操作。
+- Presets: Added a single icon-only control in the left directory to expand or collapse all visible groups at once.
+- 方案预设：事件包可视化编辑器会按屏幕高度限制事件卡编辑区，长事件卡列表和详情可在局部上下滚动，不再撑出工作台底部。
+- Presets: The Event Package visual editor now constrains event-card editors to the viewport height, letting long card lists and details scroll locally instead of overflowing the workspace.
+- 消息中心：不再把 `CHANGELOG.md` 的 `Unreleased` 段落生成通知，开发期记录更新不会反复点亮未读提醒。
+- Message center: `CHANGELOG.md` `Unreleased` entries no longer generate notifications, so development notes do not repeatedly trigger unread badges.
+- Agent：OpenAI 兼容流式请求会过滤 SSE 心跳空行、注释和事件元数据，避免长推理或代理保活时触发 `stream has sent too many empty messages`。
+- Agent: OpenAI-compatible streaming requests now filter SSE heartbeat blank lines, comments, and event metadata to avoid `stream has sent too many empty messages` during long reasoning or proxy keep-alives.
+- WebUI：应用内更新执行“重启并安装”后，前端会等待新后端可用并带缓存刷新标记自动重载页面，避免用户手动强刷才看到新版前端。
+- WebUI: After in-app "Restart and install", the frontend now waits for the restarted backend and reloads with a cache-busting marker so users do not need to hard-refresh manually.
+- WebUI：补充历史 `/sw.js` 清理脚本，旧浏览器 Service Worker 注册会自动注销，避免 Windows 上反复出现 Hertz 找不到 `web/sw.js` 的错误日志。
+- WebUI: Added a cleanup script for historical `/sw.js` service-worker registrations, so stale browser state unregisters itself and no longer triggers repeated Hertz missing-file logs on Windows.
+
 ## [v0.1.18] - 2026-07-01
 
 ### Brief / 简要说明
 
-- 中文：本版本完成 Denova 品牌与分发命名切换，新增新用户引导、消息中心、PWA/移动端主屏体验、可内嵌前端的单文件自托管能力，并大幅补齐移动端写作与游戏模式的输入、弹窗、文件操作、故事记忆和分支导航体验。图像方案、书籍封面生成、互动图像回写、Plan Mode 展示、章节正文隐藏输出和资源保存冲突保护也更稳定。兼容性提示：Release 包不再提供 `nova` / `nova.exe` / `nova-updater` 别名，新安装请直接运行 `denova` / `denova.exe`。
-- English: This release completes the Denova branding and distribution rename, adds onboarding, a message center, PWA/mobile home-screen support, and a self-hosting path where the backend can embed the web app. It also improves mobile Writing and Game Mode input, dialogs, file actions, story memory, and branch navigation. Image presets, cover generation, interactive image writes, Plan Mode rendering, hidden chapter-body streaming, and resource conflict protection are more reliable. Compatibility note: release packages no longer include `nova`, `nova.exe`, or `nova-updater` aliases; new installs should run `denova` / `denova.exe` directly.
+#### 中文
+
+- 完成 Denova 品牌与分发命名切换；兼容性提示：Release 包不再提供 `nova` / `nova.exe` / `nova-updater` 别名，新安装请直接运行 `denova` / `denova.exe`。
+- 新增新用户引导、消息中心、PWA/移动端主屏体验，以及可内嵌前端的单文件自托管能力。
+- 大幅补齐移动端写作与游戏模式的输入、弹窗、文件操作、故事记忆和分支导航体验。
+- 图像方案、书籍封面生成、互动图像回写、Plan Mode 展示、章节正文隐藏输出和资源保存冲突保护更稳定。
+
+#### English
+
+- Completed the Denova branding and distribution rename; compatibility note: release packages no longer include `nova`, `nova.exe`, or `nova-updater` aliases, and new installs should run `denova` / `denova.exe` directly.
+- Added onboarding, a message center, PWA/mobile home-screen support, and a self-hosting path where the backend can embed the web app.
+- Filled in more mobile Writing and Game Mode input, dialog, file action, story memory, and branch navigation workflows.
+- Made image presets, cover generation, interactive image writes, Plan Mode rendering, hidden chapter-body streaming, and resource conflict protection more reliable.
 
 ### Added
 
@@ -90,7 +278,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - WebUI：顶层“互动模式 / Interactive Mode”更名为“游戏模式 / Game Mode”，强调其定位是互动文字冒险游戏工作台；内部 `interactive` API、配置键和存储目录保持不迁移。
 - WebUI：顶层“叙事编排 / Narrative Direction”更名为“方案预设 / Presets”，内部 `teller` 路由、一级菜单行为和模式切换规则保持不迁移；该页现在并列管理叙事方案和图像方案。
 - Breaking：旧 `Teller.image_prompt` 已下线，不迁移、不读取、不展示、不兜底；图像生成风格改由独立图像方案预设保存到 `image-presets/*.json`。
-- 游戏模式：互动叙事 Agent 不再要求用 XML 标签包裹正文，默认直接输出故事正文；历史或异常输出里的 `<NARRATIVE>` 标签仍会兼容清洗。
+- 游戏模式：互动叙事 Agent 不再要求用 XML 标签包裹正文，默认直接输出故事正文；历史或异常输出里的旧正文包装仍会兼容清洗。
 - Agent：通用 General SubAgent 的内置默认范围收窄为仅写作 Agent 和 Automation Agent 启用；互动叙事 Agent 和配置管理 Agent 默认继承关闭，仍可在 Agents 页单独开启。
 - Agent：自定义 SubAgent 的 `parents` 改为显式父 Agent 归属列表，空列表不再表示所有父 Agent 共享；Agents 页新增“仅从当前父 Agent 移除”和“全部删除”两种删除范围。
 - Agent：工具结果默认不再截断，设置页 Agent 分区新增按 KB 配置的工具结果截断上限；设置为 `0` 或留空时不截断。
@@ -545,7 +733,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 资料库支持渐进式加载：条目新增常驻、简介自动匹配和手动引用三种加载策略；IDE/互动 Agent 会常驻注入核心资料、展示含简介的非常驻资料索引，并可通过只读工具按需读取资料正文。
 - IDE 创作提示词改为以结构化资料库承载角色、世界观、地点、势力、规则和物品等长期设定，不再引导读写 `setting/characters.md` 或 `setting/world-building.md`；作品状态注入也停止回退读取这两个旧文件。
 - 后端 Agent 构建接入 `max_iteration` 与 `model_max_retries` 运行时设置，不再使用构建时硬编码值。
-- 互动故事 Agent 不再随正文输出 `<HOT_STATE>` 快捷选择，也不再对缺失选择做兜底生成；快捷选择改为用户点击“选择”时由独立 LLM 调用按当前上下文生成。
+- 互动故事 Agent 不再随正文输出内联快捷选择，也不再对缺失选择做兜底生成；快捷选择改为用户点击“选择”时由独立 LLM 调用按当前上下文生成。
 - 互动模式快捷行动建议生成后会按当前剧情节点持久化到故事 JSONL，刷新后优先复用已生成结果；状态 Agent 不再维护可选择入口。
 - 互动模式快捷行动建议不再自动展示，改为输入区显式按钮触发，面板可手动收起并保留生成结果。
 - 互动模式底部输入区改为更紧凑的高度和独立行高，减少对故事阅读空间的占用。

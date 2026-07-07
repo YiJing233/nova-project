@@ -27,6 +27,7 @@ func snapshotFromLines(storyID, branchID string, meta StoryMeta, lines []StoryEv
 				return Snapshot{}, err
 			}
 			turn.DisplayEvents = sanitizeDisplayEvents(turn.DisplayEvents)
+			turn.ModelContextMessages = sanitizeModelContextMessages(turn.ModelContextMessages)
 			versions := turnVersions[turnVersionKey(turn.BranchID, parentIDFromRaw(record.Raw))]
 			if len(versions) > 1 {
 				turn.Versions = versions
@@ -103,6 +104,7 @@ func turnVersionKey(branchID, parentID string) string {
 func initialStoryState() map[string]any {
 	return map[string]any{
 		"on_stage":    []any{},
+		"actors":      map[string]any{},
 		"characters":  map[string]any{},
 		"events":      []any{},
 		"scene":       map[string]any{},
@@ -231,15 +233,22 @@ func buildStoryGraph(meta StoryMeta, lines []StoryEventRecord, events map[string
 		if parentID != "" {
 			parentID = nearestTurnAncestor(parentID, events)
 		}
+		terminal := turn.TerminalOutcome != nil && turn.TerminalOutcome.Terminal
+		terminalType := ""
+		if turn.TerminalOutcome != nil {
+			terminalType = turn.TerminalOutcome.Type
+		}
 		nodes = append(nodes, PlotNode{
-			ID:       turn.ID,
-			ParentID: parentID,
-			BranchID: turn.BranchID,
-			Title:    compactText(turn.User, 24),
-			Summary:  compactText(turn.Narrative, 72),
-			Ts:       turn.Ts,
-			Current:  currentPath[turn.ID],
-			Head:     headTurns[turn.ID],
+			ID:           turn.ID,
+			ParentID:     parentID,
+			BranchID:     turn.BranchID,
+			Title:        compactText(turn.User, 24),
+			Summary:      compactText(turn.Narrative, 72),
+			Ts:           turn.Ts,
+			Current:      currentPath[turn.ID],
+			Head:         headTurns[turn.ID],
+			Terminal:     terminal,
+			TerminalType: terminalType,
 		})
 	}
 	return StoryGraph{Nodes: nodes, Branches: branchSummaries(meta)}

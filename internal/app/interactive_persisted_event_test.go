@@ -1,6 +1,7 @@
 package app
 
 import (
+	"encoding/json"
 	"testing"
 
 	"denova/internal/agent"
@@ -18,12 +19,20 @@ func TestEmitInteractiveTurnPersistedUsesCurrentSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	conversation := newInteractiveConversation(store, t.TempDir(), workspace, story.ID, "main", "继续前进", 800, nil)
-	if err := conversation.AppendAssistantWithThinking(`<NARRATIVE>
-雾气在门外散开。
-</NARRATIVE>
-<STATE_DELTA>
-{"ops":[{"op":"merge","path":"scene","value":{"location":"旧门外"}}]}
-</STATE_DELTA>`, "先确认场景。"); err != nil {
+	if err := conversation.AppendAssistantWithThinking("雾气在门外散开。", "先确认场景。"); err != nil {
+		t.Fatal(err)
+	}
+	turn, _, ok := conversation.LastTurnForState()
+	if !ok {
+		t.Fatal("expected last turn")
+	}
+	if _, err := store.AppendStateDelta(story.ID, interactive.AppendStateDeltaRequest{
+		ParentID: turn.ID,
+		BranchID: turn.BranchID,
+		Ops: []interactive.StateOp{
+			{Op: "merge", Path: "scene", Value: map[string]any{"location": "旧门外"}},
+		},
+	}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -47,6 +56,26 @@ func TestEmitInteractiveTurnPersistedUsesCurrentSnapshot(t *testing.T) {
 	}
 	if payload.Turn.User != "继续前进" || payload.Turn.Narrative != "雾气在门外散开。" || payload.Turn.Thinking != "先确认场景。" {
 		t.Fatalf("payload turn mismatch: %#v", payload.Turn)
+	}
+	if payload.DirectorPlanStatus == nil || payload.DirectorPlanStatus.Status == "" {
+		t.Fatalf("payload director status should come from current snapshot: %#v", payload.DirectorPlanStatus)
+	}
+	if payload.DirectorPlanStatus.Status != interactive.DirectorPlanStatusWaitingOpening {
+		t.Fatalf("payload director status mismatch: %#v", payload.DirectorPlanStatus)
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := raw["director_plan"]; ok {
+		t.Fatalf("persisted turn payload should not expose director plan docs: %s", string(encoded))
+	}
+	if _, ok := raw["visible_docs"]; ok {
+		t.Fatalf("persisted turn payload should not expose director visible docs: %s", string(encoded))
 	}
 	scene := payload.State["scene"].(map[string]any)
 	if scene["location"] != "旧门外" {

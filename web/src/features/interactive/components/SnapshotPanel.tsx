@@ -31,6 +31,17 @@ export function SnapshotPanel({ snapshot, loading = false }: { snapshot: Snapsho
   const pov = pickString(state, ['pov', 'viewpoint', '视角'])
   const sceneEntries = Object.entries(scene).filter(([key]) => !SCENE_METRIC_KEYS.has(key))
   const stateStatus = snapshot?.current_turn?.state_status
+  const directorPlan = snapshot?.director_plan
+  const directorStatus = snapshot?.director_plan_status
+  const directorMetadata = directorPlan?.metadata
+  const directorRun = directorStatus || directorMetadata?.last_run
+  const ruleResolution = snapshot?.current_turn?.rule_resolution
+  const ruleRequest = ruleResolution?.request
+  const ruleResult = ruleResolution?.result
+  const stateChanges = ruleResult?.state_changes || []
+  const terminalCandidate = ruleResolution?.terminal_candidate
+  const terminalOutcome = snapshot?.current_turn?.terminal_outcome
+  const hasRuleAudit = !!ruleResolution || !!terminalOutcome
 
   return (
     <aside className="nova-sidebar flex h-full min-w-0 flex-col border-l p-4">
@@ -75,6 +86,106 @@ export function SnapshotPanel({ snapshot, loading = false }: { snapshot: Snapsho
             {t('snapshot.sceneNotesPlaceholder')}
           </div>
         </section>
+
+        {directorStatus || directorPlan ? (
+          <section className={panelSectionClass}>
+            <div className={sectionTitleClass}>
+              <Sparkles className="h-3.5 w-3.5" />
+              {t('snapshot.director.title')}
+            </div>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(72px,1fr))] gap-2">
+              <SnapshotMetric label={t('snapshot.director.status')} value={directorRun?.status || t('snapshot.noRecord')} />
+              <SnapshotMetric label={t('snapshot.director.docs')} value={directorStatus ? `${directorStatus.completed_docs}/${directorStatus.planned_docs}` : String(Object.keys(directorMetadata?.docs || {}).length || 1)} />
+              <SnapshotMetric label={t('snapshot.director.branchPlanningTurns')} value={String(directorMetadata?.branch_planning_turns || 5)} />
+            </div>
+            {directorRun ? (
+              <div className={`${panelCardClass} mt-3 p-2 text-xs text-[var(--nova-text-muted)]`}>
+                <div className="mb-1 font-medium text-[var(--nova-text)]">{t('snapshot.director.lastRun')}</div>
+                <StateValue value={compactRecord({
+                  status: directorRun.status,
+                  summary: directorRun.summary,
+                  error: directorRun.error,
+                  source_turn_id: directorRun.source_turn_id,
+                  updated_at: directorRun.updated_at,
+                })} />
+              </div>
+            ) : null}
+          </section>
+        ) : null}
+
+        {hasRuleAudit ? (
+          <section className={panelSectionClass}>
+            <div className={sectionTitleClass}>
+              <Activity className="h-3.5 w-3.5" />
+              {t('snapshot.ruleAudit.title')}
+            </div>
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(72px,1fr))] gap-2">
+              <SnapshotMetric label={t('snapshot.ruleAudit.intent')} value={ruleRequest?.intent || t('snapshot.noRecord')} />
+              <SnapshotMetric label={t('snapshot.ruleAudit.difficulty')} value={ruleRequest?.difficulty || t('snapshot.noRecord')} />
+              <SnapshotMetric label={t('snapshot.ruleAudit.outcome')} value={ruleResult?.outcome || t('snapshot.noRecord')} />
+            </div>
+            {ruleRequest ? (
+              <div className={`${panelCardClass} mt-3 p-2 text-xs text-[var(--nova-text-muted)]`}>
+                <div className="mb-1 font-medium text-[var(--nova-text)]">{t('snapshot.ruleAudit.request')}</div>
+                <StateValue value={compactRecord({
+                  action: ruleRequest.action,
+                  challenge: ruleRequest.challenge,
+                  cost: ruleRequest.cost,
+                  state: ruleRequest.state,
+                  rule: ruleRequest.rule,
+                  bonuses: ruleRequest.bonuses,
+                })} />
+              </div>
+            ) : null}
+            <div className="mt-3 space-y-2 text-xs text-[var(--nova-text-muted)]">
+              {ruleResult ? (
+                <article className={`${panelCardClass} p-2`}>
+                  <div className="mb-1 flex items-start justify-between gap-2">
+                    <div className="min-w-0 font-medium text-[var(--nova-text)]">{ruleResult.label || ruleRequest?.challenge || t('snapshot.ruleAudit.result')}</div>
+                    <Badge variant="outline" className={`h-5 shrink-0 border-[var(--nova-border)] bg-[var(--nova-surface)] px-1.5 text-[10px] ${ruleOutcomeClass(ruleResult.outcome)}`}>
+                      {ruleResult.outcome}
+                    </Badge>
+                  </div>
+                  <StateValue value={compactRecord({
+                    dice: ruleResult.dice,
+                    roll_mode: ruleResult.roll_mode,
+                    rolls: ruleResult.rolls,
+                    kept_roll: ruleResult.kept_roll,
+                    bonus_total: ruleResult.bonus_total,
+                    target: ruleResult.target,
+                    total: ruleResult.total,
+                    result: ruleResult.result,
+                    constraints: ruleResult.constraints,
+                  })} />
+                </article>
+              ) : <div className="text-xs text-[var(--nova-text-muted)]">{t('snapshot.ruleAudit.noResults')}</div>}
+            </div>
+            {ruleResolution?.rule_constraints?.length ? (
+              <div className="mt-3 text-xs text-[var(--nova-text-muted)]">
+                <LabeledList label={t('snapshot.ruleAudit.constraints')} items={ruleResolution.rule_constraints} empty={t('snapshot.ruleAudit.noConstraints')} />
+              </div>
+            ) : null}
+            {stateChanges.length ? (
+              <div className="mt-3 text-xs text-[var(--nova-text-muted)]">
+                <LabeledList label={t('snapshot.ruleAudit.stateChanges')} items={stateChanges} empty={t('snapshot.ruleAudit.noStateOps')} />
+              </div>
+            ) : null}
+            {terminalCandidate || terminalOutcome ? (
+              <div className={`${panelCardClass} mt-3 p-2 text-xs text-[var(--nova-text-muted)]`}>
+                <div className="mb-1 font-medium text-[var(--nova-text)]">{t('snapshot.ruleAudit.terminal')}</div>
+                <StateValue value={compactRecord({
+                  candidate_type: terminalCandidate?.type,
+                  candidate_reason: terminalCandidate?.reason,
+                  check_id: terminalCandidate?.check_id,
+                  final_type: terminalOutcome?.type,
+                  final_reason: terminalOutcome?.reason,
+                  final_narrative_summary: terminalOutcome?.final_narrative_summary,
+                  restart_suggestions: terminalOutcome?.restart_suggestions,
+                })} />
+              </div>
+            ) : null}
+          </section>
+        ) : null}
 
         <section className={panelSectionClass}>
           <div className={sectionTitleClass}>
@@ -342,6 +453,21 @@ function formatScalar(value: unknown, t: (key: string) => string) {
   if (typeof value === 'string') return value
   if (typeof value === 'number' || typeof value === 'boolean') return String(value)
   return JSON.stringify(value)
+}
+
+function compactRecord(source: Record<string, unknown>) {
+  return Object.fromEntries(Object.entries(source).filter(([, value]) => {
+    if (value === null || value === undefined) return false
+    if (typeof value === 'string') return value.trim() !== ''
+    if (Array.isArray(value)) return value.length > 0
+    return true
+  }))
+}
+
+function ruleOutcomeClass(outcome: string) {
+  if (outcome.includes('success')) return 'text-[var(--nova-success)]'
+  if (outcome.includes('failure') || outcome === 'error') return 'text-[var(--nova-danger)]'
+  return 'text-[var(--nova-text-muted)]'
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {

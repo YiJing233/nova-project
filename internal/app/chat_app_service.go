@@ -13,6 +13,7 @@ import (
 	"denova/internal/imagepreset"
 	"denova/internal/interactive"
 	"denova/internal/session"
+	"denova/internal/styleref"
 )
 
 // ChatAppService 负责普通创作 Agent 任务与会话管理。
@@ -273,7 +274,7 @@ func (s *ChatAppService) StartTask(req agent.ChatRequest) *Task {
 	}
 
 	task := NewTask(func(ctx context.Context, task *Task, emit func(agent.Event)) {
-		log.Printf("[agent-task] run begin id=%s message_len=%d references=%d lore_references=%d style_scenes=%d style_rules=%d selections=%d plan_mode=%v writing_skill=%s", task.ID(), len(req.Message), len(req.References), len(req.LoreReferences), len(req.StyleScenes), len(req.StyleRules), len(req.Selections), req.PlanMode, req.WritingSkill)
+		log.Printf("[agent-task] run begin id=%s message_len=%d references=%d lore_references=%d style_scenes=%d style_rules=%d selections=%d plan_mode=%v teller_id=%s writing_skill=%s", task.ID(), len(req.Message), len(req.References), len(req.LoreReferences), len(req.StyleScenes), len(req.StyleRules), len(req.Selections), req.PlanMode, req.TellerID, req.WritingSkill)
 		runtimeContexts := agent.IDEWorkspaceRuntimeContextsForRequest(runtime.state, req)
 		conversation := agent.NewSessionConversationForAgentWithRuntimeContexts(
 			runtime.sess,
@@ -418,14 +419,18 @@ func (s *ChatAppService) prepareIDEChatRuntime(req agent.ChatRequest, abortRunni
 		applyLayeredSettingsToConfig(&runtime.cfg, layered)
 		applyRequestLocaleToConfig(&runtime.cfg, req.Locale)
 		runtime.cfg.IDEStoryTellerID = layered.Effective.IDEStoryTellerID
+		if requestTellerID := strings.TrimSpace(req.TellerID); requestTellerID != "" {
+			runtime.cfg.IDEStoryTellerID = requestTellerID
+		}
 		if runtime.cfg.IDEStoryTellerID == "" {
 			runtime.cfg.IDEStoryTellerID = "classic"
 		}
+		req.TellerID = runtime.cfg.IDEStoryTellerID
 		log.Printf("[agent-task] load ide teller id=%s workspace=%s", runtime.cfg.IDEStoryTellerID, runtime.workspace)
 
 		teller := loadInteractiveTeller(novaDir, runtime.cfg.IDEStoryTellerID)
-		if len(teller.StyleRules) > 0 {
-			converted := convertTellerStyleRules(teller.StyleRules, req.StyleScenes)
+		if len(teller.StyleRefs) > 0 || len(teller.StyleRules) > 0 {
+			converted := convertTellerStyleRules(novaDir, teller.StyleRefs, teller.StyleRules, req.StyleScenes)
 			req.StyleRules = converted
 			log.Printf("[agent-task] inject teller style rules teller_id=%s scenes=%q count=%d rules=%q", teller.ID, req.StyleScenes, len(converted), appStyleRuleNames(converted))
 		}
@@ -516,25 +521,68 @@ func (s *ChatAppService) AbortTask() {
 func appStyleRuleNames(rules []agent.StyleRule) []string {
 	names := make([]string, 0, len(rules))
 	for _, rule := range rules {
-		names = append(names, fmt.Sprintf("%s -> %d contents", rule.Scene, len(rule.StyleContents)))
+		scene := strings.TrimSpace(rule.Scene)
+		if rule.Global {
+			scene = "global"
+		}
+		names = append(names, fmt.Sprintf("%s -> %d refs, %d legacy contents", scene, len(rule.StyleReferences), len(rule.StyleContents)))
 	}
 	return names
 }
 
-func convertTellerStyleRules(rules []interactive.StyleRule, scenes []string) []agent.StyleRule {
-	converted := make([]agent.StyleRule, 0, len(rules))
+func convertTellerStyleRules(novaDir string, globalRefs []string, rules []interactive.StyleRule, scenes []string) []agent.StyleRule {
+	converted := make([]agent.StyleRule, 0, len(rules)+1)
 	allowed := styleSceneSet(scenes)
+	styleRefs := styleref.NewLibrary(novaDir)
+	if len(globalRefs) > 0 {
+		converted = append(converted, agent.StyleRule{
+			Global:          true,
+			StyleReferences: styleReferencesForPrompt(styleRefs.Resolve(globalRefs)),
+		})
+	}
 	for _, r := range rules {
 		scene := strings.TrimSpace(r.Scene)
-		if scene == "" || len(r.StyleContents) == 0 {
+		if scene == "" || (len(r.StyleRefs) == 0 && len(r.StyleContents) == 0) {
+			continue
+		}
+		if isGlobalStyleScene(scene) {
+			converted = append(converted, agent.StyleRule{
+				Global:          true,
+				StyleReferences: styleReferencesForPrompt(styleRefs.Resolve(r.StyleRefs)),
+				StyleContents:   r.StyleContents,
+			})
 			continue
 		}
 		if len(allowed) > 0 && !allowed[scene] {
 			continue
 		}
-		converted = append(converted, agent.StyleRule{Scene: scene, StyleContents: r.StyleContents})
+		converted = append(converted, agent.StyleRule{
+			Scene:           scene,
+			StyleReferences: styleReferencesForPrompt(styleRefs.Resolve(r.StyleRefs)),
+			StyleContents:   r.StyleContents,
+		})
 	}
 	return converted
+}
+
+func isGlobalStyleScene(scene string) bool {
+	normalized := strings.ToLower(strings.TrimSpace(scene))
+	return normalized == "全局" || normalized == "global"
+}
+
+func styleReferencesForPrompt(refs []styleref.Reference) []agent.StyleReference {
+	result := make([]agent.StyleReference, 0, len(refs))
+	for _, ref := range refs {
+		result = append(result, agent.StyleReference{
+			Name:        ref.Name,
+			Description: ref.Description,
+			Path:        ref.Path,
+			DisplayPath: ref.DisplayPath,
+			Missing:     ref.Missing,
+			Error:       ref.Error,
+		})
+	}
+	return result
 }
 
 func styleSceneSet(scenes []string) map[string]bool {

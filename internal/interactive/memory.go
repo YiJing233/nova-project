@@ -14,8 +14,9 @@ import (
 
 const (
 	defaultMemoryImportance    = 3
-	defaultStoryMemoryInterval = 3
-	maxMemoryTextBytes         = 12 * 1024
+	defaultStoryMemoryInterval = 6
+	maxMemoryTextBytes         = DirectorContextMinBytes
+	maxStoryMemorySchemaBytes  = DirectorContextMinBytes
 	maxMemoryListItems         = 24
 	maxMemoryRecalls           = 20
 )
@@ -30,12 +31,63 @@ type interactiveMemoryBook struct {
 	Recalls    []InteractiveMemoryRecall `json:"recalls,omitempty"`
 }
 
+type storyMemoryStructureSource struct {
+	ID       string
+	Name     string
+	Disabled bool
+}
+
 func (s *Store) memoryDir() string {
 	return filepath.Join(s.root, "interactive", "memory")
 }
 
 func (s *Store) memoryPath(storyID string) string {
 	return filepath.Join(s.memoryDir(), "story-"+storyID+".json")
+}
+
+func (s *Store) storyMemoryStructuresForStoryLocked(meta StoryMeta, book interactiveMemoryBook) ([]StoryMemoryStructure, storyMemoryStructureSource) {
+	source := storyMemoryStructureSource{ID: "legacy", Name: "Story Memory"}
+	if strings.TrimSpace(s.novaDir) == "" {
+		return book.Structures, source
+	}
+	directorID := NormalizeStoryDirectorID(meta.StoryDirectorID)
+	if directorID == "" {
+		directorID = DefaultStoryDirectorID
+	}
+	director, err := NewStoryDirectorLibrary(s.novaDir).Get(directorID)
+	if err != nil {
+		log.Printf("[interactive-memory] fallback to story-local memory structures story_id=%s director_id=%s error=%v", meta.StoryID, directorID, err)
+		return book.Structures, source
+	}
+	refs := NormalizeStoryDirectorModuleRefs(director.ModuleRefs)
+	source = storyMemoryStructureSource{
+		ID:       firstNonEmptyString(refs.MemoryStructureID, DefaultStoryMemoryStructureModuleID),
+		Disabled: refs.MemoryStructureDisabled,
+	}
+	if module, err := NewStoryMemoryStructureLibrary(s.novaDir).Get(source.ID); err == nil {
+		source.Name = module.Name
+	} else {
+		source.Name = source.ID
+	}
+	structures := normalizeStoryMemoryStructuresForModule(director.ResolvedSnapshot.StoryMemoryStructures)
+	if len(structures) == 0 {
+		if module, err := NewStoryMemoryStructureLibrary(s.novaDir).Get(source.ID); err == nil {
+			structures = module.Structures
+			source.Name = module.Name
+		}
+	}
+	if len(structures) == 0 {
+		log.Printf("[interactive-memory] fallback to story-local memory structures story_id=%s director_id=%s memory_structure_id=%s", meta.StoryID, directorID, source.ID)
+		return book.Structures, source
+	}
+	return structures, source
+}
+
+func runtimeStoryMemoryStructures(structures []StoryMemoryStructure, source storyMemoryStructureSource) []StoryMemoryStructure {
+	if source.Disabled {
+		return []StoryMemoryStructure{}
+	}
+	return structures
 }
 
 func (s *Store) InteractiveMemory(storyID, branchID string, includeArchived bool) (InteractiveMemoryState, error) {
@@ -54,8 +106,9 @@ func (s *Store) InteractiveMemory(storyID, branchID string, includeArchived bool
 	if err != nil {
 		return InteractiveMemoryState{}, err
 	}
+	structures, _ := s.storyMemoryStructuresForStoryLocked(meta, book)
 	records := visibleStoryMemoryRecords(book.Records, branchID, eventPathSet(branch.Head, lines), includeArchived)
-	entries := storyMemoryRecordsToInteractiveEntries(records, book.Structures)
+	entries := storyMemoryRecordsToInteractiveEntries(records, structures)
 	status, statusErr := latestMemorySyncStatus(lines, branchID, branch.Head)
 	return InteractiveMemoryState{
 		StoryID:      storyID,
@@ -83,19 +136,23 @@ func (s *Store) StoryMemory(storyID, branchID string, includeArchived bool) (Sto
 	if err != nil {
 		return StoryMemoryState{}, err
 	}
+	structures, structureSource := s.storyMemoryStructuresForStoryLocked(meta, book)
 	records := visibleStoryMemoryRecords(book.Records, branchID, eventPathSet(branch.Head, lines), includeArchived)
 	status, statusErr := latestMemorySyncStatus(lines, branchID, branch.Head)
 	_, nextAuto := storyMemoryAutoDecisionLocked(book, lines, branchID, branch.Head)
 	return StoryMemoryState{
-		StoryID:         storyID,
-		BranchID:        branchID,
-		Settings:        book.Settings,
-		Structures:      book.Structures,
-		Records:         records,
-		RecentRecall:    latestMemoryRecall(book.Recalls, branchID),
-		SyncStatus:      status,
-		SyncError:       statusErr,
-		NextAutoInTurns: nextAuto,
+		StoryID:                 storyID,
+		BranchID:                branchID,
+		Settings:                book.Settings,
+		Structures:              structures,
+		MemoryStructureID:       structureSource.ID,
+		MemoryStructureName:     structureSource.Name,
+		MemoryStructureDisabled: structureSource.Disabled,
+		Records:                 records,
+		RecentRecall:            latestMemoryRecall(book.Recalls, branchID),
+		SyncStatus:              status,
+		SyncError:               statusErr,
+		NextAutoInTurns:         nextAuto,
 	}, nil
 }
 
@@ -145,7 +202,12 @@ func (s *Store) SaveStoryMemoryStructure(storyID string, req StoryMemoryStructur
 		if book.Structures[i].ID != structure.ID {
 			continue
 		}
+		if book.Structures[i].ReadOnly {
+			return StoryMemoryStructure{}, fmt.Errorf("故事记忆结构为只读派生表，不能编辑: %s", structure.ID)
+		}
 		structure.BuiltIn = book.Structures[i].BuiltIn
+		structure.ReadOnly = book.Structures[i].ReadOnly
+		structure.Derived = book.Structures[i].Derived
 		structure.CreatedAt = firstMemoryText(book.Structures[i].CreatedAt, now)
 		structure.UpdatedAt = now
 		book.Structures[i] = structure
@@ -183,6 +245,9 @@ func (s *Store) DeleteStoryMemoryStructure(storyID, structureID string) error {
 	removed := false
 	for _, structure := range book.Structures {
 		if structure.ID == structureID {
+			if structure.ReadOnly {
+				return fmt.Errorf("故事记忆结构为只读派生表，不能删除: %s", structureID)
+			}
 			removed = true
 			continue
 		}
@@ -217,7 +282,8 @@ func (s *Store) SaveStoryMemoryRecord(storyID string, req StoryMemoryRecordReque
 	if err != nil {
 		return StoryMemoryRecord{}, err
 	}
-	record, err := saveStoryMemoryRecordLocked(&book, branchID, branch.Head, req, true, eventPathSet(branch.Head, lines))
+	structures, _ := s.storyMemoryStructuresForStoryLocked(meta, book)
+	record, err := saveStoryMemoryRecordWithStructuresLocked(&book, structures, branchID, branch.Head, req, true, eventPathSet(branch.Head, lines))
 	if err != nil {
 		return StoryMemoryRecord{}, err
 	}
@@ -273,15 +339,21 @@ func (s *Store) ApplyStoryMemoryPatches(storyID, branchID, turnID string, patche
 	if err != nil {
 		return nil, err
 	}
+	structures, structureSource := s.storyMemoryStructuresForStoryLocked(meta, book)
+	runtimeStructures := runtimeStoryMemoryStructures(structures, structureSource)
+	if len(runtimeStructures) == 0 {
+		log.Printf("[interactive-memory] skip story memory patches because memory structure is disabled or empty story_id=%s branch_id=%s memory_structure_id=%s disabled=%t", storyID, branchID, structureSource.ID, structureSource.Disabled)
+		return []StoryMemoryRecord{}, nil
+	}
 	pathSet := eventPathSet(branch.Head, lines)
 	records := make([]StoryMemoryRecord, 0, len(patches))
 	for _, patch := range patches {
-		normalizedPatch, ok := normalizeStoryMemoryPatchForAgent(book, patch)
+		normalizedPatch, ok := normalizeStoryMemoryPatchForAgent(book, runtimeStructures, patch)
 		if !ok {
 			log.Printf("[interactive-memory] skip story memory patch with missing keyed key story_id=%s branch_id=%s structure_id=%s", storyID, branchID, patch.StructureID)
 			continue
 		}
-		record, err := applyStoryMemoryPatchLocked(&book, branchID, anchorTurnID, normalizedPatch, pathSet)
+		record, err := applyStoryMemoryPatchWithStructuresLocked(&book, runtimeStructures, branchID, anchorTurnID, normalizedPatch, pathSet)
 		if err != nil {
 			return nil, err
 		}
@@ -295,7 +367,7 @@ func (s *Store) ApplyStoryMemoryPatches(storyID, branchID, turnID string, patche
 	return records, nil
 }
 
-func normalizeStoryMemoryPatchForAgent(book interactiveMemoryBook, patch StoryMemoryPatch) (StoryMemoryPatch, bool) {
+func normalizeStoryMemoryPatchForAgent(book interactiveMemoryBook, structures []StoryMemoryStructure, patch StoryMemoryPatch) (StoryMemoryPatch, bool) {
 	op := strings.TrimSpace(patch.Op)
 	if op == "" {
 		op = "upsert"
@@ -304,7 +376,7 @@ func normalizeStoryMemoryPatchForAgent(book interactiveMemoryBook, patch StoryMe
 		return patch, true
 	}
 	structureID := sanitizeMemoryID(patch.StructureID)
-	structure := storyMemoryStructureByID(book.Structures, structureID)
+	structure := storyMemoryStructureByID(structures, structureID)
 	if structure.ID == "" || !storyMemoryStructureEnabled(structure) {
 		return patch, false
 	}
@@ -360,6 +432,10 @@ func (s *Store) ShouldGenerateStoryMemory(storyID, branchID string) (bool, int, 
 	if err != nil {
 		return false, 0, err
 	}
+	structures, source := s.storyMemoryStructuresForStoryLocked(meta, book)
+	if len(runtimeStoryMemoryStructures(structures, source)) == 0 {
+		return false, 0, nil
+	}
 	should, next := storyMemoryAutoDecisionLocked(book, lines, branchID, branch.Head)
 	return should, next, nil
 }
@@ -380,8 +456,10 @@ func (s *Store) StoryMemoryContextSummary(storyID, branchID string, limit int) (
 	if err != nil {
 		return "", err
 	}
+	structures, source := s.storyMemoryStructuresForStoryLocked(meta, book)
+	structures = runtimeStoryMemoryStructures(structures, source)
 	records := visibleStoryMemoryRecords(book.Records, branchID, eventPathSet(branch.Head, lines), false)
-	return formatStoryMemoryContextSummary(book.Structures, records, limit), nil
+	return formatStoryMemoryContextSummary(structures, records, limit), nil
 }
 
 func (s *Store) StoryMemoryCompactionContext(storyID, branchID string) (string, error) {
@@ -400,22 +478,27 @@ func (s *Store) StoryMemoryCompactionContext(storyID, branchID string) (string, 
 	if err != nil {
 		return "", err
 	}
+	structures, source := s.storyMemoryStructuresForStoryLocked(meta, book)
+	structures = runtimeStoryMemoryStructures(structures, source)
 	records := visibleStoryMemoryRecords(book.Records, branchID, eventPathSet(branch.Head, lines), false)
-	return formatStoryMemoryCompactionContext(book.Structures, records), nil
+	return formatStoryMemoryCompactionContext(structures, records), nil
 }
 
 func (s *Store) StoryMemorySchemaContext(storyID string, limit int) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, _, err := s.readStoryLocked(storyID); err != nil {
+	meta, _, err := s.readStoryLocked(storyID)
+	if err != nil {
 		return "", err
 	}
 	book, err := s.readMemoryBookLocked(storyID)
 	if err != nil {
 		return "", err
 	}
-	return formatStoryMemorySchemaContext(book.Structures, limit), nil
+	structures, source := s.storyMemoryStructuresForStoryLocked(meta, book)
+	structures = runtimeStoryMemoryStructures(structures, source)
+	return formatStoryMemorySchemaContext(structures, limit), nil
 }
 
 func (s *Store) CreateInteractiveMemory(storyID string, req InteractiveMemoryCreateRequest) (InteractiveMemoryEntry, error) {
@@ -434,14 +517,15 @@ func (s *Store) CreateInteractiveMemory(storyID string, req InteractiveMemoryCre
 	if err != nil {
 		return InteractiveMemoryEntry{}, err
 	}
-	record, err := saveStoryMemoryRecordLocked(&book, branchID, branch.Head, interactiveMemoryCreateToStoryRecord(req), true, eventPathSet(branch.Head, lines))
+	structures, _ := s.storyMemoryStructuresForStoryLocked(meta, book)
+	record, err := saveStoryMemoryRecordWithStructuresLocked(&book, structures, branchID, branch.Head, interactiveMemoryCreateToStoryRecord(req), true, eventPathSet(branch.Head, lines))
 	if err != nil {
 		return InteractiveMemoryEntry{}, err
 	}
 	if err := s.writeMemoryBookLocked(storyID, book); err != nil {
 		return InteractiveMemoryEntry{}, err
 	}
-	return storyMemoryRecordToInteractiveEntry(record, storyMemoryStructureByID(book.Structures, record.StructureID)), nil
+	return storyMemoryRecordToInteractiveEntry(record, storyMemoryStructureByID(structures, record.StructureID)), nil
 }
 
 func (s *Store) UpdateInteractiveMemory(storyID, memoryID string, req InteractiveMemoryUpdateRequest) (InteractiveMemoryEntry, error) {
@@ -464,6 +548,7 @@ func (s *Store) UpdateInteractiveMemory(storyID, memoryID string, req Interactiv
 	if err != nil {
 		return InteractiveMemoryEntry{}, err
 	}
+	structures, _ := s.storyMemoryStructuresForStoryLocked(meta, book)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	pathSet := eventPathSet(branch.Head, lines)
 	for i := range book.Records {
@@ -472,7 +557,7 @@ func (s *Store) UpdateInteractiveMemory(storyID, memoryID string, req Interactiv
 		}
 		next := book.Records[i]
 		applyInteractiveMemoryUpdateToRecord(&next, req)
-		record, err := saveStoryMemoryRecordLocked(&book, branchID, branch.Head, StoryMemoryRecordRequest{
+		record, err := saveStoryMemoryRecordWithStructuresLocked(&book, structures, branchID, branch.Head, StoryMemoryRecordRequest{
 			ID:          next.ID,
 			BranchID:    branchID,
 			StructureID: next.StructureID,
@@ -488,7 +573,7 @@ func (s *Store) UpdateInteractiveMemory(storyID, memoryID string, req Interactiv
 		if err := s.writeMemoryBookLocked(storyID, book); err != nil {
 			return InteractiveMemoryEntry{}, err
 		}
-		return storyMemoryRecordToInteractiveEntry(record, storyMemoryStructureByID(book.Structures, record.StructureID)), nil
+		return storyMemoryRecordToInteractiveEntry(record, storyMemoryStructureByID(structures, record.StructureID)), nil
 	}
 	return InteractiveMemoryEntry{}, fmt.Errorf("记忆不存在: %s", memoryID)
 }
@@ -497,7 +582,8 @@ func (s *Store) SetInteractiveMemoryArchived(storyID, memoryID string, archived 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, _, err := s.readStoryLocked(storyID); err != nil {
+	meta, _, err := s.readStoryLocked(storyID)
+	if err != nil {
 		return InteractiveMemoryEntry{}, err
 	}
 	memoryID = strings.TrimSpace(memoryID)
@@ -508,6 +594,7 @@ func (s *Store) SetInteractiveMemoryArchived(storyID, memoryID string, archived 
 	if err != nil {
 		return InteractiveMemoryEntry{}, err
 	}
+	structures, _ := s.storyMemoryStructuresForStoryLocked(meta, book)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for i := range book.Records {
 		if book.Records[i].ID != memoryID {
@@ -518,7 +605,7 @@ func (s *Store) SetInteractiveMemoryArchived(storyID, memoryID string, archived 
 		if err := s.writeMemoryBookLocked(storyID, book); err != nil {
 			return InteractiveMemoryEntry{}, err
 		}
-		return storyMemoryRecordToInteractiveEntry(book.Records[i], storyMemoryStructureByID(book.Structures, book.Records[i].StructureID)), nil
+		return storyMemoryRecordToInteractiveEntry(book.Records[i], storyMemoryStructureByID(structures, book.Records[i].StructureID)), nil
 	}
 	return InteractiveMemoryEntry{}, fmt.Errorf("记忆不存在: %s", memoryID)
 }
@@ -543,10 +630,15 @@ func (s *Store) AppendInteractiveMemory(storyID, branchID, turnID string, req In
 	if err != nil {
 		return InteractiveMemoryEntry{}, err
 	}
+	structures, source := s.storyMemoryStructuresForStoryLocked(meta, book)
+	runtimeStructures := runtimeStoryMemoryStructures(structures, source)
+	if len(runtimeStructures) == 0 {
+		return InteractiveMemoryEntry{}, fmt.Errorf("故事记忆结构已禁用或为空")
+	}
 	recordReq := interactiveMemoryCreateToStoryRecord(req)
 	recordReq.BranchID = branchID
 	recordReq.TurnID = turnID
-	record, err := saveStoryMemoryRecordLocked(&book, branchID, branch.Head, recordReq, false, eventPathSet(branch.Head, lines))
+	record, err := saveStoryMemoryRecordWithStructuresLocked(&book, runtimeStructures, branchID, branch.Head, recordReq, false, eventPathSet(branch.Head, lines))
 	if err != nil {
 		return InteractiveMemoryEntry{}, err
 	}
@@ -556,7 +648,7 @@ func (s *Store) AppendInteractiveMemory(storyID, branchID, turnID string, req In
 	if err := s.markTurnMemoryReadyLocked(storyID, meta, lines, branchID, turnID, record.ID); err != nil {
 		return InteractiveMemoryEntry{}, err
 	}
-	return storyMemoryRecordToInteractiveEntry(record, storyMemoryStructureByID(book.Structures, record.StructureID)), nil
+	return storyMemoryRecordToInteractiveEntry(record, storyMemoryStructureByID(runtimeStructures, record.StructureID)), nil
 }
 
 func (s *Store) MarkInteractiveMemoryReady(storyID, branchID, turnID string) error {
@@ -639,8 +731,9 @@ func (s *Store) VisibleInteractiveMemories(storyID, branchID string, limit int) 
 	if err != nil {
 		return nil, err
 	}
+	structures, _ := s.storyMemoryStructuresForStoryLocked(meta, book)
 	records := visibleStoryMemoryRecords(book.Records, branchID, eventPathSet(branch.Head, lines), false)
-	entries := storyMemoryRecordsToInteractiveEntries(records, book.Structures)
+	entries := storyMemoryRecordsToInteractiveEntries(records, structures)
 	if limit <= 0 || limit > maxMemoryListItems {
 		limit = maxMemoryListItems
 	}
@@ -673,7 +766,8 @@ func (s *Store) ReadVisibleInteractiveMemories(storyID, branchID string, ids []s
 	if err != nil {
 		return nil, err
 	}
-	visible := storyMemoryRecordsToInteractiveEntries(visibleStoryMemoryRecords(book.Records, branchID, eventPathSet(branch.Head, lines), false), book.Structures)
+	structures, _ := s.storyMemoryStructuresForStoryLocked(meta, book)
+	visible := storyMemoryRecordsToInteractiveEntries(visibleStoryMemoryRecords(book.Records, branchID, eventPathSet(branch.Head, lines), false), structures)
 	byID := make(map[string]InteractiveMemoryEntry, len(visible))
 	for _, entry := range visible {
 		byID[entry.ID] = entry
@@ -929,7 +1023,7 @@ func normalizeStoryMemoryInterval(value int) int {
 
 func defaultStoryMemoryStructures() []StoryMemoryStructure {
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	return []StoryMemoryStructure{
+	structures := []StoryMemoryStructure{
 		defaultStoryMemoryStructure("current_state", "当前状态", "记录当前剧情线的全局时间、地点和场景状态。此表有且仅有一行。", "每轮整理必须更新为当前回合结束后的状态；时间和天数必须自洽，不得按现实消息轮次盲目累加。", "singleton", "", true, 10, []StoryMemoryField{
 			defaultStoryMemoryField("story_start_date", "故事开局日期", "当前故事线的剧内开局日期。", "格式尽量使用 YYYY-MM-DD；初始化后除非用户明确重置开局时间，否则不要改动。", true, 10),
 			defaultStoryMemoryField("location", "当前详细地点", "主角当前所在的具体场景名称。", "填写具体场景名，不要只写宽泛区域。", true, 20),
@@ -988,7 +1082,45 @@ func defaultStoryMemoryStructures() []StoryMemoryStructure {
 			defaultStoryMemoryField("stakes", "风险/收益", "事项成功、失败或拖延的后果。", "没有明确风险收益时填“暂无明确风险收益”。", false, 70),
 			defaultStoryMemoryField("result", "后续结果", "事项完结或状态变更后的结果。", "未完结时留空；完结时写具体结果，不写“已解决”等空泛收束。", false, 80),
 		}, now),
-		defaultStoryMemoryStructure("plot_summary", "剧情纪要", "轮次日志，每轮或每批整理追加一条新记录。", "纪要以第三人称客观记录正文明确发生的事实，不生成下一步行动选项，不加入推测、情绪化语言或主观判断。", "append", "", true, 60, []StoryMemoryField{
+		defaultStoryMemoryStructure("rule_state_summary", "规则与数值状态", "记录规则引擎和数值系统需要长期承接的资源、属性、状态和最近检定。此表有且仅有一行。", "只记录已经由剧情、工具或规则结算确认的状态；数值变化必须能追溯到最近事件或规则检定，不自行臆造。", "singleton", "", true, 60, []StoryMemoryField{
+			defaultStoryMemoryField("resources", "资源数值", "生命、体力、灵力、金钱、声望等资源状态。", "按“资源：当前值/上限｜变化原因”维护；未知上限时写当前状态和来源。", false, 10),
+			defaultStoryMemoryField("attributes", "属性/境界", "力量、敏捷、修为、经营等级等稳定属性。", "按“属性：数值或阶段｜来源”维护；只写已确认属性。", false, 20),
+			defaultStoryMemoryField("conditions", "持续状态", "伤势、中毒、疲劳、增益、诅咒、通缉等会跨回合影响行动的状态。", "每项写清持续条件、影响和解除方式；过期状态应移除或标记已结束。", false, 30),
+			defaultStoryMemoryField("relationship_scores", "关系数值", "好感、信任、敌意、债务等可数值化关系。", "按“角色/势力：指标=值｜变化原因”维护；没有数值系统时可留空。", false, 40),
+			defaultStoryMemoryField("flags", "规则标记", "会影响后续检定或分支的布尔/枚举标记。", "按“标记：值｜来源”维护，例如“已暴露身份：否”。", false, 50),
+			defaultStoryMemoryField("last_rule_checks", "最近规则检定", "最近关键规则检定及结果。", "记录 3-5 个影响后续叙事的检定，格式建议“回合/检定：成功等级｜代价｜影响”。", false, 60),
+		}, now),
+		defaultStoryMemoryStructure("relationship_state", "关系状态", "记录普通互动、恋爱、误会、敌意、债务和同盟等可推进关系。", "每次整理只更新已经被剧情证实的关系变化；不要替代重要角色表的完整人物档案。", "keyed", "name", true, 70, []StoryMemoryField{
+			defaultStoryMemoryField("name", "姓名/对象", "角色、势力或关系对象名称。", "使用重要角色、势力或稳定称呼。", true, 10),
+			defaultStoryMemoryField("relationship_type", "关系类型", "同盟、师徒、竞争、恋爱、误会、债务、敌对等。", "选择最影响后续互动的一类或两类。", true, 20),
+			defaultStoryMemoryField("affection", "好感/亲近", "对象对主角的亲近、好感或抗拒。", "可写数值或阶段；必须带最近依据。", false, 30),
+			defaultStoryMemoryField("trust", "信任/戒备", "对象对主角的信任、戒备或怀疑。", "写清触发原因和当前风险。", false, 40),
+			defaultStoryMemoryField("tension", "张力/冲突", "暧昧、敌意、竞争、亏欠或压力。", "记录会推动下一次互动的张力，不写泛泛情绪。", false, 50),
+			defaultStoryMemoryField("misunderstanding", "误会/秘密", "仍未消解的误会、隐瞒、秘密或错认。", "没有时留空；有时写清谁误会了什么。", false, 60),
+			defaultStoryMemoryField("last_interaction", "最近关键互动", "最近一次改变关系状态的互动。", "一句话记录事件和结果。", false, 70),
+			defaultStoryMemoryField("next_hook", "后续关系钩子", "下一次关系推进可承接的入口。", "只记录已经被当前剧情合理铺垫的入口。", false, 80),
+		}, now),
+		defaultStoryMemoryStructure("foreshadowing_resolved", "伏笔与回收", "记录已埋下、推进中、已回收或已失效的伏笔。", "伏笔必须有来源事件、可见线索和回收条件；回收后写具体回收结果，避免只写“已回收”。", "keyed", "title", true, 80, []StoryMemoryField{
+			defaultStoryMemoryField("title", "伏笔标题", "伏笔的稳定短标题。", "用可复用短标题，不要每轮改名。", true, 10),
+			defaultStoryMemoryField("status", "状态", "seeded、developing、ready、paid_off、void 等状态。", "根据剧情事实选择；不确定时保持上一状态。", true, 20),
+			defaultStoryMemoryField("seeded_at", "埋设来源", "伏笔首次出现的事件、回合或场景。", "写清来源，方便后续回查。", false, 30),
+			defaultStoryMemoryField("clues", "已露线索", "用户或角色已经看见的线索。", "列出 1-5 条关键线索；不要加入未揭示真相。", false, 40),
+			defaultStoryMemoryField("payoff_condition", "回收条件", "触发回收需要满足的条件。", "写成可判断条件，例如“主角交出残卷且长老在场”。", false, 50),
+			defaultStoryMemoryField("payoff_result", "回收结果", "伏笔回收、反转或失效后的具体结果。", "未回收时留空；已回收时写对主线、关系或世界状态的影响。", false, 60),
+			defaultStoryMemoryField("related_events", "关联事件", "相关事件、角色、物品或长期弧线。", "多项用分号分隔。", false, 70),
+		}, now),
+		defaultStoryMemoryStructure("long_term_arc_progress", "长期弧线进度", "记录逆袭、复仇、种田、经营、修炼、恋爱等长期情节的目标、阶段、压力和回报。", "只维护仍在推进或需要后续承接的长期弧线；阶段变化必须由剧情或规则结果支撑。", "keyed", "arc_name", true, 90, []StoryMemoryField{
+			defaultStoryMemoryField("arc_name", "弧线名称", "长期情节的稳定名称。", "例如“青云宗逆袭线”“北境种田线”。", true, 10),
+			defaultStoryMemoryField("arc_type", "弧线类型", "逆袭、复仇、种田、经营、修炼、恋爱、学院比拼等。", "选择主要类型，可用逗号补充副类型。", true, 20),
+			defaultStoryMemoryField("goal", "长期目标", "此弧线当前阶段的长期目标。", "写成可推进目标，不写抽象愿望。", false, 30),
+			defaultStoryMemoryField("current_phase", "当前阶段", "铺垫、升级、挫败、反转、收获、收束等阶段。", "用一个短语描述当前节奏阶段。", false, 40),
+			defaultStoryMemoryField("pressure", "当前压力/危机", "推进此弧线的外部压力、倒计时或危机。", "写清压力来源和失败后果。", false, 50),
+			defaultStoryMemoryField("milestones", "已达成节点", "此弧线已完成的重要节点。", "按时间顺序压缩记录，只保留影响后续的节点。", false, 60),
+			defaultStoryMemoryField("setbacks", "失败/代价", "此弧线中已经付出的代价、失败或错失机会。", "失败后果要保留，不要下一轮自然消失。", false, 70),
+			defaultStoryMemoryField("next_pressure", "下一压力点", "后续可触发的压力、比拼、危机或收益窗口。", "只记录已铺垫且合理的下一压力点。", false, 80),
+			defaultStoryMemoryField("terminal_risk", "终局风险", "可能导致主线失败、死亡或弧线中断的风险。", "没有明确风险时留空；有风险时写触发条件。", false, 90),
+		}, now),
+		defaultStoryMemoryStructure("plot_summary", "剧情纪要", "轮次日志，每轮或每批整理追加一条新记录。", "纪要以第三人称客观记录正文明确发生的事实，不生成下一步行动选项，不加入推测、情绪化语言或主观判断。", "append", "", true, 100, []StoryMemoryField{
 			defaultStoryMemoryField("code_index", "编码索引", "本条纪要的唯一顺序索引。", "格式建议 AM0001 起递增；无法确认时根据已有纪要顺序推定。", true, 10),
 			defaultStoryMemoryField("time_span", "时间跨度", "本轮事件发生的精确时间范围。", "格式尽量与当前状态表一致。", true, 20),
 			defaultStoryMemoryField("place", "地点", "本轮事件发生的地点。", "按从大到小的层级描述地点。", true, 30),
@@ -997,7 +1129,7 @@ func defaultStoryMemoryStructures() []StoryMemoryStructure {
 			defaultStoryMemoryField("key_dialogue", "重要对话", "造成事实重点或后续影响的重要原文对话。", "摘录 2-4 句并标明说话者；没有关键对话时留空。", false, 60),
 			defaultStoryMemoryField("current_day", "当前天数", "本轮结束时对应的剧内天数。", "必须与当前状态表的当前天数一致。", true, 70),
 		}, now),
-		defaultStoryMemoryStructure("romance_profile", "恋爱关系档案", "记录恋爱对象或潜在恋爱对象的关系阶段和情感变化。", "默认关闭；用户启用后才参与自动整理。只记录已发生或已表现出的关系变化，不替代重要角色表。", "keyed", "name", false, 70, []StoryMemoryField{
+		defaultStoryMemoryStructure("romance_profile", "恋爱关系档案", "记录恋爱对象或潜在恋爱对象的关系阶段和情感变化。", "默认关闭；用户启用后才参与自动整理。只记录已发生或已表现出的关系变化，不替代重要角色表。", "keyed", "name", false, 110, []StoryMemoryField{
 			defaultStoryMemoryField("name", "姓名", "恋爱对象或潜在恋爱对象姓名。", "必须对应重要角色表中的角色。", true, 10),
 			defaultStoryMemoryField("relationship_stage", "关系阶段", "该角色与主角的关系阶段。", "用具体短语描述当前阶段，并写出依据。", false, 20),
 			defaultStoryMemoryField("affection", "好感/亲近度", "该角色对主角的亲近、好感或抗拒状态。", "用自然语言描述，不强制数值。", false, 30),
@@ -1005,7 +1137,7 @@ func defaultStoryMemoryStructures() []StoryMemoryStructure {
 			defaultStoryMemoryField("attitude", "当前态度", "该角色当前面对主角的态度。", "只基于正文表现和已知设定，不主观脑补。", false, 50),
 			defaultStoryMemoryField("key_experience", "关键经历", "影响关系发展的关键经历。", "不超过 300 字；只保留影响后续互动的节点。", false, 60),
 		}, now),
-		defaultStoryMemoryStructure("romance_diary", "恋爱日记", "记录特定角色视角下值得长期保留的情感节点。", "默认关闭；只记录明显改变关系、误会、期待、后悔、动摇或无法说出口想法的节点，不记录普通互动流水账。", "append", "", false, 80, []StoryMemoryField{
+		defaultStoryMemoryStructure("romance_diary", "恋爱日记", "记录特定角色视角下值得长期保留的情感节点。", "默认关闭；只记录明显改变关系、误会、期待、后悔、动摇或无法说出口想法的节点，不记录普通互动流水账。", "append", "", false, 120, []StoryMemoryField{
 			defaultStoryMemoryField("writer", "写作角色", "日记视角角色。", "必须是已建档的重要角色或恋爱档案角色。", true, 10),
 			defaultStoryMemoryField("related", "关联角色", "该情感节点关联的角色。", "通常为主角，也可包含关键第三人。", false, 20),
 			defaultStoryMemoryField("content", "日记内容", "该角色视角下的情感节点。", "100-200 字；聚焦内心变化、误解、期待、动摇或确认。", true, 30),
@@ -1013,12 +1145,28 @@ func defaultStoryMemoryStructures() []StoryMemoryStructure {
 			defaultStoryMemoryField("event_type", "事件类型", "情感节点类型。", "可填初次相遇、日常互动、感情升温、冲突矛盾、和解修复、亲密接触等。", false, 50),
 			defaultStoryMemoryField("impact", "影响判断", "该节点对后续关系的影响。", "写具体影响，不写空泛总结。", false, 60),
 		}, now),
-		defaultStoryMemoryStructure("mature_relationship_profile", "成人向关系档案", "记录用户主动启用后的成人向关系扩展信息。", "默认关闭；作为可配置扩展结构存在，不照搬外部模板的私有字段。启用后只记录用户作品设定中明确允许且后续需要承接的内容。", "keyed", "name", false, 90, []StoryMemoryField{
+		defaultStoryMemoryStructure("mature_relationship_profile", "成人向关系档案", "记录用户主动启用后的成人向关系扩展信息。", "默认关闭；作为可配置扩展结构存在，不照搬外部模板的私有字段。启用后只记录用户作品设定中明确允许且后续需要承接的内容。", "keyed", "name", false, 130, []StoryMemoryField{
 			defaultStoryMemoryField("name", "姓名", "角色姓名。", "必须对应重要角色表中的角色。", true, 10),
 			defaultStoryMemoryField("boundary", "边界与偏好", "角色在成人向互动中的边界、偏好或禁忌。", "只记录已设定或已明确表达的内容。", false, 20),
 			defaultStoryMemoryField("relationship_context", "关系语境", "成人向内容与主角关系、权力结构或剧情状态的关联。", "必须服务后续剧情承接，不写一次性场景细节。", false, 30),
 			defaultStoryMemoryField("continuity_notes", "连续性备注", "需要长期保持一致的成人向连续性信息。", "压缩记录，避免露骨流水账。", false, 40),
 		}, now),
+	}
+	for i := range structures {
+		if isDerivedStoryMemoryStructureID(structures[i].ID) {
+			structures[i].ReadOnly = true
+			structures[i].Derived = true
+		}
+	}
+	return structures
+}
+
+func isDerivedStoryMemoryStructureID(id string) bool {
+	switch sanitizeMemoryID(id) {
+	case "current_state", "rule_state_summary":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -1087,11 +1235,17 @@ func normalizeStoryMemoryStructure(req StoryMemoryStructureRequest, now string) 
 		KeyFieldID:            sanitizeMemoryID(req.KeyFieldID),
 		Enabled:               req.Enabled,
 		Order:                 req.Order,
+		ReadOnly:              req.ReadOnly,
+		Derived:               req.Derived,
 		Fields:                normalizeStoryMemoryFields(req.Fields),
 		UpdatedAt:             now,
 	}
 	if structure.Mode == "" {
 		structure.Mode = "append"
+	}
+	if isDerivedStoryMemoryStructureID(structure.ID) {
+		structure.ReadOnly = true
+		structure.Derived = true
 	}
 	return structure
 }
@@ -1106,6 +1260,10 @@ func normalizeStoryMemoryStructureFromStored(structure StoryMemoryStructure) Sto
 		structure.Mode = "append"
 	}
 	structure.KeyFieldID = sanitizeMemoryID(structure.KeyFieldID)
+	if isDerivedStoryMemoryStructureID(structure.ID) {
+		structure.ReadOnly = true
+		structure.Derived = true
+	}
 	structure.Fields = normalizeStoryMemoryFields(structure.Fields)
 	return structure
 }
@@ -1169,6 +1327,16 @@ func sortStoryMemoryStructures(structures []StoryMemoryStructure) {
 
 func storyMemoryStructureEnabled(structure StoryMemoryStructure) bool {
 	return structure.Enabled == nil || *structure.Enabled
+}
+
+func enabledStoryMemoryStructures(structures []StoryMemoryStructure) []StoryMemoryStructure {
+	out := make([]StoryMemoryStructure, 0, len(structures))
+	for _, structure := range structures {
+		if storyMemoryStructureEnabled(structure) {
+			out = append(out, structure)
+		}
+	}
+	return out
 }
 
 func storyMemoryFieldEnabled(field StoryMemoryField) bool {
@@ -1345,6 +1513,9 @@ func saveStoryMemoryRecordLocked(book *interactiveMemoryBook, branchID, anchorTu
 	if structure.ID == "" {
 		return StoryMemoryRecord{}, fmt.Errorf("故事记忆结构不存在: %s", req.StructureID)
 	}
+	if manual && structure.ReadOnly {
+		return StoryMemoryRecord{}, fmt.Errorf("故事记忆结构为只读派生表，不能手动编辑: %s", structure.ID)
+	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	record := StoryMemoryRecord{
 		ID:           sanitizeMemoryID(req.ID),
@@ -1405,6 +1576,15 @@ func saveStoryMemoryRecordLocked(book *interactiveMemoryBook, branchID, anchorTu
 	return record, nil
 }
 
+func saveStoryMemoryRecordWithStructuresLocked(book *interactiveMemoryBook, structures []StoryMemoryStructure, branchID, anchorTurnID string, req StoryMemoryRecordRequest, manual bool, pathSet map[string]bool) (StoryMemoryRecord, error) {
+	originalStructures := book.Structures
+	book.Structures = structures
+	defer func() {
+		book.Structures = originalStructures
+	}()
+	return saveStoryMemoryRecordLocked(book, branchID, anchorTurnID, req, manual, pathSet)
+}
+
 func setStoryMemoryRecordArchivedLocked(book *interactiveMemoryBook, branchID, anchorTurnID, recordID string, archived bool, pathSet map[string]bool) (StoryMemoryRecord, error) {
 	recordID = sanitizeMemoryID(recordID)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
@@ -1457,6 +1637,7 @@ func applyStoryMemoryPatchLocked(book *interactiveMemoryBook, branchID, anchorTu
 			for i := range book.Records {
 				if book.Records[i].ID == record.ID {
 					book.Records[i].Source = "agent"
+					record.Source = "agent"
 					break
 				}
 			}
@@ -1465,6 +1646,15 @@ func applyStoryMemoryPatchLocked(book *interactiveMemoryBook, branchID, anchorTu
 	default:
 		return StoryMemoryRecord{}, fmt.Errorf("不支持的故事记忆操作: %s", op)
 	}
+}
+
+func applyStoryMemoryPatchWithStructuresLocked(book *interactiveMemoryBook, structures []StoryMemoryStructure, branchID, anchorTurnID string, patch StoryMemoryPatch, pathSet map[string]bool) (StoryMemoryRecord, error) {
+	originalStructures := book.Structures
+	book.Structures = structures
+	defer func() {
+		book.Structures = originalStructures
+	}()
+	return applyStoryMemoryPatchLocked(book, branchID, anchorTurnID, patch, pathSet)
 }
 
 func findStoryMemoryUpsertRecord(records []StoryMemoryRecord, structure StoryMemoryStructure, branchID, key string, pathSet map[string]bool) (StoryMemoryRecord, bool) {
@@ -1555,12 +1745,15 @@ func formatStoryMemoryCompactionContext(structures []StoryMemoryStructure, recor
 }
 
 func formatStoryMemoryContext(structures []StoryMemoryStructure, records []StoryMemoryRecord, limit, itemLimit int, bounded bool) string {
+	if len(enabledStoryMemoryStructures(structures)) == 0 {
+		return ""
+	}
 	var sb strings.Builder
 	sb.WriteString("来源: interactive/memory/story-{story_id}.json 的当前分支可见故事记忆\n")
 	if bounded {
-		sb.WriteString(fmt.Sprintf("上限: %d bytes\n", limit))
+		sb.WriteString("边界: 已按调用方上下文预算裁剪\n")
 	} else {
-		sb.WriteString("上限: 不截断，用于上下文压缩 Agent\n")
+		sb.WriteString("边界: 不截断，用于上下文压缩 Agent\n")
 	}
 	count := 0
 	for _, structure := range structures {
@@ -1617,13 +1810,16 @@ func formatStoryMemoryContext(structures []StoryMemoryStructure, records []Story
 }
 
 func formatStoryMemorySchemaContext(structures []StoryMemoryStructure, limit int) string {
-	if limit <= 0 || limit > maxMemoryTextBytes {
-		limit = maxMemoryTextBytes
+	if limit <= 0 || limit > maxStoryMemorySchemaBytes {
+		limit = maxStoryMemorySchemaBytes
 	}
 	structures = storyMemorySchemaContextOrder(structures)
+	if len(structures) == 0 {
+		return ""
+	}
 	var sb strings.Builder
 	sb.WriteString("来源: interactive/memory/story-{story_id}.json 的故事记忆结构定义\n")
-	sb.WriteString(fmt.Sprintf("上限: %d bytes\n", limit))
+	sb.WriteString("边界: 已按调用方上下文预算裁剪\n")
 	sb.WriteString("规则: story_memory_patches 只能使用下列 structure_id 和字段 ID；每条 patch 的 values 必须包含目标结构列出的所有字段，且字段值不能为空；keyed 结构必须提供 key，且 key 应等于 key_field_id 对应字段值；生成时必须遵守 structure 和 field 的 generation_instruction。\n")
 	for _, structure := range structures {
 		if !storyMemoryStructureEnabled(structure) {

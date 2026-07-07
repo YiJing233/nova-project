@@ -7,18 +7,20 @@ import { focusDialogContentOnOpen } from './dialog-focus'
 
 export const CONTEXT_ANALYSIS_SIMULATED_MESSAGE = '[Denova context analysis probe]'
 
-export function ContextAnalysisDialog({ open, loading, error, analysis, onOpenChange, onRemoveCompaction }: {
+export function ContextAnalysisDialog({ open, loading, error, analysis, onOpenChange, onRemoveCompaction, title, description }: {
   open: boolean
   loading: boolean
   error: string | null
   analysis: ContextAnalysis | null
   onOpenChange: (open: boolean) => void
   onRemoveCompaction?: () => void | Promise<void>
+  title?: string
+  description?: string
 }) {
   const { t } = useTranslation()
   const [removingCompaction, setRemovingCompaction] = useState(false)
   const [removeError, setRemoveError] = useState<string | null>(null)
-  const finalMessageParts = analysis ? buildFinalMessageParts(analysis.context_messages) : []
+  const finalMessageGroups = analysis ? buildFinalMessageGroups(analysis.context_messages, t) : []
   const handleRemoveCompaction = async () => {
     if (!onRemoveCompaction || removingCompaction) return
     setRemovingCompaction(true)
@@ -42,10 +44,10 @@ export function ContextAnalysisDialog({ open, loading, error, analysis, onOpenCh
         <DialogHeader className="border-b border-[var(--nova-border)] px-4 py-3">
           <DialogTitle className="flex items-center gap-2 text-sm">
             <ScrollText className="h-4 w-4 text-[var(--nova-text-muted)]" />
-            {t('chat.contextAnalysis.title')}
+            {title || t('chat.contextAnalysis.title')}
           </DialogTitle>
           <DialogDescription className="text-xs text-[var(--nova-text-faint)]">
-            {t('chat.contextAnalysis.description')}
+            {description || t('chat.contextAnalysis.description')}
           </DialogDescription>
         </DialogHeader>
         <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3">
@@ -63,10 +65,9 @@ export function ContextAnalysisDialog({ open, loading, error, analysis, onOpenCh
             <div className="space-y-4">
               <ContextUsageSummary analysis={analysis} />
               <ContextAnalysisSection title={t('chat.contextAnalysis.systemPrompt')} parts={analysis.system_prompt_parts} />
-              <ContextAnalysisSection
+              <ContextAnalysisMessageGroups
                 title={t('chat.contextAnalysis.finalMessages')}
-                parts={finalMessageParts}
-                showRole
+                groups={finalMessageGroups}
                 compaction={analysis.compaction}
                 removingCompaction={removingCompaction}
                 removeCompactionError={removeError}
@@ -108,11 +109,75 @@ function formatNumber(value: number) {
   return new Intl.NumberFormat().format(value)
 }
 
-function buildFinalMessageParts(messages: ContextAnalysisPart[]): ContextAnalysisPart[] {
-  return messages.map((part, index) => ({
-    ...part,
-    title: `#${index + 1} ${part.title || part.source}`,
-  }))
+interface ContextAnalysisMessageGroup {
+  id: string
+  title: string
+  source: string
+  parts: ContextAnalysisPart[]
+  bytes: number
+  chars: number
+}
+
+function buildFinalMessageGroups(messages: ContextAnalysisPart[], t: ReturnType<typeof useTranslation>['t']): ContextAnalysisMessageGroup[] {
+  const groups: ContextAnalysisMessageGroup[] = []
+  let current: ContextAnalysisMessageGroup | null = null
+  let turnIndex = 0
+  let looseIndex = 0
+  messages.forEach((part, index) => {
+    const normalized = {
+      ...part,
+      title: `#${index + 1} ${part.title || part.source}`,
+    }
+    const startsTurn = isTurnStartPart(normalized)
+    const standalone = isStandaloneContextPart(normalized)
+    if (startsTurn) {
+      turnIndex += 1
+      current = {
+        id: `turn-${turnIndex}-${normalized.id || index}`,
+        title: turnGroupTitle(normalized, turnIndex, t),
+        source: normalized.source,
+        parts: [],
+        bytes: 0,
+        chars: 0,
+      }
+      groups.push(current)
+    } else if (!current || standalone) {
+      looseIndex += 1
+      current = {
+        id: `group-${looseIndex}-${normalized.id || index}`,
+        title: standalone ? (normalized.title || normalized.source) : t('chat.contextAnalysis.messageGroup', { index: looseIndex }),
+        source: normalized.source,
+        parts: [],
+        bytes: 0,
+        chars: 0,
+      }
+      groups.push(current)
+    }
+    current.parts.push(normalized)
+    current.bytes += normalized.bytes || 0
+    current.chars += normalized.chars || 0
+    if (standalone) current = null
+  })
+  return groups
+}
+
+function isTurnStartPart(part: ContextAnalysisPart) {
+  return part.role === 'user' && !isStandaloneContextPart(part)
+}
+
+function isStandaloneContextPart(part: ContextAnalysisPart) {
+  return isCompactionPart(part) || part.source === '稳定作品上下文' || part.source === '稳定上下文' || isDirectorInstructionPart(part)
+}
+
+function isDirectorInstructionPart(part: ContextAnalysisPart) {
+  return Boolean(part.id?.startsWith('director_instruction_part_'))
+}
+
+function turnGroupTitle(part: ContextAnalysisPart, index: number, t: ReturnType<typeof useTranslation>['t']) {
+  if (part.source === '本轮上下文' || part.source === '本轮互动指令' || part.source === '本轮导演指令') {
+    return t('chat.contextAnalysis.currentTurnGroup')
+  }
+  return t('chat.contextAnalysis.turnGroup', { index })
 }
 
 function ContextAnalysisSection({ title, parts, showRole = false, compaction, removingCompaction = false, removeCompactionError, onRemoveCompaction }: {
@@ -152,9 +217,61 @@ function ContextAnalysisSection({ title, parts, showRole = false, compaction, re
   )
 }
 
-function ContextAnalysisPartBlock({ part, showRole, compaction, removingCompaction = false, removeCompactionError, onRemoveCompaction }: {
-  part: ContextAnalysisPart
-  showRole: boolean
+function ContextAnalysisMessageGroups({ title, groups, compaction, removingCompaction = false, removeCompactionError, onRemoveCompaction }: {
+  title: string
+  groups: ContextAnalysisMessageGroup[]
+  compaction?: ContextAnalysisCompaction
+  removingCompaction?: boolean
+  removeCompactionError?: string | null
+  onRemoveCompaction?: () => void
+}) {
+  const { t } = useTranslation()
+  const partCount = groups.reduce((sum, group) => sum + group.parts.length, 0)
+  return (
+    <section className="space-y-2">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-xs font-medium text-[var(--nova-text)]">{title}</h3>
+        <span className="text-[11px] text-[var(--nova-text-faint)]">{t('chat.contextAnalysis.groupCount', { count: groups.length, parts: partCount })}</span>
+      </div>
+      <div className="space-y-2">
+        {groups.length > 0 ? groups.map((group) => (
+          shouldFlattenMessageGroup(group) ? (
+            <ContextAnalysisPartBlock
+              key={group.id}
+              part={group.parts[0]}
+              showRole
+              showKind
+              compaction={group.parts.some(isCompactionPart) ? compaction : undefined}
+              removingCompaction={removingCompaction}
+              removeCompactionError={group.parts.some(isCompactionPart) ? removeCompactionError : undefined}
+              onRemoveCompaction={group.parts.some(isCompactionPart) ? onRemoveCompaction : undefined}
+            />
+          ) : (
+            <ContextAnalysisMessageGroupBlock
+              key={group.id}
+              group={group}
+              compaction={group.parts.some(isCompactionPart) ? compaction : undefined}
+              removingCompaction={removingCompaction}
+              removeCompactionError={group.parts.some(isCompactionPart) ? removeCompactionError : undefined}
+              onRemoveCompaction={group.parts.some(isCompactionPart) ? onRemoveCompaction : undefined}
+            />
+          )
+        )) : (
+          <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-xs text-[var(--nova-text-faint)]">
+            {t('chat.contextAnalysis.noParts')}
+          </div>
+        )}
+      </div>
+    </section>
+  )
+}
+
+function shouldFlattenMessageGroup(group: ContextAnalysisMessageGroup) {
+  return group.parts.length === 1
+}
+
+function ContextAnalysisMessageGroupBlock({ group, compaction, removingCompaction = false, removeCompactionError, onRemoveCompaction }: {
+  group: ContextAnalysisMessageGroup
   compaction?: ContextAnalysisCompaction
   removingCompaction?: boolean
   removeCompactionError?: string | null
@@ -174,9 +291,131 @@ function ContextAnalysisPartBlock({ part, showRole, compaction, removingCompacti
         >
           {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-muted)]" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-muted)]" />}
           <span className="min-w-0 flex-1">
+            <span className="block truncate text-[11px] font-medium text-[var(--nova-text)]">{group.title}</span>
+            <span className="block truncate text-[10px] text-[var(--nova-text-faint)]">
+              {group.source}
+              {' · '}
+              {t('chat.contextAnalysis.groupPartCount', { count: group.parts.length })}
+              {compactionMeta ? ` · ${compactionMeta}` : ''}
+            </span>
+          </span>
+        </button>
+        {onRemoveCompaction && (
+          <button
+            type="button"
+            disabled={removingCompaction}
+            aria-label={t('chat.contextAnalysis.removeCompaction')}
+            onClick={onRemoveCompaction}
+            className="nova-nav-item inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[var(--nova-border)] bg-[var(--nova-surface)] px-2 text-[11px] text-[var(--nova-text-muted)] disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {removingCompaction ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Trash2 className="h-3.5 w-3.5" />}
+            {removingCompaction ? t('chat.contextAnalysis.removingCompaction') : t('chat.contextAnalysis.removeCompaction')}
+          </button>
+        )}
+        <span className="shrink-0 text-[10px] text-[var(--nova-text-faint)]">{t('chat.contextAnalysis.partSize', { chars: group.chars, bytes: group.bytes })}</span>
+      </div>
+      {removeCompactionError && <div className="border-t border-[var(--nova-border)] px-3 py-2 text-[11px] text-[var(--nova-danger)]">{removeCompactionError}</div>}
+      {open && (
+        <div className="border-t border-[var(--nova-border)] px-3 py-2">
+          <div className="space-y-2 border-l border-[var(--nova-border)] pl-3">
+            {group.parts.map((part, index) => (
+              <ContextAnalysisInlinePart key={`${part.id || part.title}:${index}`} part={part} />
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+function ContextAnalysisInlinePart({ part }: { part: ContextAnalysisPart }) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(true)
+  const kind = contextAnalysisKindLabel(part, t)
+  return (
+    <div className="min-w-0">
+      <button
+        type="button"
+        onClick={() => setOpen((current) => !current)}
+        className="flex w-full items-start gap-2 rounded-[6px] px-2 py-1.5 text-left hover:bg-[var(--nova-hover)]"
+        aria-expanded={open}
+      >
+        {open ? <ChevronDown className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--nova-text-muted)]" /> : <ChevronRight className="mt-0.5 h-3.5 w-3.5 shrink-0 text-[var(--nova-text-muted)]" />}
+        <span className="min-w-0 flex-1">
+          <span className="block truncate text-[11px] font-medium text-[var(--nova-text)]">{part.title || part.source}</span>
+          <span className="block truncate text-[10px] text-[var(--nova-text-faint)]">
+            {part.source ? `${part.source} · ` : ''}{kind}
+            {part.tool_name ? ` · ${part.tool_name}` : ''}
+            {part.role ? ` · ${part.role}` : ''}
+            {part.note ? ` · ${part.note}` : ''}
+          </span>
+        </span>
+        <span className="shrink-0 text-[10px] text-[var(--nova-text-faint)]">{t('chat.contextAnalysis.partSize', { chars: part.chars, bytes: part.bytes })}</span>
+      </button>
+      {open && (
+        <div className="px-2 pb-2">
+          {part.content.trim() ? (
+            <pre className="max-h-72 overflow-auto whitespace-pre-wrap break-words pl-5 text-[11px] leading-5 text-[var(--nova-text-muted)]">{part.content}</pre>
+          ) : (
+            <div className="pl-5 text-[11px] text-[var(--nova-text-faint)]">{t('chat.contextAnalysis.emptyPart')}</div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function contextAnalysisKindLabel(part: ContextAnalysisPart, t: ReturnType<typeof useTranslation>['t']) {
+  const kind = part.kind || fallbackContextAnalysisKind(part)
+  switch (kind) {
+    case 'tool_call':
+      return t('chat.contextAnalysis.kind.toolCall')
+    case 'tool_result':
+      return t('chat.contextAnalysis.kind.toolResult')
+    case 'body':
+      if (part.role === 'user') return t('chat.contextAnalysis.kind.userBody')
+      if (part.role === 'assistant') return t('chat.contextAnalysis.kind.assistantBody')
+      return t('chat.contextAnalysis.kind.body')
+    default:
+      return kind || part.role || t('chat.contextAnalysis.kind.message')
+  }
+}
+
+function fallbackContextAnalysisKind(part: ContextAnalysisPart) {
+  if (part.role === 'tool') return 'tool_result'
+  if (part.role === 'user' || part.role === 'assistant') return 'body'
+  return ''
+}
+
+function ContextAnalysisPartBlock({ part, showRole, showKind = false, compaction, removingCompaction = false, removeCompactionError, onRemoveCompaction }: {
+  part: ContextAnalysisPart
+  showRole: boolean
+  showKind?: boolean
+  compaction?: ContextAnalysisCompaction
+  removingCompaction?: boolean
+  removeCompactionError?: string | null
+  onRemoveCompaction?: () => void
+}) {
+  const { t } = useTranslation()
+  const [open, setOpen] = useState(false)
+  const compactionMeta = compaction ? buildCompactionMeta(t, compaction) : ''
+  const kind = showKind ? contextAnalysisKindLabel(part, t) : ''
+  return (
+    <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)]">
+      <div className="flex items-center gap-2 px-3 py-2">
+        <button
+          type="button"
+          onClick={() => setOpen((current) => !current)}
+          className="flex min-w-0 flex-1 items-center gap-2 text-left"
+          aria-expanded={open}
+        >
+          {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-muted)]" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-muted)]" />}
+          <span className="min-w-0 flex-1">
             <span className="block truncate text-[11px] font-medium text-[var(--nova-text)]">{part.title || part.source}</span>
             <span className="block truncate text-[10px] text-[var(--nova-text-faint)]">
               {part.source}
+              {kind ? ` · ${kind}` : ''}
+              {part.tool_name ? ` · ${part.tool_name}` : ''}
               {showRole && part.role ? ` · ${part.role}` : ''}
               {part.note ? ` · ${part.note}` : ''}
               {compactionMeta ? ` · ${compactionMeta}` : ''}

@@ -15,14 +15,14 @@ func TestResolveAgentToolsDefaults(t *testing.T) {
 	}
 
 	story := ResolveAgentTools(&Config{}, AgentKindInteractiveStory)
-	if !story.FileRead || !story.FileWrite || !story.ShellExecute || !story.LoreRead {
+	if !story.FileRead || !story.ShellExecute || !story.LoreRead {
 		t.Fatalf("互动叙事 Agent 应保留当前文件/命令/资料读取能力: %+v", story)
 	}
 	if !story.Skills {
 		t.Fatalf("互动叙事 Agent 默认应启用 skills: %+v", story)
 	}
-	if story.LoreWrite || story.Todo || story.WebSearch || story.ImageGeneration {
-		t.Fatalf("互动叙事 Agent 默认不应启用资料写入/todo/web search/image generation: %+v", story)
+	if story.FileWrite || story.LoreWrite || story.Todo || story.WebSearch || story.ImageGeneration {
+		t.Fatalf("互动叙事 Agent 默认不应启用文件写入/资料写入/todo/web search/image generation: %+v", story)
 	}
 
 	image := ResolveAgentTools(&Config{}, AgentKindImage)
@@ -47,6 +47,13 @@ func TestResolveAgentToolsDefaults(t *testing.T) {
 	summary := ResolveAgentTools(&Config{}, AgentKindVersionSummary)
 	if summary.FileRead || summary.FileWrite || summary.ShellExecute || summary.Skills || summary.LoreRead || summary.LoreWrite || summary.Todo || summary.WebSearch || summary.ImageGeneration || summary.AgentConfigRead || summary.AgentConfigWrite {
 		t.Fatalf("版本说明 Agent 默认不应注册工具: %+v", summary)
+	}
+	director := ResolveAgentTools(&Config{}, AgentKindInteractiveDirector)
+	if !director.FileRead || !director.FileWrite {
+		t.Fatalf("互动导演 Agent 默认应启用文件读写以维护导演规划 Markdown: %+v", director)
+	}
+	if director.ShellExecute || director.Skills || director.LoreRead || director.LoreWrite || director.Todo || director.WebSearch || director.ImageGeneration || director.AgentConfigRead || director.AgentConfigWrite {
+		t.Fatalf("互动导演 Agent 默认只应启用文件读写: %+v", director)
 	}
 	toolAgent := ResolveAgentTools(&Config{}, AgentKindToolAgent)
 	if toolAgent.FileRead || toolAgent.FileWrite || toolAgent.ShellExecute || toolAgent.Skills || toolAgent.LoreRead || toolAgent.LoreWrite || toolAgent.Todo || toolAgent.WebSearch || toolAgent.ImageGeneration || toolAgent.AgentConfigRead || toolAgent.AgentConfigWrite {

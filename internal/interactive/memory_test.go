@@ -116,12 +116,15 @@ func TestStoryMemoryStructuresRecordsAndBranchCopyOnWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if enabled := enabledStoryMemoryStructureCount(state.Structures); enabled != 6 || state.Settings.AutoIntervalTurns != defaultStoryMemoryInterval || !state.Settings.Enabled {
+	if enabled := enabledStoryMemoryStructureCount(state.Structures); enabled != 10 || state.Settings.AutoIntervalTurns != defaultStoryMemoryInterval || !state.Settings.Enabled {
 		t.Fatalf("default story memory state mismatch: %#v", state)
 	}
 	currentState := storyMemoryStructureByID(state.Structures, "current_state")
 	if currentState.Description != "记录当前剧情线的全局时间、地点和场景状态。此表有且仅有一行。" {
 		t.Fatalf("current_state preset description mismatch: %#v", currentState)
+	}
+	if !currentState.ReadOnly || !currentState.Derived {
+		t.Fatalf("current_state should be read-only derived narrative state: %#v", currentState)
 	}
 	for _, want := range []string{"story_start_date", "location", "time", "current_day", "event"} {
 		if !storyMemoryStructureHasField(currentState, want) {
@@ -137,6 +140,26 @@ func TestStoryMemoryStructuresRecordsAndBranchCopyOnWrite(t *testing.T) {
 	for _, disabledID := range []string{"romance_profile", "romance_diary", "mature_relationship_profile"} {
 		if structure := storyMemoryStructureByID(state.Structures, disabledID); storyMemoryStructureEnabled(structure) {
 			t.Fatalf("optional built-in structure should be disabled by default: %#v", structure)
+		}
+	}
+	defaultNarrativeStructures := map[string][]string{
+		"rule_state_summary":     {"resources", "conditions", "last_rule_checks"},
+		"relationship_state":     {"name", "relationship_type", "misunderstanding", "next_hook"},
+		"foreshadowing_resolved": {"title", "status", "payoff_condition", "payoff_result"},
+		"long_term_arc_progress": {"arc_name", "arc_type", "current_phase", "terminal_risk"},
+	}
+	for structureID, fields := range defaultNarrativeStructures {
+		structure := storyMemoryStructureByID(state.Structures, structureID)
+		if !storyMemoryStructureEnabled(structure) {
+			t.Fatalf("default narrative structure should be enabled: %#v", structure)
+		}
+		if structureID == "rule_state_summary" && (!structure.ReadOnly || !structure.Derived) {
+			t.Fatalf("rule_state_summary should be read-only derived narrative state: %#v", structure)
+		}
+		for _, fieldID := range fields {
+			if !storyMemoryStructureHasField(structure, fieldID) {
+				t.Fatalf("default narrative structure %s missing field %q: %#v", structureID, fieldID, structure.Fields)
+			}
 		}
 	}
 	structure, err := store.SaveStoryMemoryStructure(story.ID, StoryMemoryStructureRequest{
@@ -226,6 +249,54 @@ func TestStoryMemoryStructuresRecordsAndBranchCopyOnWrite(t *testing.T) {
 	}
 }
 
+func TestDerivedStoryMemoryStateTablesRejectManualEdits(t *testing.T) {
+	store := NewStore(t.TempDir())
+	story, err := store.CreateStory(CreateStoryRequest{Title: "派生记忆边界"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SaveStoryMemoryStructure(story.ID, StoryMemoryStructureRequest{
+		ID:   "current_state",
+		Name: "改写当前状态",
+		Mode: "singleton",
+		Fields: []StoryMemoryField{{
+			ID:       "location",
+			Name:     "地点",
+			Required: true,
+			Order:    10,
+		}},
+	}); err == nil {
+		t.Fatal("manual structure edit for current_state should be rejected")
+	}
+	if _, err := store.SaveStoryMemoryRecord(story.ID, StoryMemoryRecordRequest{
+		BranchID:    "main",
+		StructureID: "rule_state_summary",
+		Values: map[string]string{
+			"resources": "hp=999",
+		},
+	}); err == nil {
+		t.Fatal("manual record edit for rule_state_summary should be rejected")
+	}
+	records, err := store.ApplyStoryMemoryPatches(story.ID, "main", "", []StoryMemoryPatch{{
+		Op:          "upsert",
+		StructureID: "rule_state_summary",
+		Values: map[string]string{
+			"resources":           "生命：7/10｜本回合受伤",
+			"attributes":          "无变化",
+			"conditions":          "轻伤",
+			"relationship_scores": "",
+			"flags":               "",
+			"last_rule_checks":    "",
+		},
+	}})
+	if err != nil {
+		t.Fatalf("agent patch should still update derived narrative summary: %v", err)
+	}
+	if len(records) != 1 || records[0].StructureID != "rule_state_summary" || records[0].Source != "agent" {
+		t.Fatalf("derived narrative summary patch mismatch: %#v", records)
+	}
+}
+
 func TestNormalizeMemoryBookRefreshesBuiltInStoryMemoryPresets(t *testing.T) {
 	book := normalizeMemoryBook(interactiveMemoryBook{
 		V:       2,
@@ -299,6 +370,10 @@ func TestNormalizeMemoryBookRefreshesBuiltInStoryMemoryPresets(t *testing.T) {
 	if openThreads.ID == "" || !storyMemoryStructureEnabled(openThreads) {
 		t.Fatalf("new built-in open_threads structure should be added and enabled: %#v", openThreads)
 	}
+	longArcProgress := storyMemoryStructureByID(book.Structures, "long_term_arc_progress")
+	if longArcProgress.ID == "" || !storyMemoryStructureHasField(longArcProgress, "terminal_risk") {
+		t.Fatalf("new built-in long_term_arc_progress structure should be added: %#v", longArcProgress)
+	}
 	romanceProfile := storyMemoryStructureByID(book.Structures, "romance_profile")
 	if romanceProfile.ID == "" || storyMemoryStructureEnabled(romanceProfile) {
 		t.Fatalf("optional built-in romance_profile should be added disabled: %#v", romanceProfile)
@@ -330,7 +405,7 @@ func TestStoryMemorySchemaContextIncludesStructuresWithoutRecords(t *testing.T) 
 	}); err != nil {
 		t.Fatal(err)
 	}
-	context, err := store.StoryMemorySchemaContext(story.ID, 12*1024)
+	context, err := store.StoryMemorySchemaContext(story.ID, 32*1024)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,6 +414,10 @@ func TestStoryMemorySchemaContextIncludesStructuresWithoutRecords(t *testing.T) 
 		"## current_state",
 		"## important_character",
 		"## open_threads",
+		"## rule_state_summary",
+		"## relationship_state",
+		"## foreshadowing_resolved",
+		"## long_term_arc_progress",
 		"## relationship_clock",
 		"values 必须包含目标结构列出的所有字段",
 		"mode: keyed",
@@ -351,6 +430,215 @@ func TestStoryMemorySchemaContextIncludesStructuresWithoutRecords(t *testing.T) 
 		if !strings.Contains(context, want) {
 			t.Fatalf("schema context missing %q:\n%s", want, context)
 		}
+	}
+}
+
+func TestStoryMemoryUsesDirectorMemoryStructureModule(t *testing.T) {
+	root := t.TempDir()
+	novaDir := t.TempDir()
+	memoryLibrary := NewStoryMemoryStructureLibrary(novaDir)
+	module, err := memoryLibrary.Create(StoryMemoryStructureModule{
+		ID:   "quest-memory",
+		Name: "任务记忆结构",
+		Structures: []StoryMemoryStructure{{
+			ID:      "quest_tracker",
+			Name:    "任务追踪",
+			Mode:    "keyed",
+			Enabled: boolPtr(true),
+			Fields: []StoryMemoryField{
+				{ID: "name", Name: "任务名", Required: true, Order: 10},
+				{ID: "status", Name: "状态", Order: 20},
+			},
+			KeyFieldID: "name",
+			Order:      10,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("create memory module failed: %v", err)
+	}
+	directorLibrary := NewStoryDirectorLibrary(novaDir)
+	director, err := directorLibrary.Create(StoryDirector{
+		ID:   "quest-director",
+		Name: "任务导演",
+		ModuleRefs: StoryDirectorModuleRefs{
+			MemoryStructureID: module.ID,
+		},
+		Strategy: StoryDirectorStrategy{Enabled: true},
+	})
+	if err != nil {
+		t.Fatalf("create director failed: %v", err)
+	}
+
+	store := NewStoreWithNovaDir(root, novaDir)
+	story, err := store.CreateStory(CreateStoryRequest{Title: "模块记忆", StoryDirectorID: director.ID})
+	if err != nil {
+		t.Fatalf("CreateStory failed: %v", err)
+	}
+	state, err := store.StoryMemory(story.ID, "main", false)
+	if err != nil {
+		t.Fatalf("StoryMemory failed: %v", err)
+	}
+	if state.MemoryStructureID != module.ID || state.MemoryStructureName != module.Name || state.MemoryStructureDisabled {
+		t.Fatalf("story memory should expose director memory source: %#v", state)
+	}
+	if got := storyMemoryStructureByID(state.Structures, "quest_tracker"); got.ID == "" {
+		t.Fatalf("story memory should use director module structures: %#v", state.Structures)
+	}
+	schema, err := store.StoryMemorySchemaContext(story.ID, 12*1024)
+	if err != nil {
+		t.Fatalf("StoryMemorySchemaContext failed: %v", err)
+	}
+	if !strings.Contains(schema, "任务追踪") || strings.Contains(schema, "current_state") {
+		t.Fatalf("schema context should use memory module only:\n%s", schema)
+	}
+	turn, err := store.AppendTurn(story.ID, AppendTurnRequest{BranchID: "main", User: "接下任务", Narrative: "任务已确认。"})
+	if err != nil {
+		t.Fatalf("AppendTurn failed: %v", err)
+	}
+	records, err := store.ApplyStoryMemoryPatches(story.ID, "main", turn.ID, []StoryMemoryPatch{{
+		StructureID: "quest_tracker",
+		Key:         "寻找钥匙",
+		Values:      map[string]string{"name": "寻找钥匙", "status": "进行中"},
+	}})
+	if err != nil {
+		t.Fatalf("ApplyStoryMemoryPatches failed: %v", err)
+	}
+	if len(records) != 1 || records[0].StructureID != "quest_tracker" {
+		t.Fatalf("patch should write module-backed structure record: %#v", records)
+	}
+}
+
+func TestDisabledDirectorMemoryStructureSkipsRuntimeMemory(t *testing.T) {
+	root := t.TempDir()
+	novaDir := t.TempDir()
+	directorLibrary := NewStoryDirectorLibrary(novaDir)
+	director, err := directorLibrary.Create(StoryDirector{
+		ID:   "memory-off",
+		Name: "关闭记忆导演",
+		ModuleRefs: StoryDirectorModuleRefs{
+			MemoryStructureID:       DefaultStoryMemoryStructureModuleID,
+			MemoryStructureDisabled: true,
+		},
+		Strategy: StoryDirectorStrategy{Enabled: true},
+	})
+	if err != nil {
+		t.Fatalf("create director failed: %v", err)
+	}
+	store := NewStoreWithNovaDir(root, novaDir)
+	story, err := store.CreateStory(CreateStoryRequest{Title: "关闭记忆", StoryDirectorID: director.ID})
+	if err != nil {
+		t.Fatalf("CreateStory failed: %v", err)
+	}
+	state, err := store.StoryMemory(story.ID, "main", false)
+	if err != nil {
+		t.Fatalf("StoryMemory failed: %v", err)
+	}
+	if !state.MemoryStructureDisabled || state.MemoryStructureID != DefaultStoryMemoryStructureModuleID {
+		t.Fatalf("story memory should expose disabled module source: %#v", state)
+	}
+	schema, err := store.StoryMemorySchemaContext(story.ID, 12*1024)
+	if err != nil {
+		t.Fatalf("StoryMemorySchemaContext failed: %v", err)
+	}
+	if schema != "" {
+		t.Fatalf("disabled memory structure should not enter schema context:\n%s", schema)
+	}
+	should, _, err := store.ShouldGenerateStoryMemory(story.ID, "main")
+	if err != nil {
+		t.Fatalf("ShouldGenerateStoryMemory failed: %v", err)
+	}
+	if should {
+		t.Fatalf("disabled memory structure should not trigger automatic generation")
+	}
+	records, err := store.ApplyStoryMemoryPatches(story.ID, "main", "", []StoryMemoryPatch{{
+		StructureID: "current_state",
+		Values:      map[string]string{"event": "不应写入"},
+	}})
+	if err != nil {
+		t.Fatalf("ApplyStoryMemoryPatches failed: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("disabled memory structure should ignore patches: %#v", records)
+	}
+}
+
+func TestMigrateStoryMemoryStructuresToDirectorModulesPreservesRecords(t *testing.T) {
+	root := t.TempDir()
+	novaDir := t.TempDir()
+	legacyStore := NewStore(root)
+	story, err := legacyStore.CreateStory(CreateStoryRequest{Title: "旧结构故事", StoryDirectorID: DefaultStoryDirectorID})
+	if err != nil {
+		t.Fatalf("CreateStory failed: %v", err)
+	}
+	structure, err := legacyStore.SaveStoryMemoryStructure(story.ID, StoryMemoryStructureRequest{
+		ID:         "relationship_clock",
+		Name:       "关系时钟",
+		Mode:       "keyed",
+		KeyFieldID: "name",
+		Fields: []StoryMemoryField{
+			{ID: "name", Name: "姓名", Required: true, Order: 10},
+			{ID: "status", Name: "状态", Order: 20},
+		},
+		Order: 90,
+	})
+	if err != nil {
+		t.Fatalf("SaveStoryMemoryStructure failed: %v", err)
+	}
+	record, err := legacyStore.SaveStoryMemoryRecord(story.ID, StoryMemoryRecordRequest{
+		BranchID:    "main",
+		StructureID: structure.ID,
+		Key:         "林川",
+		Values:      map[string]string{"name": "林川", "status": "信任主角"},
+	})
+	if err != nil {
+		t.Fatalf("SaveStoryMemoryRecord failed: %v", err)
+	}
+
+	store := NewStoreWithNovaDir(root, novaDir)
+	if err := store.MigrateStoryMemoryStructuresToDirectorModules(); err != nil {
+		t.Fatalf("MigrateStoryMemoryStructuresToDirectorModules failed: %v", err)
+	}
+	index, err := store.Index()
+	if err != nil {
+		t.Fatalf("Index failed: %v", err)
+	}
+	migratedStory := StorySummary{}
+	for _, candidate := range index.Stories {
+		if candidate.ID == story.ID {
+			migratedStory = candidate
+			break
+		}
+	}
+	if migratedStory.ID == "" {
+		t.Fatalf("migrated story missing from index: %#v", index.Stories)
+	}
+	if migratedStory.StoryDirectorID == "" || migratedStory.StoryDirectorID == DefaultStoryDirectorID {
+		t.Fatalf("story using built-in director should be moved to story-specific director: %#v", migratedStory)
+	}
+	wantMemoryID := normalizeDirectorModuleID(fmt.Sprintf("story-%s-memory", story.ID))
+	director, err := NewStoryDirectorLibrary(novaDir).Get(migratedStory.StoryDirectorID)
+	if err != nil {
+		t.Fatalf("get migrated director failed: %v", err)
+	}
+	if director.ModuleRefs.MemoryStructureID != wantMemoryID || director.ModuleRefs.MemoryStructureDisabled {
+		t.Fatalf("migrated director should reference story memory module: %#v", director.ModuleRefs)
+	}
+	module, err := NewStoryMemoryStructureLibrary(novaDir).Get(wantMemoryID)
+	if err != nil {
+		t.Fatalf("get migrated memory module failed: %v", err)
+	}
+	if got := storyMemoryStructureByID(module.Structures, structure.ID); got.ID == "" {
+		t.Fatalf("migrated memory module should contain custom structure: %#v", module.Structures)
+	}
+	state, err := store.StoryMemory(story.ID, "main", false)
+	if err != nil {
+		t.Fatalf("StoryMemory failed: %v", err)
+	}
+	if state.MemoryStructureID != wantMemoryID {
+		t.Fatalf("story memory should use migrated module, got %#v", state)
+	}
+	if len(state.Records) != 1 || state.Records[0].ID != record.ID || state.Records[0].Values["status"] != "信任主角" {
+		t.Fatalf("migration should preserve existing records without rewriting: %#v", state.Records)
 	}
 }
 

@@ -34,19 +34,103 @@ func sanitizeDisplayEvents(events []DisplayEvent) []DisplayEvent {
 			}
 		}
 		next := DisplayEvent{
-			ID:        strings.TrimSpace(event.ID),
-			Role:      role,
-			Content:   content,
-			Name:      name,
-			Args:      event.Args,
-			Status:    status,
-			Result:    event.Result,
-			CreatedAt: strings.TrimSpace(event.CreatedAt),
+			ID:                strings.TrimSpace(event.ID),
+			Role:              role,
+			Content:           content,
+			Name:              name,
+			Args:              event.Args,
+			Status:            status,
+			Result:            event.Result,
+			CreatedAt:         strings.TrimSpace(event.CreatedAt),
+			AgentKind:         strings.TrimSpace(event.AgentKind),
+			AgentName:         strings.TrimSpace(event.AgentName),
+			RootAgentName:     strings.TrimSpace(event.RootAgentName),
+			RunPath:           trimStringSlice(event.RunPath),
+			SubAgent:          event.SubAgent,
+			RunID:             strings.TrimSpace(event.RunID),
+			SubAgentSessionID: strings.TrimSpace(event.SubAgentSessionID),
+			SubAgentType:      strings.TrimSpace(event.SubAgentType),
+			SSEHiddenFields:   trimStringSlice(event.SSEHiddenFields),
+			SSEHiddenReason:   strings.TrimSpace(event.SSEHiddenReason),
+			SSEDisplayNotice:  strings.TrimSpace(event.SSEDisplayNotice),
+			SSEGeneratedChars: nonNegativeInt(event.SSEGeneratedChars),
 		}
 		result = append(result, next)
 	}
 	if len(result) == 0 {
 		return nil
+	}
+	return result
+}
+
+func trimStringSlice(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value != "" {
+			result = append(result, value)
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func sanitizeModelContextMessages(messages []ModelContextMessage) []ModelContextMessage {
+	if len(messages) == 0 {
+		return nil
+	}
+	result := make([]ModelContextMessage, 0, len(messages))
+	for _, msg := range messages {
+		role := strings.TrimSpace(msg.Role)
+		switch role {
+		case "assistant":
+			calls := sanitizeModelContextToolCalls(msg.ToolCalls)
+			if len(calls) == 0 {
+				continue
+			}
+			result = append(result, ModelContextMessage{Role: role, ToolCalls: calls})
+		case "tool":
+			toolCallID := strings.TrimSpace(msg.ToolCallID)
+			toolName := strings.TrimSpace(msg.ToolName)
+			if toolCallID == "" && toolName == "" {
+				continue
+			}
+			result = append(result, ModelContextMessage{
+				Role:       role,
+				Content:    msg.Content,
+				Name:       strings.TrimSpace(msg.Name),
+				ToolCallID: toolCallID,
+				ToolName:   toolName,
+			})
+		}
+	}
+	if len(result) == 0 {
+		return nil
+	}
+	return result
+}
+
+func sanitizeModelContextToolCalls(calls []ModelContextToolCall) []ModelContextToolCall {
+	if len(calls) == 0 {
+		return nil
+	}
+	result := make([]ModelContextToolCall, 0, len(calls))
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "" {
+			continue
+		}
+		call.ID = strings.TrimSpace(call.ID)
+		if call.Type == "" {
+			call.Type = "function"
+		}
+		call.Function.Name = name
+		result = append(result, call)
 	}
 	return result
 }
@@ -159,6 +243,7 @@ func displayEventKey(event DisplayEvent) string {
 }
 
 func applyStateOp(state map[string]any, op StateOp) {
+	op.Path = canonicalStatePath(op.Path)
 	switch op.Op {
 	case "set":
 		setPath(state, op.Path, op.Value)
@@ -186,9 +271,9 @@ func applyStateOp(state map[string]any, op StateOp) {
 		}
 		setPath(state, op.Path, next)
 	case "inc":
-		current, _ := getPath(state, op.Path).(float64)
+		current := numberFromAny(getPath(state, op.Path))
 		by := 1.0
-		if value, ok := op.Value.(float64); ok {
+		if value, ok := actorStateNumber(op.Value); ok {
 			by = value
 		}
 		setPath(state, op.Path, current+by)
@@ -198,6 +283,17 @@ func applyStateOp(state map[string]any, op StateOp) {
 }
 
 func getPath(root map[string]any, path string) any {
+	path = strings.TrimSpace(path)
+	if value := getPathExact(root, path); value != nil {
+		return value
+	}
+	if next, ok := legacyActorStatePath(path); ok {
+		return getPathExact(root, next)
+	}
+	return nil
+}
+
+func getPathExact(root map[string]any, path string) any {
 	parts := strings.Split(path, ".")
 	var current any = root
 	for _, part := range parts {
@@ -211,6 +307,7 @@ func getPath(root map[string]any, path string) any {
 }
 
 func setPath(root map[string]any, path string, value any) {
+	path = canonicalStatePath(path)
 	parts := strings.Split(path, ".")
 	current := root
 	for _, part := range parts[:len(parts)-1] {
@@ -225,6 +322,7 @@ func setPath(root map[string]any, path string, value any) {
 }
 
 func unsetPath(root map[string]any, path string) {
+	path = canonicalStatePath(path)
 	parts := strings.Split(path, ".")
 	current := root
 	for _, part := range parts[:len(parts)-1] {

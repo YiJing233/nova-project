@@ -1,12 +1,15 @@
 import type { TFunction } from 'i18next'
-import type { StoryOpeningConfig, StoryOpeningMode, StorySummary } from './types'
+import type { StateOp, StoryImageSettings, StoryOpeningConfig, StoryOpeningMode, StorySummary } from './types'
 
 export interface StoryCreateInput {
   title: string
   origin: string
   story_teller_id: string
+  story_director_id: string
   reply_target_chars: number
+  image_settings?: StoryImageSettings
   opening?: StoryOpeningConfig
+  initial_state_ops?: StateOp[]
 }
 
 export const STORY_OPENING_TEXT_LIMIT = 4000

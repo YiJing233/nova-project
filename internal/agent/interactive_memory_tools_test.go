@@ -120,6 +120,168 @@ func TestInteractiveMemoryToolsListReadAndRecordRecall(t *testing.T) {
 	}
 }
 
+func TestApplyStoryMemoryPatchesToolWritesValidatedCurrentBranchRecords(t *testing.T) {
+	workspace := t.TempDir()
+	store := interactive.NewStore(workspace)
+	story, err := store.CreateStory(interactive.CreateStoryRequest{Title: "导演记忆工具", Origin: "主角进入旧城"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, err := store.AppendTurn(story.ID, interactive.AppendTurnRequest{
+		BranchID:  "main",
+		User:      "我提醒林川小心钟楼",
+		Narrative: "林川点头，确认钟楼里有人盯着我们。",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied := 0
+	tools, err := newInteractiveStoryMemoryPatchTools(InteractiveStoryToolContext{
+		Store:    store,
+		StoryID:  story.ID,
+		BranchID: "main",
+		TurnID:   turn.ID,
+		OnStoryMemoryApplied: func(count int) {
+			applied += count
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tool count = %d, want 1", len(tools))
+	}
+	info, err := tools[0].Info(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Name != "apply_story_memory_patches" {
+		t.Fatalf("tool name = %s", info.Name)
+	}
+	output, err := tools[0].(tool.InvokableTool).InvokableRun(context.Background(), `{"patches":[{"op":"upsert","structure_id":"important_character","values":{"name":"林川","current_status":"确认钟楼有人盯梢","relationship_to_protagonist":"接受主角提醒并共同戒备","unexpected_field":"should be dropped"}}]}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed storyMemoryPatchToolOutput
+	if err := json.Unmarshal([]byte(output), &parsed); err != nil {
+		t.Fatalf("invalid tool output JSON: %v\n%s", err, output)
+	}
+	if parsed.AppliedRecords != 1 || parsed.BranchID != "main" || parsed.TurnID != turn.ID || applied != 1 {
+		t.Fatalf("unexpected tool output/callback: output=%#v applied=%d", parsed, applied)
+	}
+	memory, err := store.StoryMemory(story.ID, "main", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(memory.Records) != 1 {
+		t.Fatalf("record count = %d, want 1: %#v", len(memory.Records), memory.Records)
+	}
+	record := memory.Records[0]
+	if record.StructureID != "important_character" || record.BranchID != "main" || record.AnchorTurnID != turn.ID || record.Key != "林川" {
+		t.Fatalf("unexpected current-branch record: %#v", record)
+	}
+	if record.Values["current_status"] != "确认钟楼有人盯梢" || record.Values["unexpected_field"] != "" {
+		t.Fatalf("record values should be schema-filtered: %#v", record.Values)
+	}
+}
+
+func TestPrepareInteractiveTurnToolUsesRuleResolutionCallback(t *testing.T) {
+	expected := interactive.RuleResolution{
+		ID: "rr_test",
+		Request: interactive.TurnCheckRequest{
+			Action:     "强闯秘境",
+			Intent:     "冒险",
+			Challenge:  "秘境入口禁制",
+			Cost:       "失败会受伤",
+			State:      "禁制正在收束",
+			Difficulty: "normal",
+		},
+		Result: interactive.RuleResult{ID: "check_1", Dice: "1d20", Rolls: []int{7}, RollMode: "normal", KeptRoll: 7, Total: 7, Target: 15, Outcome: "failure", Result: "强闯失败"},
+	}
+	tools, err := newInteractiveTurnTools(InteractiveStoryToolContext{
+		StoryID:  "st_tool",
+		BranchID: "main",
+		PrepareTurn: func(ctx context.Context, request interactive.TurnCheckRequest) (interactive.RuleResolution, error) {
+			if request.Action != "强闯秘境" || request.Intent != "冒险" || request.Challenge != "秘境入口禁制" {
+				t.Fatalf("unexpected request: %#v", request)
+			}
+			return expected, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tool count = %d, want 1", len(tools))
+	}
+	info, err := tools[0].Info(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Name != "prepare_interactive_turn" {
+		t.Fatalf("tool name = %s", info.Name)
+	}
+	output, err := tools[0].(tool.InvokableTool).InvokableRun(context.Background(), `{"action":"强闯秘境","intent":"冒险","challenge":"秘境入口禁制","cost":"失败会受伤","state":"禁制正在收束","difficulty":"normal","outcomes":{"critical_success":{"result":"大成功"},"success":{"result":"成功"},"failure":{"result":"强闯失败"},"critical_failure":{"result":"大失败"}}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(output, `"resolution_id": "rr_test"`) || !strings.Contains(output, `"outcome": "failure"`) || strings.Contains(output, "accepted_brief") || strings.Contains(output, `"seed"`) || strings.Contains(output, `"request"`) {
+		t.Fatalf("unexpected output: %s", output)
+	}
+}
+
+func TestPrepareInteractiveTurnToolSchemaDocumentsEnums(t *testing.T) {
+	tools, err := newInteractiveTurnTools(InteractiveStoryToolContext{
+		PrepareTurn: func(ctx context.Context, request interactive.TurnCheckRequest) (interactive.RuleResolution, error) {
+			return interactive.RuleResolution{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("tool count = %d, want 1", len(tools))
+	}
+	info, err := tools[0].Info(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.ParamsOneOf == nil {
+		t.Fatal("prepare_interactive_turn should expose parameter schema")
+	}
+	params, err := info.ParamsOneOf.ToJSONSchema()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	schemaText := string(data)
+	for _, want := range []string{
+		`"difficulty"`,
+		`"very_easy"`,
+		`"easy"`,
+		`"normal"`,
+		`"hard"`,
+		`"very_hard"`,
+		`"template"`,
+		`"dice_check"`,
+		`"roll_mode"`,
+		`"advantage"`,
+		`"disadvantage"`,
+		`用户行为`,
+		`四档后果`,
+	} {
+		if !strings.Contains(schemaText, want) {
+			t.Fatalf("prepare_interactive_turn schema missing %q:\n%s", want, schemaText)
+		}
+	}
+	if !strings.Contains(info.Desc, "difficulty") || !strings.Contains(info.Desc, "very_easy/easy/normal/hard/very_hard") || !strings.Contains(info.Desc, "不要使用 medium/moderate") {
+		t.Fatalf("prepare_interactive_turn description should spell out enum protocol:\n%s", info.Desc)
+	}
+}
+
 func TestInteractiveMemoryReadToolReturnsAllRequestedContent(t *testing.T) {
 	workspace := t.TempDir()
 	store := interactive.NewStore(workspace)

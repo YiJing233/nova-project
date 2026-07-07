@@ -31,7 +31,17 @@ func TestConfigManagerResourceSkillNames(t *testing.T) {
 		{
 			name: "teller origin",
 			req:  ConfigManagerRequest{Origin: "teller", Context: map[string]string{"teller_count": "3"}},
-			want: []string{configManagerTellerSkill, configManagerImagePresetSkill},
+			want: []string{configManagerTellerSkill, configManagerStoryDirectorSkill, configManagerImagePresetSkill},
+		},
+		{
+			name: "story director signal",
+			req:  ConfigManagerRequest{Context: map[string]string{"story_director_count": "2", "selected_resource": "故事导演"}},
+			want: []string{configManagerStoryDirectorSkill},
+		},
+		{
+			name: "actor state signal",
+			req:  ConfigManagerRequest{Origin: "actor_state", Context: map[string]string{"actor_state_count": "1", "selected_resource": "Actor State"}},
+			want: []string{configManagerTellerSkill, configManagerStoryDirectorSkill, configManagerImagePresetSkill},
 		},
 		{
 			name: "skills origin",
@@ -54,9 +64,9 @@ func TestConfigManagerResourceSkillNames(t *testing.T) {
 			want: []string{configManagerAutomationSkill},
 		},
 		{
-			name: "unknown",
+			name: "lore origin",
 			req:  ConfigManagerRequest{Origin: "lore", ResourceID: "lore-config-agent"},
-			want: nil,
+			want: []string{configManagerLoreSkill},
 		},
 	}
 
@@ -67,6 +77,22 @@ func TestConfigManagerResourceSkillNames(t *testing.T) {
 				t.Fatalf("skill names = %#v, want %#v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestBuildConfigManagerMessageBoundsRequestContext(t *testing.T) {
+	message := buildConfigManagerMessage(ConfigManagerRequest{
+		Instruction: "生成事件包",
+		Origin:      "teller",
+		Context: map[string]string{
+			"large": strings.Repeat("设", configManagerRequestContextValueMaxBytes+100),
+		},
+	})
+	if !strings.Contains(message, "已按请求上下文上限截断") {
+		t.Fatalf("message should mark truncated context:\n%s", message)
+	}
+	if len([]byte(message)) > configManagerRequestContextValueMaxBytes+512 {
+		t.Fatalf("message context should stay bounded, got %d bytes", len([]byte(message)))
 	}
 }
 

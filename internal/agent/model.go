@@ -14,17 +14,18 @@ func chatModelConfigForAgent(cfg *config.Config, agentKind string) openai.ChatMo
 
 func chatModelConfigFromResolved(resolved config.ResolvedModelSettings) openai.ChatModelConfig {
 	modelCfg := openai.ChatModelConfig{
-		APIKey:  resolved.OpenAIAPIKey,
-		Model:   resolved.OpenAIModel,
-		BaseURL: resolved.OpenAIBaseURL,
+		APIKey:     resolved.OpenAIAPIKey,
+		Model:      resolved.OpenAIModel,
+		BaseURL:    resolved.OpenAIBaseURL,
+		HTTPClient: providercompat.WrapHTTPClient(nil),
 	}
 	if resolved.Temperature != nil {
 		temperature := float32(*resolved.Temperature)
 		modelCfg.Temperature = &temperature
 	}
 	extraFields := map[string]any{}
-	if resolved.EnableThinking != nil {
-		extraFields["enable_thinking"] = *resolved.EnableThinking
+	for k, v := range providercompat.ThinkingExtraFields(modelCfg, resolved.EnableThinking) {
+		extraFields[k] = v
 	}
 	// 让 providercompat 决定是否要注入 provider 特有的请求字段。
 	// agent 包不感知任何具体 provider。

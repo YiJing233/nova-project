@@ -10,27 +10,40 @@ type CreateStoryRequest struct {
 	Title            string             `json:"title"`
 	Origin           string             `json:"origin"`
 	StoryTellerID    string             `json:"story_teller_id"`
+	StoryDirectorID  string             `json:"story_director_id,omitempty"`
 	ReplyTargetChars int                `json:"reply_target_chars"`
 	Opening          StoryOpeningConfig `json:"opening,omitempty"`
 	ImageSettings    StoryImageSettings `json:"image_settings,omitempty"`
+	InitialStateOps  []StateOp          `json:"initial_state_ops,omitempty"`
+	DirectorPlanSeed *DirectorPlanSeed  `json:"-"`
 }
 
 type AppendTurnRequest struct {
-	BranchID      string         `json:"branch_id"`
-	User          string         `json:"user"`
-	Narrative     string         `json:"narrative"`
-	Thinking      string         `json:"thinking,omitempty"`
-	DisplayEvents []DisplayEvent `json:"display_events,omitempty"`
+	BranchID             string                `json:"branch_id"`
+	User                 string                `json:"user"`
+	Narrative            string                `json:"narrative"`
+	Thinking             string                `json:"thinking,omitempty"`
+	DisplayEvents        []DisplayEvent        `json:"display_events,omitempty"`
+	ModelContextMessages []ModelContextMessage `json:"model_context_messages,omitempty"`
 }
 
 type AppendTurnWithStateRequest struct {
-	BranchID      string         `json:"branch_id"`
-	User          string         `json:"user"`
-	Narrative     string         `json:"narrative"`
-	Thinking      string         `json:"thinking,omitempty"`
-	DisplayEvents []DisplayEvent `json:"display_events,omitempty"`
-	Ops           []StateOp      `json:"ops,omitempty"`
-	HotState      *HotState      `json:"hot_state,omitempty"`
+	BranchID             string                `json:"branch_id"`
+	User                 string                `json:"user"`
+	Narrative            string                `json:"narrative"`
+	Thinking             string                `json:"thinking,omitempty"`
+	DisplayEvents        []DisplayEvent        `json:"display_events,omitempty"`
+	ModelContextMessages []ModelContextMessage `json:"model_context_messages,omitempty"`
+	Ops                  []StateOp             `json:"ops,omitempty"`
+	HotState             *HotState             `json:"hot_state,omitempty"`
+	TurnBrief            *TurnBrief            `json:"turn_brief,omitempty"`
+	RuleResolution       *RuleResolution       `json:"rule_resolution,omitempty"`
+	TerminalOutcome      *TerminalOutcome      `json:"terminal_outcome,omitempty"`
+}
+
+type RuleResolutionRerollRequest struct {
+	BranchID string `json:"branch_id,omitempty"`
+	TurnID   string `json:"turn_id,omitempty"`
 }
 
 type RewindTurnRequest struct {
@@ -66,6 +79,7 @@ type MarkStateFailedRequest struct {
 type UpdateStoryRequest struct {
 	Title            string              `json:"title"`
 	StoryTellerID    string              `json:"story_teller_id"`
+	StoryDirectorID  string              `json:"story_director_id,omitempty"`
 	ReplyTargetChars *int                `json:"reply_target_chars,omitempty"`
 	Opening          *StoryOpeningConfig `json:"opening,omitempty"`
 	ImageSettings    *StoryImageSettings `json:"image_settings,omitempty"`
@@ -86,6 +100,7 @@ type StorySummary struct {
 	Title            string             `json:"title"`
 	Origin           string             `json:"origin"`
 	StoryTellerID    string             `json:"story_teller_id"`
+	StoryDirectorID  string             `json:"story_director_id"`
 	ReplyTargetChars int                `json:"reply_target_chars"`
 	Opening          StoryOpeningConfig `json:"opening"`
 	ImageSettings    StoryImageSettings `json:"image_settings"`
@@ -133,6 +148,7 @@ type StoryMeta struct {
 	Title            string                `json:"title"`
 	Origin           string                `json:"origin"`
 	StoryTellerID    string                `json:"story_teller_id"`
+	StoryDirectorID  string                `json:"story_director_id,omitempty"`
 	ReplyTargetChars int                   `json:"reply_target_chars"`
 	Opening          StoryOpeningConfig    `json:"opening"`
 	ImageSettings    StoryImageSettings    `json:"image_settings"`
@@ -143,28 +159,32 @@ type StoryMeta struct {
 }
 
 type TurnEvent struct {
-	V             int             `json:"v"`
-	Type          string          `json:"type"`
-	ID            string          `json:"id"`
-	ParentID      any             `json:"parent_id"`
-	BranchID      string          `json:"branch_id"`
-	Ts            string          `json:"ts"`
-	User          string          `json:"user"`
-	Narrative     string          `json:"narrative"`
-	Thinking      string          `json:"thinking,omitempty"`
-	DisplayEvents []DisplayEvent  `json:"display_events,omitempty"`
-	StateDelta    *StateDelta     `json:"state_delta,omitempty"`
-	HotState      *HotState       `json:"hot_state,omitempty"`
-	StateStatus   string          `json:"state_status,omitempty"`
-	StateError    string          `json:"state_error,omitempty"`
-	MemoryEntryID string          `json:"memory_entry_id,omitempty"`
-	MemoryStatus  string          `json:"memory_status,omitempty"`
-	MemoryError   string          `json:"memory_error,omitempty"`
-	Alts          []TurnAlt       `json:"alts,omitempty"`
-	AltIdx        int             `json:"alt_idx,omitempty"`
-	Versions      []TurnVersion   `json:"versions,omitempty"`
-	VersionIdx    int             `json:"version_idx,omitempty"`
-	Flags         map[string]bool `json:"flags,omitempty"`
+	V                    int                   `json:"v"`
+	Type                 string                `json:"type"`
+	ID                   string                `json:"id"`
+	ParentID             any                   `json:"parent_id"`
+	BranchID             string                `json:"branch_id"`
+	Ts                   string                `json:"ts"`
+	User                 string                `json:"user"`
+	Narrative            string                `json:"narrative"`
+	Thinking             string                `json:"thinking,omitempty"`
+	DisplayEvents        []DisplayEvent        `json:"display_events,omitempty"`
+	ModelContextMessages []ModelContextMessage `json:"model_context_messages,omitempty"`
+	StateDelta           *StateDelta           `json:"state_delta,omitempty"`
+	HotState             *HotState             `json:"hot_state,omitempty"`
+	TurnBrief            *TurnBrief            `json:"turn_brief,omitempty"`
+	RuleResolution       *RuleResolution       `json:"rule_resolution,omitempty"`
+	TerminalOutcome      *TerminalOutcome      `json:"terminal_outcome,omitempty"`
+	StateStatus          string                `json:"state_status,omitempty"`
+	StateError           string                `json:"state_error,omitempty"`
+	MemoryEntryID        string                `json:"memory_entry_id,omitempty"`
+	MemoryStatus         string                `json:"memory_status,omitempty"`
+	MemoryError          string                `json:"memory_error,omitempty"`
+	Alts                 []TurnAlt             `json:"alts,omitempty"`
+	AltIdx               int                   `json:"alt_idx,omitempty"`
+	Versions             []TurnVersion         `json:"versions,omitempty"`
+	VersionIdx           int                   `json:"version_idx,omitempty"`
+	Flags                map[string]bool       `json:"flags,omitempty"`
 }
 
 const TokenUsageEventType = "token_usage"
@@ -180,6 +200,7 @@ type DisplayEvent struct {
 	Status            string   `json:"status,omitempty"`
 	Result            string   `json:"result,omitempty"`
 	CreatedAt         string   `json:"created_at,omitempty"`
+	AgentKind         string   `json:"agent_kind,omitempty"`
 	AgentName         string   `json:"agent_name,omitempty"`
 	RootAgentName     string   `json:"root_agent_name,omitempty"`
 	RunPath           []string `json:"run_path,omitempty"`
@@ -187,6 +208,34 @@ type DisplayEvent struct {
 	RunID             string   `json:"run_id,omitempty"`
 	SubAgentSessionID string   `json:"subagent_session_id,omitempty"`
 	SubAgentType      string   `json:"subagent_type,omitempty"`
+	SSEHiddenFields   []string `json:"sse_hidden_fields,omitempty"`
+	SSEHiddenReason   string   `json:"sse_hidden_reason,omitempty"`
+	SSEDisplayNotice  string   `json:"sse_display_notice,omitempty"`
+	SSEGeneratedChars int      `json:"sse_generated_chars,omitempty"`
+}
+
+// ModelContextMessage is model-visible turn evidence hidden from the chat UI.
+// It stores only assistant tool calls and tool results, never raw thinking.
+type ModelContextMessage struct {
+	Role       string                 `json:"role"`
+	Content    string                 `json:"content,omitempty"`
+	Name       string                 `json:"name,omitempty"`
+	ToolCalls  []ModelContextToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string                 `json:"tool_call_id,omitempty"`
+	ToolName   string                 `json:"tool_name,omitempty"`
+}
+
+type ModelContextToolCall struct {
+	Index    *int                     `json:"index,omitempty"`
+	ID       string                   `json:"id"`
+	Type     string                   `json:"type"`
+	Function ModelContextFunctionCall `json:"function"`
+	Extra    map[string]any           `json:"extra,omitempty"`
+}
+
+type ModelContextFunctionCall struct {
+	Name      string `json:"name,omitempty"`
+	Arguments string `json:"arguments,omitempty"`
 }
 
 type TokenUsageEvent struct {
@@ -282,6 +331,7 @@ type ContextCompactionEvent struct {
 	TokensAfter         int     `json:"tokens_after"`
 	TargetRatio         float64 `json:"target_ratio,omitempty"`
 	ContextWindowTokens int     `json:"context_window_tokens"`
+	Strategy            string  `json:"strategy,omitempty"`
 	Threshold           float64 `json:"threshold"`
 	Reason              string  `json:"reason,omitempty"`
 	Phase               string  `json:"phase,omitempty"`
@@ -312,9 +362,11 @@ type BranchEvent struct {
 }
 
 type StateOp struct {
-	Op    string `json:"op"`
-	Path  string `json:"path"`
-	Value any    `json:"value,omitempty"`
+	Op           string `json:"op"`
+	Path         string `json:"path"`
+	Value        any    `json:"value,omitempty"`
+	Reason       string `json:"reason,omitempty"`
+	SourceTurnID string `json:"source_turn_id,omitempty"`
 }
 
 type Snapshot struct {
@@ -325,6 +377,8 @@ type Snapshot struct {
 	TokenUsageEvents         []TokenUsageEvent              `json:"token_usage_events,omitempty"`
 	ContextCompaction        *ContextCompactionEvent        `json:"context_compaction,omitempty"`
 	ContextCompactionRemoval *ContextCompactionRemovalEvent `json:"context_compaction_removal,omitempty"`
+	DirectorPlan             *DirectorPlan                  `json:"-"`
+	DirectorPlanStatus       *DirectorPlanStatus            `json:"director_plan_status,omitempty"`
 	State                    map[string]any                 `json:"state"`
 	Graph                    StoryGraph                     `json:"graph"`
 }
@@ -335,14 +389,16 @@ type StoryGraph struct {
 }
 
 type PlotNode struct {
-	ID       string `json:"id"`
-	ParentID string `json:"parent_id,omitempty"`
-	BranchID string `json:"branch_id"`
-	Title    string `json:"title"`
-	Summary  string `json:"summary"`
-	Ts       string `json:"ts"`
-	Current  bool   `json:"current"`
-	Head     bool   `json:"head"`
+	ID           string `json:"id"`
+	ParentID     string `json:"parent_id,omitempty"`
+	BranchID     string `json:"branch_id"`
+	Title        string `json:"title"`
+	Summary      string `json:"summary"`
+	Ts           string `json:"ts"`
+	Current      bool   `json:"current"`
+	Head         bool   `json:"head"`
+	Terminal     bool   `json:"terminal,omitempty"`
+	TerminalType string `json:"terminal_type,omitempty"`
 }
 
 type StoryContext struct {
@@ -436,6 +492,8 @@ type StoryMemoryStructure struct {
 	Enabled               *bool              `json:"enabled,omitempty"`
 	Order                 int                `json:"order"`
 	BuiltIn               bool               `json:"built_in,omitempty"`
+	ReadOnly              bool               `json:"read_only,omitempty"`
+	Derived               bool               `json:"derived,omitempty"`
 	CreatedAt             string             `json:"created_at,omitempty"`
 	UpdatedAt             string             `json:"updated_at,omitempty"`
 }
@@ -457,15 +515,18 @@ type StoryMemoryRecord struct {
 }
 
 type StoryMemoryState struct {
-	StoryID         string                   `json:"story_id"`
-	BranchID        string                   `json:"branch_id"`
-	Settings        StoryMemorySettings      `json:"settings"`
-	Structures      []StoryMemoryStructure   `json:"structures"`
-	Records         []StoryMemoryRecord      `json:"records"`
-	RecentRecall    *InteractiveMemoryRecall `json:"recent_recall,omitempty"`
-	SyncStatus      string                   `json:"sync_status,omitempty"`
-	SyncError       string                   `json:"sync_error,omitempty"`
-	NextAutoInTurns int                      `json:"next_auto_in_turns,omitempty"`
+	StoryID                 string                   `json:"story_id"`
+	BranchID                string                   `json:"branch_id"`
+	Settings                StoryMemorySettings      `json:"settings"`
+	Structures              []StoryMemoryStructure   `json:"structures"`
+	MemoryStructureID       string                   `json:"memory_structure_id,omitempty"`
+	MemoryStructureName     string                   `json:"memory_structure_name,omitempty"`
+	MemoryStructureDisabled bool                     `json:"memory_structure_disabled,omitempty"`
+	Records                 []StoryMemoryRecord      `json:"records"`
+	RecentRecall            *InteractiveMemoryRecall `json:"recent_recall,omitempty"`
+	SyncStatus              string                   `json:"sync_status,omitempty"`
+	SyncError               string                   `json:"sync_error,omitempty"`
+	NextAutoInTurns         int                      `json:"next_auto_in_turns,omitempty"`
 }
 
 type StoryMemorySettingsUpdateRequest struct {
@@ -483,6 +544,8 @@ type StoryMemoryStructureRequest struct {
 	Fields                []StoryMemoryField `json:"fields"`
 	Enabled               *bool              `json:"enabled,omitempty"`
 	Order                 int                `json:"order"`
+	ReadOnly              bool               `json:"read_only,omitempty"`
+	Derived               bool               `json:"derived,omitempty"`
 }
 
 type StoryMemoryRecordRequest struct {

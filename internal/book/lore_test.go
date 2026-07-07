@@ -2,6 +2,7 @@ package book
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -117,6 +118,89 @@ func TestLoreStoreProgressiveContextSplitsResidentAndIndex(t *testing.T) {
 	}
 }
 
+func TestLoreStoreCompactIndexOmitsHeavyFieldsAndDisabledItems(t *testing.T) {
+	store := NewLoreStore(t.TempDir())
+	disabled := false
+	if _, err := store.Create(LoreItemInput{ID: "base", Type: "location", Name: "黄泉酒馆", Importance: "important", LoadMode: LoreLoadModeAuto, Tags: []string{"据点"}, Keywords: []string{"黄泉"}, BriefDescription: "地点 黄泉酒馆。索引简介。上下文出现相关内容时，一定要参考本项详情。", Content: "据点完整正文"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(LoreItemInput{ID: "hidden", Enabled: &disabled, Type: "rule", Name: "禁用规则", Importance: "important", LoadMode: LoreLoadModeAuto, BriefDescription: "禁用规则简介", Content: "禁用正文"}); err != nil {
+		t.Fatal(err)
+	}
+
+	index, err := store.LoreIndexMarkdown(LoreIndexOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"# 资料库索引", "id: base", "名称: 黄泉酒馆", "简介: 地点 黄泉酒馆。索引简介。"} {
+		if !strings.Contains(index, want) {
+			t.Fatalf("compact index missing %q:\n%s", want, index)
+		}
+	}
+	for _, unexpected := range []string{"据点完整正文", "禁用规则", "类型:", "标签:", "重要度:", "加载策略:"} {
+		if strings.Contains(index, unexpected) {
+			t.Fatalf("compact index should not contain %q:\n%s", unexpected, index)
+		}
+	}
+}
+
+func TestLoreStoreCompactIndexQueryMatchesMetadataAndContentWithoutLeakingContent(t *testing.T) {
+	store := NewLoreStore(t.TempDir())
+	if _, err := store.Create(LoreItemInput{ID: "archive", Type: "location", Name: "旧档案室", Importance: "important", LoadMode: LoreLoadModeAuto, Keywords: []string{"档案柜"}, BriefDescription: "地点 旧档案室。只有尘封档案。上下文出现相关内容时，一定要参考本项详情。", Content: "暗门后藏着完整原文线索。"}); err != nil {
+		t.Fatal(err)
+	}
+
+	keywordIndex, err := store.LoreIndexMarkdown(LoreIndexOptions{Query: "档案柜"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(keywordIndex, "id: archive") || !strings.Contains(keywordIndex, "匹配: 关键词") {
+		t.Fatalf("keyword query should return match source:\n%s", keywordIndex)
+	}
+
+	contentIndex, err := store.LoreIndexMarkdown(LoreIndexOptions{Query: "完整原文"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(contentIndex, "id: archive") || !strings.Contains(contentIndex, "匹配: 正文") {
+		t.Fatalf("content query should return content match source:\n%s", contentIndex)
+	}
+	if strings.Contains(contentIndex, "暗门后藏着完整原文线索") {
+		t.Fatalf("query index should not leak full content:\n%s", contentIndex)
+	}
+}
+
+func TestLoreStoreCompactIndexBudgetFallsBackToNameRoster(t *testing.T) {
+	store := NewLoreStore(t.TempDir())
+	longBrief := strings.Repeat("很长简介", 90)
+	for i := 0; i < 8; i++ {
+		id := fmt.Sprintf("item_%02d", i)
+		if _, err := store.Create(LoreItemInput{ID: id, Type: "other", Name: "资料" + id, Importance: "important", LoadMode: LoreLoadModeAuto, BriefDescription: longBrief, Content: "正文"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	index, err := store.LoreIndexMarkdown(LoreIndexOptions{MaxBytes: 1000})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len([]byte(index)) > 1000 {
+		t.Fatalf("budgeted index bytes = %d, want <= 1000\n%s", len([]byte(index)), index)
+	}
+	if !strings.Contains(index, "已降级为仅 ID 和名称") {
+		t.Fatalf("budgeted index should explain name-only fallback:\n%s", index)
+	}
+	if strings.Contains(index, "简介:") {
+		t.Fatalf("name-only fallback should omit briefs:\n%s", index)
+	}
+	for i := 0; i < 8; i++ {
+		id := fmt.Sprintf("item_%02d", i)
+		if !strings.Contains(index, "id: "+id) || !strings.Contains(index, "名称: 资料"+id) {
+			t.Fatalf("name-only fallback should retain full roster entry %s:\n%s", id, index)
+		}
+	}
+}
+
 func TestLoreStoreStoryMemoryContextIncludesBoundedFullLore(t *testing.T) {
 	store := NewLoreStore(t.TempDir())
 	if _, err := store.Create(LoreItemInput{ID: "hero", Type: "character", Name: "林川", Importance: "major", LoadMode: LoreLoadModeResident, Content: "主角完整正文"}); err != nil {
@@ -195,14 +279,17 @@ func TestLoreStoreCreateUpdateDelete(t *testing.T) {
 	if item.ID == "" || len(item.Tags) != 1 {
 		t.Fatalf("unexpected item: %#v", item)
 	}
-	if !strings.HasPrefix(item.ID, "林川_") {
-		t.Fatalf("generated ID should use lore item name, got %s", item.ID)
+	if item.ID != "林川" {
+		t.Fatalf("generated ID should be based on the lore item name without random suffix, got %s", item.ID)
 	}
 	if item.BriefDescription == "" || !strings.Contains(item.BriefDescription, "角色 林川。") || !strings.Contains(item.BriefDescription, "一定要参考本项详情") {
 		t.Fatalf("brief description should be generated: %#v", item)
 	}
 	if _, err := store.Create(LoreItemInput{ID: item.ID, Type: "character", Name: "重复林川"}); err == nil || !strings.Contains(err.Error(), "资料 ID 已存在") {
 		t.Fatalf("expected duplicate ID error, got %v", err)
+	}
+	if _, err := store.Create(LoreItemInput{Type: "character", Name: "林川"}); err == nil || !strings.Contains(err.Error(), "资料名称已存在") {
+		t.Fatalf("expected duplicate name error, got %v", err)
 	}
 
 	updated, err := store.Update(item.ID, LoreItemInput{
@@ -217,6 +304,12 @@ func TestLoreStoreCreateUpdateDelete(t *testing.T) {
 	if updated.Type != "location" || updated.Name != "黄泉酒馆" {
 		t.Fatalf("unexpected updated item: %#v", updated)
 	}
+	if _, err := store.Create(LoreItemInput{Type: "location", Name: "林川", Importance: "important"}); err != nil {
+		t.Fatalf("old name should be available after rename: %v", err)
+	}
+	if _, err := store.Update(updated.ID, LoreItemInput{Type: "location", Name: "林川", Importance: "important"}); err == nil || !strings.Contains(err.Error(), "资料名称已存在") {
+		t.Fatalf("expected duplicate name error on update, got %v", err)
+	}
 
 	if err := store.Delete(item.ID); err != nil {
 		t.Fatal(err)
@@ -225,8 +318,51 @@ func TestLoreStoreCreateUpdateDelete(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 0 {
-		t.Fatalf("items should be empty after delete: %#v", items)
+	if len(items) != 1 || items[0].Name != "林川" {
+		t.Fatalf("only the replacement item should remain after delete: %#v", items)
+	}
+}
+
+func TestLoreStoreReadsLegacyNovaLoreWhenDenovaWasGeneratedEmpty(t *testing.T) {
+	workspace := t.TempDir()
+	currentLore := filepath.Join(workspace, ".denova", "lore", "items.json")
+	legacyLore := filepath.Join(workspace, ".nova", "lore", "items.json")
+	if err := os.MkdirAll(filepath.Dir(currentLore), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(currentLore, []byte(`{"version":1,"items":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(legacyLore), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(legacyLore, []byte(`{
+  "version": 1,
+  "items": [
+    {"id":"hero","enabled":true,"type":"character","name":"林川","importance":"major","content":"旧资料库正文"}
+  ]
+}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := NewLoreStore(workspace)
+	items, err := store.ListAll()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != "hero" {
+		t.Fatalf("should read existing legacy lore items: %#v", items)
+	}
+
+	if _, err := store.Create(LoreItemInput{ID: "base", Type: "location", Name: "黄泉酒馆", Importance: "important", Content: "据点。"}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(legacyLore)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), `"id": "hero"`) || !strings.Contains(string(data), `"id": "base"`) {
+		t.Fatalf("writes should stay with legacy lore file, got:\n%s", data)
 	}
 }
 
@@ -249,6 +385,42 @@ func TestLoreStoreUpdateRejectsStaleRevision(t *testing.T) {
 	}
 	if got.Content != agent.Content {
 		t.Fatalf("stale save should not overwrite Agent content: %#v", got)
+	}
+}
+
+func TestLoreStoreImageSurvivesTextUpdateAndCanBeCleared(t *testing.T) {
+	store := NewLoreStore(t.TempDir())
+	item, err := store.Create(LoreItemInput{Type: "character", Name: "林川", Importance: "major", Content: "旧内容"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	withImage, err := store.SetImage(item.ID, &LoreItemImage{
+		Schema:    "lore_item_image.v1",
+		ImagePath: "assets/lore/images/hero/run/image.png",
+		MetaPath:  "assets/lore/images/hero/run/meta.json",
+		ProfileID: "default",
+		Provider:  "openai",
+		Model:     "gpt-image-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if withImage.Image == nil || withImage.Image.ImagePath == "" {
+		t.Fatalf("image should be attached: %#v", withImage)
+	}
+	updated, err := store.Update(item.ID, LoreItemInput{Type: "character", Name: "林川", Importance: "major", Content: "新内容"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Image == nil || updated.Image.ImagePath != withImage.Image.ImagePath {
+		t.Fatalf("text update should preserve current image: %#v", updated)
+	}
+	cleared, err := store.SetImage(item.ID, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cleared.Image != nil {
+		t.Fatalf("image should be cleared: %#v", cleared.Image)
 	}
 }
 
@@ -295,8 +467,8 @@ func TestLoreStoreApplyOperationsDoesNotCreateSeparateVersions(t *testing.T) {
 	if len(result.Updated) != 1 || len(result.Created) != 1 {
 		t.Fatalf("unexpected apply result: %#v", result)
 	}
-	if !strings.HasPrefix(result.Created[0].ID, "黄泉酒馆_") {
-		t.Fatalf("agent-created item should use name-based ID, got %s", result.Created[0].ID)
+	if result.Created[0].ID != "黄泉酒馆" {
+		t.Fatalf("agent-created item should use name-based ID without random suffix, got %s", result.Created[0].ID)
 	}
 
 	items, err := store.List()
@@ -311,6 +483,18 @@ func TestLoreStoreApplyOperationsDoesNotCreateSeparateVersions(t *testing.T) {
 	}
 }
 
+func TestLoreStoreApplyOperationsRejectsDuplicateNames(t *testing.T) {
+	store := NewLoreStore(t.TempDir())
+	if _, err := store.Create(LoreItemInput{ID: "hero", Type: "character", Name: "林川", Importance: "major"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ApplyOperations("创建重名资料", []LoreOperation{
+		{Op: "create", Item: LoreItemInput{Type: "character", Name: "林川", Importance: "major"}},
+	}); err == nil || !strings.Contains(err.Error(), "资料名称已存在") {
+		t.Fatalf("expected duplicate name error on create operation, got %v", err)
+	}
+}
+
 func TestUniqueLoreIDFromBaseAppendsSuffixOnCollision(t *testing.T) {
 	items := []LoreItem{
 		{ID: "world-1780235672765251000"},
@@ -320,5 +504,15 @@ func TestUniqueLoreIDFromBaseAppendsSuffixOnCollision(t *testing.T) {
 	got := uniqueLoreIDFromBase(items, "world-1780235672765251000")
 	if got != "world-1780235672765251000-3" {
 		t.Fatalf("唯一资料 ID 不符合预期: %s", got)
+	}
+}
+
+func TestNewUniqueLoreIDUsesNameWithoutRandomSuffix(t *testing.T) {
+	if got := newUniqueLoreID(nil, "黄泉酒馆", "location"); got != "黄泉酒馆" {
+		t.Fatalf("generated lore ID should use the normalized name directly, got %s", got)
+	}
+	items := []LoreItem{{ID: "huang_quan"}}
+	if got := newUniqueLoreID(items, "Huang Quan", "location"); got != "huang_quan-2" {
+		t.Fatalf("ID collision should use numeric suffix, got %s", got)
 	}
 }

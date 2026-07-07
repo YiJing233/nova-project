@@ -129,6 +129,7 @@ func (r *displayEventRecorder) Record(ev Event) {
 			Args:              args,
 			Status:            "running",
 			RunID:             meta.RunID,
+			AgentKind:         meta.AgentKind,
 			AgentName:         meta.AgentName,
 			RootAgentName:     meta.RootAgentName,
 			RunPath:           append([]string(nil), meta.RunPath...),
@@ -251,6 +252,12 @@ func (r *displayEventRecorder) Record(ev Event) {
 		r.pendingToolIDs = make(map[string]string)
 	case "done":
 		r.flushThinking()
+		for id, name := range r.pendingToolIDs {
+			if err := r.appender.UpdateDisplayToolStatus(id, name, "success"); err != nil {
+				log.Printf("[agent-run] persist display tool_done failed name=%s id=%s err=%v", name, id, err)
+			}
+		}
+		r.pendingToolIDs = make(map[string]string)
 	}
 }
 
@@ -268,6 +275,7 @@ func (r *displayEventRecorder) flushThinking() {
 		Role:              "thinking",
 		Content:           content,
 		RunID:             r.thinkingMeta.RunID,
+		AgentKind:         r.thinkingMeta.AgentKind,
 		AgentName:         r.thinkingMeta.AgentName,
 		RootAgentName:     r.thinkingMeta.RootAgentName,
 		RunPath:           append([]string(nil), r.thinkingMeta.RunPath...),
@@ -304,6 +312,7 @@ func (r *displayEventRecorder) recordSubAgentAssistantChunk(meta agentEventMetad
 		Content:           content,
 		Status:            "running",
 		RunID:             meta.RunID,
+		AgentKind:         meta.AgentKind,
 		AgentName:         meta.AgentName,
 		RootAgentName:     meta.RootAgentName,
 		RunPath:           append([]string(nil), meta.RunPath...),

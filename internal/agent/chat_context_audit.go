@@ -52,14 +52,32 @@ func (l *contextBuildLog) add(source, title, content, note string) {
 func (l *contextBuildLog) addStyleRules(rules []StyleRule) {
 	for _, rule := range rules {
 		scene := strings.TrimSpace(rule.Scene)
-		if scene == "" || len(rule.StyleContents) == 0 {
+		if !rule.Global && scene == "" {
+			continue
+		}
+		if len(rule.StyleReferences) == 0 && len(rule.StyleContents) == 0 {
 			continue
 		}
 		contents := trimmedNonEmpty(rule.StyleContents)
-		if len(contents) == 0 {
-			continue
+		for _, ref := range rule.StyleReferences {
+			line := strings.TrimSpace(ref.Name)
+			if line == "" {
+				line = strings.TrimSpace(ref.DisplayPath)
+			}
+			if path := strings.TrimSpace(ref.Path); path != "" {
+				line = strings.TrimSpace(line + " " + path)
+			}
+			if line != "" {
+				contents = append(contents, line)
+			}
 		}
-		l.add("系统提示", "场景化风格规则："+scene, strings.Join(contents, "\n\n---\n\n"), "Agent 将按 system prompt 中的场景参考已保存的风格内容")
+		if len(contents) > 0 {
+			title := "文风参考：全局"
+			if !rule.Global {
+				title = "文风参考：" + scene
+			}
+			l.add("系统提示", title, strings.Join(contents, "\n\n---\n\n"), "Agent 将按 system prompt 中的文风参考索引读取共享文风参考")
+		}
 	}
 }
 

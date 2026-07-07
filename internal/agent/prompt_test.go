@@ -27,13 +27,10 @@ func TestBuildInteractiveStoryInstructionIsIsolatedFromIDEPrompt(t *testing.T) {
 			t.Fatalf("interactive story instruction should not contain IDE-only prompt %q:\n%s", forbidden, instruction)
 		}
 	}
-	for _, required := range []string{"游戏模式", "互动文字冒险", "只输出本回合可展示在故事舞台上的故事正文", "<HOT_STATE>", "<STATE_DELTA>", "禁止使用写文件工具", "write_todos", "<invoke>", "文字小说 RPG", "回合裁定循环", "可选择", "一致性自检", "list_lore_items", "read_lore_items", "list_interactive_memories", "read_interactive_memories"} {
+	for _, required := range []string{"游戏模式", "互动文字冒险", "只输出本回合可展示在故事舞台上的故事正文", "隐藏状态块", "快捷选择块", "禁止使用写文件工具", "write_todos", "<invoke>", "文字小说 RPG", "回合裁定循环", "可选择", "一致性自检", "list_lore_items", "read_lore_items", "list_interactive_memories", "read_interactive_memories"} {
 		if !strings.Contains(instruction, required) {
 			t.Fatalf("interactive story instruction should contain %q:\n%s", required, instruction)
 		}
-	}
-	if strings.Contains(instruction, "<NARRATIVE>") {
-		t.Fatalf("interactive story instruction should not require narrative XML wrapper:\n%s", instruction)
 	}
 	if !strings.Contains(instruction, "导演系统规则") || !strings.Contains(instruction, "经典叙事者") {
 		t.Fatalf("interactive story instruction should include teller system rules:\n%s", instruction)
@@ -212,7 +209,7 @@ func TestBuildInstructionIncludesStyleRulesInSystemPrompt(t *testing.T) {
 		StyleRules: []StyleRule{{Scene: "激烈打斗", StyleContents: []string{"短句留白"}}},
 	})
 
-	for _, required := range []string{"## 场景化风格规则", "场景：激烈打斗", "短句留白", "触发规则", "system prompt 注入了场景化风格规则"} {
+	for _, required := range []string{"## 文风参考", "场景：激烈打斗", "短句留白", "触发规则", "system prompt 注入了文风参考"} {
 		if !strings.Contains(instruction, required) {
 			t.Fatalf("system prompt should include style rule %q:\n%s", required, instruction)
 		}
@@ -246,7 +243,7 @@ func TestBuildInteractiveStoryInstructionIncludesStyleRulesInSystemPrompt(t *tes
 		StyleRules:              []prompts.StyleRule{{Scene: "日常对话", StyleContents: []string{"克制对白"}}},
 	})
 
-	for _, required := range []string{"## 场景化风格规则", "场景：日常对话", "克制对白", "system prompt 中的场景化风格内容"} {
+	for _, required := range []string{"## 文风参考", "场景：日常对话", "克制对白", "system prompt 中的文风参考索引"} {
 		if !strings.Contains(instruction, required) {
 			t.Fatalf("interactive system prompt should include style rule %q:\n%s", required, instruction)
 		}
@@ -293,14 +290,8 @@ func TestBuiltinAgentPromptsExposeInteractiveMemoryToolsWithoutCustomPrompt(t *t
 	if !strings.Contains(interactive.OutputProtocol, "只输出本回合可展示在故事舞台上的故事正文") {
 		t.Fatalf("output protocol should require direct narrative text: %#v", interactive)
 	}
-	if strings.Contains(interactive.OutputProtocol, "<NARRATIVE>") {
-		t.Fatalf("output protocol should not require narrative XML wrapper: %#v", interactive)
-	}
 	if !strings.Contains(interactive.EditableSystemPrompt, "list_interactive_memories") || !strings.Contains(interactive.EditableSystemPrompt, "read_interactive_memories") {
 		t.Fatalf("editable prompt should include memory recall flow: %#v", interactive)
-	}
-	if strings.Contains(interactive.EditableSystemPrompt, "<NARRATIVE>") {
-		t.Fatalf("editable prompt should not include legacy narrative XML wrapper: %s", interactive.EditableSystemPrompt)
 	}
 	if !strings.Contains(interactive.EditableSystemPrompt, "story 级运行参数") || strings.Contains(interactive.EditableSystemPrompt, "2000 个中文字") {
 		t.Fatalf("editable prompt should describe dynamic story reply target without fixed fallback: %s", interactive.EditableSystemPrompt)
@@ -319,39 +310,34 @@ func TestBuiltinAgentPromptsExposeInteractiveMemoryToolsWithoutCustomPrompt(t *t
 	if !strings.Contains(flowSource.Content, "list_interactive_memories") || !strings.Contains(flowSource.Content, "read_interactive_memories") {
 		t.Fatalf("flow source should include memory recall flow: %#v", flowSource)
 	}
-	if strings.Contains(flowSource.Content, "<NARRATIVE>") {
-		t.Fatalf("flow source should not include legacy narrative XML wrapper: %s", flowSource.Content)
-	}
 	customSource := findPromptSource(interactiveSources, "custom")
 	if customSource == nil || !customSource.Editable || customSource.Field != "system_prompt" {
 		t.Fatalf("custom source should be editable system_prompt: %#v", customSource)
 	}
 }
 
-func TestBuiltinInteractiveMemoryPromptUsesStoryMemoryPatchContract(t *testing.T) {
+func TestBuiltinInteractiveDirectorPromptUsesMaintenanceToolContract(t *testing.T) {
 	state := book.NewState(t.TempDir())
 	cfg := &config.Config{Workspace: state.Workspace()}
 
 	builtin := BuiltinAgentPrompts(cfg, state, IDEStoryTeller{})
-	got := builtin.InteractiveState.SystemPrompt
+	got := builtin.InteractiveDirector.SystemPrompt
 	for _, required := range []string{
-		"互动记忆 Agent",
-		"story_memory_patches",
-		"故事记忆结构与字段协议",
-		"历史回合上下文",
-		"资料库相关人物与设定",
-		"本回合前的既有故事记忆",
-		"按该表的字段列表逐字段填写",
-		"不能只填 required 字段或本回合变化字段",
-		"不得省略字段、写空字符串或 null",
+		"后台导演 Agent",
+		"Story Memory",
+		"结构化 Actor State",
+		"director.md",
+		"apply_actor_state_patch",
+		"apply_story_memory_patches",
+		"只能使用 read_file、write_file、edit_file",
 	} {
 		if !strings.Contains(got, required) {
-			t.Fatalf("builtin interactive memory prompt missing %q:\n%s", required, got)
+			t.Fatalf("builtin interactive director prompt missing %q:\n%s", required, got)
 		}
 	}
-	for _, legacy := range []string{"memory_entry", "字段包括 state_ops"} {
+	for _, legacy := range []string{"互动记忆 Agent", "字段包括 state_ops"} {
 		if strings.Contains(got, legacy) {
-			t.Fatalf("builtin interactive memory prompt should not contain legacy contract %q:\n%s", legacy, got)
+			t.Fatalf("builtin interactive director prompt should not contain legacy contract %q:\n%s", legacy, got)
 		}
 	}
 }

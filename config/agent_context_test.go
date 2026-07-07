@@ -13,11 +13,32 @@ func TestResolveAgentContextCompactionDefaultsAndCaps(t *testing.T) {
 	if resolved.CompactionRecentTurns != DefaultContextCompactionRetainedTurns {
 		t.Fatalf("default compaction recent turns = %d, want %d", resolved.CompactionRecentTurns, DefaultContextCompactionRetainedTurns)
 	}
+	if resolved.CompactionStrategy != AgentContextCompactionStrategySummaryAgent {
+		t.Fatalf("default compaction strategy = %q, want %q", resolved.CompactionStrategy, AgentContextCompactionStrategySummaryAgent)
+	}
 	if resolved.CompactionTargetMin != 0.05 {
 		t.Fatalf("default compaction target min = %v, want 0.05", resolved.CompactionTargetMin)
 	}
 	if resolved.CompactionTargetMax != 0.20 {
 		t.Fatalf("default compaction target max = %v, want 0.20", resolved.CompactionTargetMax)
+	}
+	if !resolved.ToolResultRetentionEnabled {
+		t.Fatal("IDE tool result retention should be enabled by default")
+	}
+	if resolved.ToolResultKeepRecent != DefaultToolResultKeepRecent {
+		t.Fatalf("default tool result keep recent = %d, want %d", resolved.ToolResultKeepRecent, DefaultToolResultKeepRecent)
+	}
+	if resolved.ToolResultContextBudgetKB != DefaultToolResultContextBudgetKB {
+		t.Fatalf("default tool result budget = %d, want %d", resolved.ToolResultContextBudgetKB, DefaultToolResultContextBudgetKB)
+	}
+	if resolved.ToolResultPreviewChars != DefaultToolResultPreviewChars {
+		t.Fatalf("default tool result preview = %d, want %d", resolved.ToolResultPreviewChars, DefaultToolResultPreviewChars)
+	}
+	if ResolveAgentContext(&Config{}, AgentKindInteractiveStory).ToolResultRetentionEnabled != true {
+		t.Fatal("interactive story tool result retention should be enabled by default")
+	}
+	if ResolveAgentContext(&Config{}, AgentKindAutomation).ToolResultRetentionEnabled {
+		t.Fatal("automation tool result retention should be disabled by default")
 	}
 
 	disabled := false
@@ -52,11 +73,28 @@ func TestResolveAgentContextCompactionDefaultsAndCaps(t *testing.T) {
 	}
 
 	highRecentTurns := MaxContextCompactionRetainedTurns + 20
+	highToolKeepRecent := MaxToolResultKeepRecent + 20
+	highToolBudget := MaxToolResultContextBudgetKB + 20
+	highPreviewChars := MaxToolResultPreviewChars + 20
+	unknownStrategy := "parent_prefix"
 	cfg = &Config{AgentContexts: AgentContextSettings{
-		IDE: AgentContextOverride{CompactionRecentTurns: &highRecentTurns},
+		IDE: AgentContextOverride{
+			CompactionRecentTurns:     &highRecentTurns,
+			CompactionStrategy:        &unknownStrategy,
+			ToolResultKeepRecent:      &highToolKeepRecent,
+			ToolResultContextBudgetKB: &highToolBudget,
+			ToolResultPreviewChars:    &highPreviewChars,
+		},
 	}}
-	if got := ResolveAgentContext(cfg, AgentKindIDE).CompactionRecentTurns; got != MaxContextCompactionRetainedTurns {
+	resolved = ResolveAgentContext(cfg, AgentKindIDE)
+	if got := resolved.CompactionRecentTurns; got != MaxContextCompactionRetainedTurns {
 		t.Fatalf("high recent turns should be capped to %d, got %d", MaxContextCompactionRetainedTurns, got)
+	}
+	if resolved.ToolResultKeepRecent != MaxToolResultKeepRecent || resolved.ToolResultContextBudgetKB != MaxToolResultContextBudgetKB || resolved.ToolResultPreviewChars != MaxToolResultPreviewChars {
+		t.Fatalf("tool result context caps not applied: %+v", resolved)
+	}
+	if resolved.CompactionStrategy != AgentContextCompactionStrategySummaryAgent {
+		t.Fatalf("unknown compaction strategy should fall back to %q, got %q", AgentContextCompactionStrategySummaryAgent, resolved.CompactionStrategy)
 	}
 }
 

@@ -20,7 +20,7 @@ type AgentToolSettings struct {
 	IDE                   AgentToolOverride `toml:"ide,omitempty" json:"ide,omitempty"`
 	InteractiveStory      AgentToolOverride `toml:"interactive_story,omitempty" json:"interactive_story,omitempty"`
 	ConfigManager         AgentToolOverride `toml:"config_manager,omitempty" json:"config_manager,omitempty"`
-	InteractiveState      AgentToolOverride `toml:"interactive_state,omitempty" json:"interactive_state,omitempty"`
+	InteractiveDirector   AgentToolOverride `toml:"interactive_director,omitempty" json:"interactive_director,omitempty"`
 	InteractiveHotChoices AgentToolOverride `toml:"interactive_hot_choices,omitempty" json:"interactive_hot_choices,omitempty"`
 	VersionSummary        AgentToolOverride `toml:"version_summary,omitempty" json:"version_summary,omitempty"`
 	ToolAgent             AgentToolOverride `toml:"tool_agent,omitempty" json:"tool_agent,omitempty"`
@@ -79,6 +79,7 @@ func DefaultAgentToolSettings() AgentToolSettings {
 			ImageGeneration: on,
 		},
 		InteractiveStory: AgentToolOverride{
+			FileWrite:       off,
 			LoreWrite:       off,
 			Todo:            off,
 			WebSearch:       off,
@@ -90,7 +91,19 @@ func DefaultAgentToolSettings() AgentToolSettings {
 			AgentConfigRead:  on,
 			AgentConfigWrite: on,
 		},
-		InteractiveState:      noToolAgentOverride(),
+		InteractiveDirector: AgentToolOverride{
+			FileRead:         on,
+			FileWrite:        on,
+			ShellExecute:     off,
+			Skills:           off,
+			LoreRead:         off,
+			LoreWrite:        off,
+			Todo:             off,
+			WebSearch:        off,
+			ImageGeneration:  off,
+			AgentConfigRead:  off,
+			AgentConfigWrite: off,
+		},
 		InteractiveHotChoices: noToolAgentOverride(),
 		VersionSummary:        noToolAgentOverride(),
 		ToolAgent:             noToolAgentOverride(),
@@ -147,7 +160,7 @@ func MergeAgentToolSettings(parent, child AgentToolSettings) AgentToolSettings {
 		IDE:                   mergeAgentToolOverride(parent.IDE, child.IDE),
 		InteractiveStory:      mergeAgentToolOverride(parent.InteractiveStory, child.InteractiveStory),
 		ConfigManager:         mergeAgentToolOverride(parent.ConfigManager, child.ConfigManager),
-		InteractiveState:      mergeAgentToolOverride(parent.InteractiveState, child.InteractiveState),
+		InteractiveDirector:   mergeAgentToolOverride(parent.InteractiveDirector, child.InteractiveDirector),
 		InteractiveHotChoices: mergeAgentToolOverride(parent.InteractiveHotChoices, child.InteractiveHotChoices),
 		VersionSummary:        mergeAgentToolOverride(parent.VersionSummary, child.VersionSummary),
 		ToolAgent:             mergeAgentToolOverride(parent.ToolAgent, child.ToolAgent),

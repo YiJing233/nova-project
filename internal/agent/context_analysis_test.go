@@ -98,8 +98,102 @@ func TestInteractiveContextAnalysisShowsDirectNarrativeOutputProtocol(t *testing
 	if !strings.Contains(outputProtocol.Content, "只输出本回合可展示在故事舞台上的故事正文") {
 		t.Fatalf("output protocol should describe direct narrative text: %#v", outputProtocol)
 	}
-	if strings.Contains(outputProtocol.Content, "<NARRATIVE>") {
-		t.Fatalf("output protocol should not require narrative XML wrapper: %#v", outputProtocol)
+}
+
+func TestInteractiveDirectorContextAnalysisSplitsInstructionSources(t *testing.T) {
+	instruction := prompts.InteractiveDirectorInstruction(prompts.InteractiveDirectorPromptInput{
+		Title:                "外门逆袭",
+		Origin:               "主角被同门轻视",
+		StoryTellerID:        "classic",
+		StoryDirectorID:      "default",
+		BranchID:             "main",
+		DirectorPlanPaths:    "/tmp/director.md",
+		DirectorPlanDocs:     `{"plan":"# 正文Agent可读"}`,
+		LoreContext:          "角色 沈凝。外门比试关键见证者。",
+		TurnAuditJSON:        `{"turn_id":"turn-1","user_action":"报名比试"}`,
+		TurnHistory:          "用户：我报名参加公开比试",
+		StoryMemorySummary:   "公开比试即将开始。",
+		StoryDirectorPlan:    "mainline_strength: soft_guidance",
+		DirectorEventCatalog: `{"events":[{"id":"face_slap"}]}`,
+	})
+	analysis, err := BuildInteractiveDirectorContextAnalysis(&config.Config{OpenAIContextWindowTokens: 128000}, instruction)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis.AgentKind != config.AgentKindInteractiveDirector || analysis.Mode != "interactive_director" {
+		t.Fatalf("unexpected director analysis identity: %#v", analysis)
+	}
+	if analysis.ContextWindowTokens != 128000 {
+		t.Fatalf("context window tokens = %d, want 128000", analysis.ContextWindowTokens)
+	}
+	if analysis.MessageCount != 1 {
+		t.Fatalf("director analysis should estimate the single user instruction message, got %d", analysis.MessageCount)
+	}
+	var sawOutputProtocol, sawLore, sawTurnAudit, sawPlanPath bool
+	for _, part := range analysis.SystemPromptParts {
+		if part.ID == "output_protocol" && strings.Contains(part.Content, "director.md") {
+			sawOutputProtocol = true
+		}
+	}
+	for _, part := range analysis.ContextMessages {
+		switch {
+		case part.Title == "资料库导演上下文" && strings.Contains(part.Source, "lore index") && strings.Contains(part.Content, "沈凝"):
+			sawLore = true
+		case part.Title == "本回合 RuleResolution / TerminalOutcome 审计 JSON" && strings.Contains(part.Source, "turn audit") && strings.Contains(part.Content, "turn-1"):
+			sawTurnAudit = true
+		case part.Title == "允许读写的导演规划文件路径" && strings.Contains(part.Source, "backend guard") && strings.Contains(part.Content, "director.md"):
+			sawPlanPath = true
+		}
+	}
+	if !sawOutputProtocol || !sawLore || !sawTurnAudit || !sawPlanPath {
+		t.Fatalf("director analysis missing expected parts output=%v lore=%v audit=%v planPath=%v parts=%#v", sawOutputProtocol, sawLore, sawTurnAudit, sawPlanPath, analysis.ContextMessages)
+	}
+}
+
+func TestIDEContextAnalysisShowsToolContextWithoutDenovaMetadata(t *testing.T) {
+	analysis, err := BuildIDEContextAnalysis(
+		&config.Config{},
+		nil,
+		IDEStoryTeller{},
+		nil,
+		[]*schema.Message{
+			schema.UserMessage("读取第一章"),
+			schema.AssistantMessage("", []schema.ToolCall{{
+				ID:   "call-read",
+				Type: "function",
+				Function: schema.FunctionCall{
+					Name:      "read_file",
+					Arguments: `{"path":"chapters/1.md"}`,
+				},
+			}}),
+			schema.ToolMessage("第一章内容\n\n"+toolResultMetadataHeader+"\nschema: tool_result.v1", "call-read", schema.WithToolName("read_file")),
+			schema.AssistantMessage("已读取", nil),
+		},
+		4,
+		nil,
+		nil,
+		ChatRequest{Message: "继续"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawToolCall, sawToolResult bool
+	for _, part := range analysis.ContextMessages {
+		switch part.Kind {
+		case "tool_call":
+			sawToolCall = true
+			if part.ToolName != "read_file" || !strings.Contains(part.Content, `{"path":"chapters/1.md"}`) {
+				t.Fatalf("tool call part should include tool name and args: %#v", part)
+			}
+		case "tool_result":
+			sawToolResult = true
+			if part.ToolName != "read_file" || part.Content != "第一章内容" || strings.Contains(part.Content, toolResultMetadataHeader) {
+				t.Fatalf("tool result part should be sanitized: %#v", part)
+			}
+		}
+	}
+	if !sawToolCall || !sawToolResult {
+		t.Fatalf("context analysis should include tool call and result parts: %#v", analysis.ContextMessages)
 	}
 }
 
@@ -126,7 +220,7 @@ func TestIDEContextAnalysisShowsStyleRulesAsSystemPromptParts(t *testing.T) {
 	}
 	var foundSystemPart bool
 	for _, part := range analysis.SystemPromptParts {
-		if part.Title == "场景化风格规则：激烈打斗" && strings.Contains(part.Content, "短句留白") {
+		if part.Title == "文风参考：激烈打斗" && strings.Contains(part.Content, "短句留白") {
 			foundSystemPart = true
 		}
 	}
@@ -137,7 +231,7 @@ func TestIDEContextAnalysisShowsStyleRulesAsSystemPromptParts(t *testing.T) {
 		t.Fatal("context messages should not be empty")
 	}
 	final := analysis.ContextMessages[len(analysis.ContextMessages)-1].Content
-	if strings.Contains(final, "场景化风格规则") || strings.Contains(final, "短句留白") {
+	if strings.Contains(final, "文风参考") || strings.Contains(final, "短句留白") {
 		t.Fatalf("style rule should not be appended to final user message:\n%s", final)
 	}
 }
@@ -165,7 +259,7 @@ func TestInteractiveContextAnalysisShowsStyleRulesAsSystemPromptParts(t *testing
 	}
 	var foundSystemPart bool
 	for _, part := range analysis.SystemPromptParts {
-		if part.Title == "场景化风格规则：日常对话" && strings.Contains(part.Content, "克制对白") {
+		if part.Title == "文风参考：日常对话" && strings.Contains(part.Content, "克制对白") {
 			foundSystemPart = true
 		}
 	}
@@ -173,7 +267,7 @@ func TestInteractiveContextAnalysisShowsStyleRulesAsSystemPromptParts(t *testing
 		t.Fatalf("style rule should be a system prompt part: %#v", analysis.SystemPromptParts)
 	}
 	final := analysis.ContextMessages[len(analysis.ContextMessages)-1].Content
-	if strings.Contains(final, "场景化风格规则") || strings.Contains(final, "克制对白") {
+	if strings.Contains(final, "文风参考") || strings.Contains(final, "克制对白") {
 		t.Fatalf("style rule should not be appended to final interactive message:\n%s", final)
 	}
 }

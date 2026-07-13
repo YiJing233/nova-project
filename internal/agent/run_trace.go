@@ -20,26 +20,32 @@ const (
 )
 
 type RunTraceSummary struct {
-	ID                 string    `json:"id"`
-	CreatedAt          time.Time `json:"created_at"`
-	Path               string    `json:"path"`
-	Status             string    `json:"status"`
-	Reason             string    `json:"reason,omitempty"`
-	Events             int       `json:"events"`
-	ContextParts       int       `json:"context_parts"`
-	TaskID             string    `json:"task_id,omitempty"`
-	AgentKind          string    `json:"agent_kind,omitempty"`
-	SessionID          string    `json:"session_id,omitempty"`
-	Phase              string    `json:"phase,omitempty"`
-	ToolCalls          int       `json:"tool_calls,omitempty"`
-	ToolSuccesses      int       `json:"tool_successes,omitempty"`
-	ToolBlocked        int       `json:"tool_blocked,omitempty"`
-	ToolErrors         int       `json:"tool_errors,omitempty"`
-	ToolTruncated      int       `json:"tool_truncated,omitempty"`
-	InvalidToolArgs    int       `json:"invalid_tool_args,omitempty"`
-	Mutations          int       `json:"mutations,omitempty"`
-	VerificationStatus string    `json:"verification_status,omitempty"`
-	Recoverable        bool      `json:"recoverable,omitempty"`
+	ID                   string    `json:"id"`
+	CreatedAt            time.Time `json:"created_at"`
+	Path                 string    `json:"path"`
+	Status               string    `json:"status"`
+	Reason               string    `json:"reason,omitempty"`
+	Events               int       `json:"events"`
+	ContextParts         int       `json:"context_parts"`
+	TaskID               string    `json:"task_id,omitempty"`
+	AgentKind            string    `json:"agent_kind,omitempty"`
+	SessionID            string    `json:"session_id,omitempty"`
+	Phase                string    `json:"phase,omitempty"`
+	ToolCalls            int       `json:"tool_calls,omitempty"`
+	ToolSuccesses        int       `json:"tool_successes,omitempty"`
+	ToolBlocked          int       `json:"tool_blocked,omitempty"`
+	ToolErrors           int       `json:"tool_errors,omitempty"`
+	ToolTruncated        int       `json:"tool_truncated,omitempty"`
+	InvalidToolArgs      int       `json:"invalid_tool_args,omitempty"`
+	LLMCalls             int       `json:"llm_calls,omitempty"`
+	PromptTokens         int       `json:"prompt_tokens,omitempty"`
+	CachedPromptTokens   int       `json:"cached_prompt_tokens,omitempty"`
+	UncachedPromptTokens int       `json:"uncached_prompt_tokens,omitempty"`
+	CacheHitRate         float64   `json:"cache_hit_rate,omitempty"`
+	DurationMS           int64     `json:"duration_ms,omitempty"`
+	Mutations            int       `json:"mutations,omitempty"`
+	VerificationStatus   string    `json:"verification_status,omitempty"`
+	Recoverable          bool      `json:"recoverable,omitempty"`
 }
 
 type RunTrace struct {
@@ -118,6 +124,8 @@ func readRunTraceFile(path string, recordCap int) (RunTrace, error) {
 	}
 	defer file.Close()
 	trace := RunTrace{}
+	var tail []RunTraceRecord
+	totalRecords := 0
 	scanner := bufio.NewScanner(file)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	for scanner.Scan() {
@@ -125,15 +133,54 @@ func readRunTraceFile(path string, recordCap int) (RunTrace, error) {
 		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
 			continue
 		}
+		totalRecords++
 		updateRunTraceSummary(&trace.Summary, record, path)
-		if recordCap <= 0 || len(trace.Records) < recordCap {
+		if recordCap <= 0 {
 			trace.Records = append(trace.Records, record)
-		} else {
-			trace.Truncated = true
+			continue
+		}
+		if trace.Truncated {
+			tail = append(tail, record)
+			if tailCap := traceTailRecordCap(recordCap); len(tail) > tailCap {
+				tail = tail[len(tail)-tailCap:]
+			}
+			continue
+		}
+		if len(trace.Records) < recordCap {
+			trace.Records = append(trace.Records, record)
+			continue
+		}
+		trace.Truncated = true
+		headCap := recordCap / 2
+		tailCap := traceTailRecordCap(recordCap)
+		tail = append(tail, trace.Records[headCap:]...)
+		if len(tail) > tailCap {
+			tail = tail[len(tail)-tailCap:]
+		}
+		trace.Records = trace.Records[:headCap]
+		tail = append(tail, record)
+		if tailCap := traceTailRecordCap(recordCap); len(tail) > tailCap {
+			tail = tail[len(tail)-tailCap:]
 		}
 	}
 	if err := scanner.Err(); err != nil {
 		return RunTrace{}, err
+	}
+	if trace.Truncated {
+		omitted := totalRecords - len(trace.Records) - len(tail)
+		if omitted < 0 {
+			omitted = 0
+		}
+		trace.Records = append(trace.Records, RunTraceRecord{
+			Type:      "trace_truncated_gap",
+			RunID:     trace.Summary.ID,
+			CreatedAt: trace.Summary.CreatedAt,
+			Data: map[string]any{
+				"omitted_records": omitted,
+				"record_cap":      recordCap,
+			},
+		})
+		trace.Records = append(trace.Records, tail...)
 	}
 	if trace.Summary.ID == "" {
 		trace.Summary.ID = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
@@ -142,6 +189,13 @@ func readRunTraceFile(path string, recordCap int) (RunTrace, error) {
 		trace.Summary.Path = path
 	}
 	return trace, nil
+}
+
+func traceTailRecordCap(recordCap int) int {
+	if recordCap <= 2 {
+		return 0
+	}
+	return recordCap - recordCap/2 - 1
 }
 
 func updateRunTraceSummary(summary *RunTraceSummary, record RunTraceRecord, path string) {
@@ -163,6 +217,12 @@ func updateRunTraceSummary(summary *RunTraceSummary, record RunTraceRecord, path
 	case "context_ledger":
 		summary.ContextParts += runTraceContextPartCount(record.Data)
 		summary.Phase = "context_ready"
+	case "context_build":
+		summary.Phase = "context_ready"
+	case "llm_call":
+		summary.LLMCalls++
+		runTraceAddLLMTokenUsage(summary, record.Data)
+		summary.Phase = "model_running"
 	case "tool_decision":
 		summary.ToolCalls++
 		if runTraceToolDecisionInvalidArgs(record.Data) {
@@ -196,6 +256,13 @@ func updateRunTraceSummary(summary *RunTraceSummary, record RunTraceRecord, path
 			summary.Reason = reason
 		}
 		summary.Phase = "finished"
+	case "agent_run":
+		if status, _ := record.Data["status"].(string); status != "" {
+			summary.Status = status
+		}
+		if duration, ok := numericInt64Field(record.Data, "duration_ms"); ok {
+			summary.DurationMS = duration
+		}
 	}
 	if summary.Status == "" {
 		summary.Status = "running"
@@ -203,6 +270,41 @@ func updateRunTraceSummary(summary *RunTraceSummary, record RunTraceRecord, path
 	if summary.Status == "running" {
 		summary.Recoverable = true
 	}
+}
+
+func runTraceAddLLMTokenUsage(summary *RunTraceSummary, data map[string]any) {
+	if summary == nil {
+		return
+	}
+	attrs := runTraceAttrs(data)
+	prompt, _ := numericIntField(attrs, "prompt_tokens")
+	cached, _ := numericIntField(attrs, "cached_prompt_tokens")
+	uncached, hasUncached := numericIntField(attrs, "uncached_prompt_tokens")
+	if prompt == 0 && cached == 0 && !hasUncached {
+		prompt, _ = numericIntField(data, "prompt_tokens")
+		cached, _ = numericIntField(data, "cached_prompt_tokens")
+		uncached, hasUncached = numericIntField(data, "uncached_prompt_tokens")
+	}
+	if prompt <= 0 && cached <= 0 && uncached <= 0 {
+		return
+	}
+	if !hasUncached && prompt > 0 {
+		uncached = uncachedPromptTokens(prompt, cached)
+	}
+	summary.PromptTokens += prompt
+	summary.CachedPromptTokens += cached
+	summary.UncachedPromptTokens += uncached
+	if summary.PromptTokens > 0 {
+		summary.CacheHitRate = roundRatio(float64(summary.CachedPromptTokens) / float64(summary.PromptTokens))
+	}
+}
+
+func runTraceAttrs(data map[string]any) map[string]any {
+	if data == nil {
+		return nil
+	}
+	attrs, _ := data["attrs"].(map[string]any)
+	return attrs
 }
 
 func runTraceContextPartCount(data map[string]any) int {
@@ -246,6 +348,27 @@ func runTraceVerificationStatus(data map[string]any) string {
 		return ""
 	}
 	return stringField(verification, "status")
+}
+
+func numericInt64Field(data map[string]any, key string) (int64, bool) {
+	if data == nil {
+		return 0, false
+	}
+	switch value := data[key].(type) {
+	case int:
+		return int64(value), true
+	case int64:
+		return value, true
+	case float64:
+		return int64(value), true
+	default:
+		return 0, false
+	}
+}
+
+func numericIntField(data map[string]any, key string) (int, bool) {
+	value, ok := numericInt64Field(data, key)
+	return int(value), ok
 }
 
 func stringField(data map[string]any, key string) string {

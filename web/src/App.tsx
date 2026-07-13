@@ -8,7 +8,7 @@ import type { UpdateCheckResult } from '@/features/settings/types'
 import { getLoreItems, importCharacterCard, previewCharacterCard, setChapterConfirmed, type CharacterCardPreview, type LoreItem, type WorkspaceSearchResult } from '@/lib/api'
 import { CommandPalette } from '@/components/common/command-palette'
 import { useWorkspace } from '@/hooks/useWorkspace'
-import { useChat } from '@/hooks/useChat'
+import { useAgentChat } from '@/hooks/useAgentChat'
 import { useWorkspaceHotkeys } from '@/hooks/use-workspace-hotkeys'
 import { useWorkspaceStore, type RightPanel, type WorkspaceMode } from '@/stores/workspace-store'
 import { useInteractiveStore } from '@/features/interactive/stores/interactive-store'
@@ -107,7 +107,7 @@ function App() {
 
   const {
     tree, loading, selectedFile, fileContent, workspace, workspaceLoaded, summary, books,
-    selectFile, clearSelectedFile, saveCurrentFile, createItem, deleteItem, renameItem, copyItem, moveItem,
+    selectFile, clearSelectedFile, saveFileContent, createItem, deleteItem, renameItem, copyItem, moveItem,
     refresh, refreshSummary, refreshAfterAgentFileChange, refreshAll, refreshBooks, setWorkspace,
   } = useWorkspace({ autoRefreshEnabled: workspaceAutoRefreshEnabled })
 
@@ -154,7 +154,7 @@ function App() {
     removeStyleScene,
     addTextSelection,
     removeTextSelection,
-  } = useChat({ onAgentFileChange: handleAgentFileChange })
+  } = useAgentChat({ onAgentFileChange: handleAgentFileChange })
 
   const handleChatPlanModeChange = useCallback((value: boolean) => {
     setPlanMode(value)
@@ -351,11 +351,11 @@ function App() {
     notifyVersionChange()
   }
 
-  const handleSaveCurrentFile = useCallback(async (content: string) => {
-    const saved = await saveCurrentFile(content)
+  const handleSaveCurrentFile = useCallback(async (path: string, content: string) => {
+    const saved = await saveFileContent(path, content)
     if (saved) notifyVersionChange()
     return saved
-  }, [notifyVersionChange, saveCurrentFile])
+  }, [notifyVersionChange, saveFileContent])
 
   const handleCreateItem = useCallback(async (path: string, type: 'file' | 'dir') => {
     await createItem(path, type)
@@ -661,12 +661,12 @@ function App() {
     onOpenSearch: handleOpenGlobalSearch,
     onGenerate: continueWriting,
     onOpenDiff: handleOpenVersions,
-    onEscape: () => {
-      if (commandOpen) {
-        setCommandOpen(false)
+    onToggleRightPanel: () => {
+      if (mode === 'interactive') {
+        setInteractiveRightVisible((value) => !value)
         return
       }
-      if (rightPanel) handleSetRightPanel(null)
+      if (mode === 'ide') handleSetRightPanel(rightPanel ? null : 'ai')
     },
   })
 
@@ -768,8 +768,12 @@ function App() {
         onOpenVersions={handleOpenVersions}
         onOpenSearch={handleOpenGlobalSearch}
         onContinueWriting={continueWriting}
-        onClosePanels={() => {
-          handleSetRightPanel(null)
+        onToggleRightPanel={() => {
+          if (mode === 'interactive') {
+            setInteractiveRightVisible((value) => !value)
+            return
+          }
+          if (mode === 'ide') handleSetRightPanel(rightPanel ? null : 'ai')
         }}
       />
       <CharacterCardImportDialog

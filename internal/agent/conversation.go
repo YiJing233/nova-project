@@ -121,21 +121,26 @@ func (c *SessionConversation) ContextSourceSummary() string {
 
 func (c *SessionConversation) CompactContextIfNeeded(ctx context.Context, input ContextCompactionInput) ([]*schema.Message, ContextCompactionResult, error) {
 	policy := c.compactionPolicy()
+	input = withDefaultContextProjectionReserves(c.cfg, c.agentKind, input, 0)
 	phase := strings.TrimSpace(input.Phase)
 	if phase == "" {
 		phase = contextCompactionPhasePreRun
 	}
 	tokensBefore := EstimateContextTokens(input.Messages, input.Tools)
+	projectedTokensBefore := projectedContextTokens(tokensBefore, input)
 	result := ContextCompactionResult{
-		Phase:               phase,
-		TokensBefore:        tokensBefore,
-		ContextWindowTokens: policy.ContextWindowTokens,
-		Strategy:            policy.Strategy,
-		Threshold:           policy.Threshold,
-		MessageCountBefore:  len(input.Messages),
-		RetainedTurns:       policy.RetainedTurns,
+		Phase:                    phase,
+		TokensBefore:             tokensBefore,
+		ProjectedTokensBefore:    projectedTokensBefore,
+		ReservedCompletionTokens: input.ReservedCompletionTokens,
+		ReservedToolResultTokens: input.ReservedToolResultTokens,
+		ContextWindowTokens:      policy.ContextWindowTokens,
+		Strategy:                 policy.Strategy,
+		Threshold:                policy.Threshold,
+		MessageCountBefore:       len(input.Messages),
+		RetainedTurns:            policy.RetainedTurns,
 	}
-	shouldCompact, skipped := policy.shouldCompact(tokensBefore, input.Force)
+	shouldCompact, skipped := policy.shouldCompact(projectedTokensBefore, input.Force)
 	if !shouldCompact {
 		result.SkippedReason = skipped
 		return input.Messages, result, nil
@@ -173,6 +178,7 @@ func (c *SessionConversation) CompactContextIfNeeded(ctx context.Context, input 
 	result.Epoch = epoch
 	result.Summary = summary
 	result.TokensAfter = EstimateContextTokens(newMessages, input.Tools)
+	result.ProjectedTokensAfter = projectedContextTokens(result.TokensAfter, input)
 	result.TargetRatio = contextCompactionRatio(countRunes(summary), inputChars)
 	result.SourceMessageCount = len(source)
 	result.MessageCountAfter = len(newMessages)
@@ -189,6 +195,7 @@ func (c *SessionConversation) CompactContextIfNeeded(ctx context.Context, input 
 			newMessages = append(append([]*schema.Message(nil), leading...), newMessages...)
 		}
 		result.TokensAfter = EstimateContextTokens(newMessages, input.Tools)
+		result.ProjectedTokensAfter = projectedContextTokens(result.TokensAfter, input)
 		result.MessageCountAfter = len(newMessages)
 	}
 	emitContextCompactionEvent(input.Emit, phase, "completed", result)
@@ -215,10 +222,6 @@ func (c *SessionConversation) modelMessages(agentMessage string) []*schema.Messa
 		history[len(history)-1] = schema.UserMessage(agentMessage)
 	}
 	return history
-}
-
-func prependRuntimeContextToAgentMessage(agentMessage, title, content string) string {
-	return agentcontext.PrependFinalUserSource(agentMessage, title, content)
 }
 
 func standaloneRuntimeContextMessage(title, content, note string) string {
@@ -384,10 +387,14 @@ func retainTailByUserTurns(messages []*schema.Message, retainedTurns int) []*sch
 }
 
 func (c *SessionConversation) AppendAssistant(content string) error {
+	return c.AppendAssistantWithMetadata(content, "", session.MessageMetadata{})
+}
+
+func (c *SessionConversation) AppendAssistantWithMetadata(content, _ string, metadata session.MessageMetadata) error {
 	if c == nil || c.session == nil {
 		return fmt.Errorf("会话不存在")
 	}
-	return c.session.Append(schema.AssistantMessage(content, nil))
+	return c.session.AppendWithMetadata(schema.AssistantMessage(content, nil), metadata)
 }
 
 func (c *SessionConversation) AppendContextMessage(msg *schema.Message) error {

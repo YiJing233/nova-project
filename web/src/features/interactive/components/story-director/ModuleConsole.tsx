@@ -1,12 +1,10 @@
-import type { ReactNode } from 'react'
-import { BookOpen, ChevronDown, CircleOff, Database, Dice5, Image as ImageIcon, ScrollText, Sparkles } from 'lucide-react'
-import type { LucideIcon } from 'lucide-react'
+import { ChevronDown } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import type { ActorStateModule, EventPackageModule, ImagePreset, OpeningSelectorModule, RuleSystemModule, StoryDirectorModuleRefs, StoryMemoryStructureModule, Teller } from '../../types'
+import type { ActorStateModule, EventPackageModule, ImagePreset, RuleSystemModule, StoryDirectorModuleRefs, StoryMemoryStructureModule, Teller } from '../../types'
 import { consoleSectionClassName, selectClassName } from './constants'
 import { SectionTitle } from './shared'
 import { normalizeIDList } from './utils'
@@ -16,19 +14,15 @@ export function DirectorModuleConsole({
   selectedTellerName,
   selectedRuleName,
   selectedActorStateName,
-  selectedMemoryStructureName,
   selectedMemoryStructureCount,
   selectedMemoryStructureTotal,
-  selectedOpeningName,
   selectedImageName,
-  selectedEventPackages,
   selectedEventCardCount,
   tellers,
   eventPackages,
   ruleSystems,
   actorStates,
   memoryStructures,
-  openingSelectors,
   imagePresets,
   onModuleRefChange,
 }: {
@@ -36,180 +30,163 @@ export function DirectorModuleConsole({
   selectedTellerName: string
   selectedRuleName: string
   selectedActorStateName: string
-  selectedMemoryStructureName: string
   selectedMemoryStructureCount: number
   selectedMemoryStructureTotal: number
-  selectedOpeningName: string
   selectedImageName: string
-  selectedEventPackages: Array<{ id: string; name: string; invalid?: boolean; cards: number }>
   selectedEventCardCount: number
   tellers: Teller[]
   eventPackages: EventPackageModule[]
   ruleSystems: RuleSystemModule[]
   actorStates: ActorStateModule[]
   memoryStructures: StoryMemoryStructureModule[]
-  openingSelectors: OpeningSelectorModule[]
   imagePresets: ImagePreset[]
   onModuleRefChange: <K extends keyof StoryDirectorModuleRefs>(key: K, value: StoryDirectorModuleRefs[K]) => void
 }) {
   const { t } = useTranslation()
   const selectedEventPackageIDs = refs.event_package_ids?.length ? refs.event_package_ids : ['default']
+
   return (
-    <section className={`${consoleSectionClassName} overflow-hidden p-4`}>
+    <section className={`${consoleSectionClassName} p-4`}>
       <SectionTitle title={t('settingPanel.storyDirector.composer')} description={t('settingPanel.storyDirector.composerDesc')} badge={t('settingPanel.storyDirector.liveReference')} />
-      <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-7">
-        <DirectorModuleNode
-          Icon={BookOpen}
-          label={t('settingPanel.presetKind.teller')}
-          title={selectedTellerName}
-          summary={refs.narrative_style_disabled ? t('settingPanel.storyDirector.moduleDisabled') : t('settingPanel.storyDirector.moduleEnabled')}
-          enabled={!refs.narrative_style_disabled}
-          onEnabledChange={(enabled) => onModuleRefChange('narrative_style_disabled', !enabled)}
-        >
-          <ModuleSelect
-            value={refs.narrative_style_id || ''}
-            fallbackValue="classic"
+      <div className="mt-3 grid grid-cols-[repeat(auto-fit,minmax(min(100%,22rem),1fr))] gap-3">
+        {/* 核心叙事 */}
+        <ModuleGroup label={t('settingPanel.storyDirector.group.core')}>
+          <ModuleRefRow
+            label={t('settingPanel.presetKind.teller')}
+            summary={selectedTellerName}
             enabled={!refs.narrative_style_disabled}
-            items={tellers}
-            onChange={(value) => onModuleRefChange('narrative_style_id', value)}
-          />
-        </DirectorModuleNode>
-        <DirectorModuleNode
-          Icon={ScrollText}
-          label={t('settingPanel.presetKind.event')}
-          title={t('settingPanel.storyDirector.eventPackagesSummary', { packages: selectedEventPackageIDs.length, cards: selectedEventCardCount })}
-          summary={selectedEventPackages.map((item) => item.name).join(' / ') || t('settingPanel.storyDirector.moduleMissing')}
-          enabled={!refs.event_packages_disabled}
-          onEnabledChange={(enabled) => onModuleRefChange('event_packages_disabled', !enabled)}
-        >
-          <EventPackagePopoverSelect
-            values={selectedEventPackageIDs}
-            fallbackValues={['default']}
-            enabled={!refs.event_packages_disabled}
-            items={eventPackages}
-            onChange={(value) => onModuleRefChange('event_package_ids', value)}
-          />
-        </DirectorModuleNode>
-        <DirectorModuleNode
-          Icon={Dice5}
-          label={t('settingPanel.presetKind.rule')}
-          title={selectedRuleName}
-          summary={refs.rule_system_disabled ? t('settingPanel.storyDirector.moduleDisabled') : t('settingPanel.storyDirector.moduleEnabled')}
-          enabled={!refs.rule_system_disabled}
-          onEnabledChange={(enabled) => onModuleRefChange('rule_system_disabled', !enabled)}
-        >
-          <ModuleSelect
-            value={refs.rule_system_id || ''}
-            fallbackValue="default"
+            onEnabledChange={(enabled) => onModuleRefChange('narrative_style_disabled', !enabled)}
+          >
+            <ModuleSelect
+              value={refs.narrative_style_id || ''}
+              fallbackValue="classic"
+              enabled={!refs.narrative_style_disabled}
+              items={tellers}
+              onChange={(value) => onModuleRefChange('narrative_style_id', value)}
+            />
+          </ModuleRefRow>
+        </ModuleGroup>
+
+        {/* 系统规则 */}
+        <ModuleGroup label={t('settingPanel.storyDirector.group.rules')}>
+          <ModuleRefRow
+            label={t('settingPanel.presetKind.rule')}
+            summary={selectedRuleName}
             enabled={!refs.rule_system_disabled}
-            items={ruleSystems}
-            onChange={(value) => onModuleRefChange('rule_system_id', value)}
-          />
-        </DirectorModuleNode>
-        <DirectorModuleNode
-          Icon={Database}
-          label={t('settingPanel.presetKind.actorState')}
-          title={selectedActorStateName}
-          summary={refs.actor_state_disabled ? t('settingPanel.storyDirector.moduleDisabled') : t('settingPanel.storyDirector.moduleEnabled')}
-          enabled={!refs.actor_state_disabled}
-          onEnabledChange={(enabled) => onModuleRefChange('actor_state_disabled', !enabled)}
-        >
-          <ModuleSelect
-            value={refs.actor_state_id || ''}
-            fallbackValue="default"
+            onEnabledChange={(enabled) => onModuleRefChange('rule_system_disabled', !enabled)}
+          >
+            <ModuleSelect
+              value={refs.rule_system_id || ''}
+              fallbackValue="default"
+              enabled={!refs.rule_system_disabled}
+              items={ruleSystems}
+              onChange={(value) => onModuleRefChange('rule_system_id', value)}
+            />
+          </ModuleRefRow>
+          <ModuleRefRow
+            label={t('settingPanel.presetKind.actorState')}
+            summary={selectedActorStateName}
             enabled={!refs.actor_state_disabled}
-            items={actorStates}
-            onChange={(value) => onModuleRefChange('actor_state_id', value)}
-          />
-        </DirectorModuleNode>
-        <DirectorModuleNode
-          Icon={Database}
-          label={t('settingPanel.presetKind.memoryStructure')}
-          title={selectedMemoryStructureName}
-          summary={refs.memory_structure_disabled ? t('settingPanel.storyDirector.moduleDisabled') : t('settingPanel.memoryStructure.summaryCount', { enabled: selectedMemoryStructureCount, total: selectedMemoryStructureTotal })}
-          enabled={!refs.memory_structure_disabled}
-          onEnabledChange={(enabled) => onModuleRefChange('memory_structure_disabled', !enabled)}
-        >
-          <ModuleSelect
-            value={refs.memory_structure_id || ''}
-            fallbackValue="default"
+            onEnabledChange={(enabled) => onModuleRefChange('actor_state_disabled', !enabled)}
+          >
+            <ModuleSelect
+              value={refs.actor_state_id || ''}
+              fallbackValue="default"
+              enabled={!refs.actor_state_disabled}
+              items={actorStates}
+              onChange={(value) => onModuleRefChange('actor_state_id', value)}
+            />
+          </ModuleRefRow>
+          <ModuleRefRow
+            label={t('settingPanel.presetKind.memoryStructure')}
+            summary={refs.memory_structure_disabled
+              ? t('settingPanel.storyDirector.moduleDisabled')
+              : t('settingPanel.memoryStructure.summaryCount', { enabled: selectedMemoryStructureCount, total: selectedMemoryStructureTotal })}
             enabled={!refs.memory_structure_disabled}
-            items={memoryStructures}
-            onChange={(value) => onModuleRefChange('memory_structure_id', value)}
-          />
-        </DirectorModuleNode>
-        <DirectorModuleNode
-          Icon={Sparkles}
-          label={t('settingPanel.presetKind.opening')}
-          title={selectedOpeningName}
-          summary={refs.opening_selector_disabled ? t('settingPanel.storyDirector.moduleDisabled') : t('settingPanel.storyDirector.moduleEnabled')}
-          enabled={!refs.opening_selector_disabled}
-          onEnabledChange={(enabled) => onModuleRefChange('opening_selector_disabled', !enabled)}
-        >
-          <ModuleSelect
-            value={refs.opening_selector_id || ''}
-            fallbackValue="default"
-            enabled={!refs.opening_selector_disabled}
-            items={openingSelectors}
-            onChange={(value) => onModuleRefChange('opening_selector_id', value)}
-          />
-        </DirectorModuleNode>
-        <DirectorModuleNode
-          Icon={ImageIcon}
-          label={t('settingPanel.presetKind.image')}
-          title={selectedImageName}
-          summary={refs.image_preset_disabled ? t('settingPanel.storyDirector.moduleDisabled') : t('settingPanel.storyDirector.moduleEnabled')}
-          enabled={!refs.image_preset_disabled}
-          onEnabledChange={(enabled) => onModuleRefChange('image_preset_disabled', !enabled)}
-        >
-          <ModuleSelect
-            value={refs.image_preset_id || ''}
-            fallbackValue="game-cg"
+            onEnabledChange={(enabled) => onModuleRefChange('memory_structure_disabled', !enabled)}
+          >
+            <ModuleSelect
+              value={refs.memory_structure_id || ''}
+              fallbackValue="default"
+              enabled={!refs.memory_structure_disabled}
+              items={memoryStructures}
+              onChange={(value) => onModuleRefChange('memory_structure_id', value)}
+            />
+          </ModuleRefRow>
+        </ModuleGroup>
+
+        {/* 内容生成 */}
+        <ModuleGroup label={t('settingPanel.storyDirector.group.content')}>
+          <ModuleRefRow
+            label={t('settingPanel.presetKind.event')}
+            summary={t('settingPanel.storyDirector.eventPackagesSummary', { packages: selectedEventPackageIDs.length, cards: selectedEventCardCount })}
+            enabled={!refs.event_packages_disabled}
+            onEnabledChange={(enabled) => onModuleRefChange('event_packages_disabled', !enabled)}
+          >
+            <EventPackagePopoverSelect
+              values={selectedEventPackageIDs}
+              fallbackValues={['default']}
+              enabled={!refs.event_packages_disabled}
+              items={eventPackages}
+              onChange={(value) => onModuleRefChange('event_package_ids', value)}
+            />
+          </ModuleRefRow>
+          <ModuleRefRow
+            label={t('settingPanel.presetKind.image')}
+            summary={selectedImageName}
             enabled={!refs.image_preset_disabled}
-            items={imagePresets}
-            onChange={(value) => onModuleRefChange('image_preset_id', value)}
-          />
-        </DirectorModuleNode>
+            onEnabledChange={(enabled) => onModuleRefChange('image_preset_disabled', !enabled)}
+          >
+            <ModuleSelect
+              value={refs.image_preset_id || ''}
+              fallbackValue="game-cg"
+              enabled={!refs.image_preset_disabled}
+              items={imagePresets}
+              onChange={(value) => onModuleRefChange('image_preset_id', value)}
+            />
+          </ModuleRefRow>
+        </ModuleGroup>
       </div>
     </section>
   )
 }
 
-function DirectorModuleNode({
-  Icon,
+function ModuleGroup({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div className="grid content-start gap-1.5 self-start">
+      <div className="px-0.5 text-[10px] font-semibold uppercase tracking-[0.12em] text-[var(--nova-text-muted)]">{label}</div>
+      <div className="grid content-start gap-1 rounded-[11px] border border-[var(--preset-line)] bg-[var(--preset-raised)]/70 p-1.5">
+        {children}
+      </div>
+    </div>
+  )
+}
+
+function ModuleRefRow({
   label,
-  title,
   summary,
   enabled,
   onEnabledChange,
   children,
 }: {
-  Icon: LucideIcon
   label: string
-  title: string
   summary: string
   enabled: boolean
   onEnabledChange: (enabled: boolean) => void
-  children: ReactNode
+  children: React.ReactNode
 }) {
   const { t } = useTranslation()
   const switchLabel = enabled
     ? t('settingPanel.storyDirector.disableModule', { module: label })
     : t('settingPanel.storyDirector.enableModule', { module: label })
   return (
-    <div className={`group relative grid min-w-0 gap-3 rounded-[var(--nova-radius)] border p-3 transition ${enabled ? 'border-[var(--nova-border)] bg-[var(--nova-surface-2)]' : 'border-[var(--nova-border-soft)] bg-[var(--nova-surface-2)]/60 opacity-75'}`}>
-      <div className="flex min-w-0 items-start gap-2">
-        <span className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-[var(--nova-radius)] border ${enabled ? 'border-[var(--nova-accent)]/30 bg-[var(--nova-accent)]/10 text-[var(--nova-accent)]' : 'border-[var(--nova-border)] bg-[var(--nova-surface)] text-[var(--nova-text-faint)]'}`}>
-          {enabled ? <Icon className="h-3.5 w-3.5" /> : <CircleOff className="h-3.5 w-3.5" />}
-        </span>
-        <span className="min-w-0 flex-1">
-          <span className="block text-[11px] text-[var(--nova-text-faint)]">{label}</span>
-          <span className="mt-0.5 block truncate text-xs font-medium text-[var(--nova-text)]" title={title}>{title}</span>
-          <span className="mt-0.5 block truncate text-[11px] text-[var(--nova-text-faint)]" title={summary}>{summary}</span>
-        </span>
-        <Switch checked={enabled} onCheckedChange={onEnabledChange} aria-label={switchLabel} title={switchLabel} />
-      </div>
-      {children}
+    <div className={`flex min-h-12 items-center gap-2 rounded-lg px-2 py-1.5 ${enabled ? '' : 'opacity-60'}`}>
+      <span className="w-24 shrink-0 text-[11px] text-[var(--nova-text-muted)]">{label}</span>
+      <span className="min-w-0 flex-1">
+        {children}
+        {summary ? <span className="mt-0.5 block truncate text-[10px] text-[var(--nova-text-faint)]" title={summary}>{summary}</span> : null}
+      </span>
+      <Switch checked={enabled} onCheckedChange={onEnabledChange} aria-label={switchLabel} title={switchLabel} />
     </div>
   )
 }

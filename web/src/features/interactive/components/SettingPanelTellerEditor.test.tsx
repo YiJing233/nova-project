@@ -56,6 +56,12 @@ describe('TellerEditor style contents', () => {
       />,
     )
 
+    const editorShell = screen.getByTestId('image-preset-editor')
+    expect(editorShell).toHaveClass('image-preset-editor')
+    expect(within(editorShell).getByTestId('preset-metadata')).toBeInTheDocument()
+    expect(editorShell.querySelector('.image-preset-layout')).toBeInTheDocument()
+    expect(editorShell.querySelector('.image-preset-rule-grid')).toBeInTheDocument()
+
     const editor = screen.getByPlaceholderText(/高质量游戏 CG/)
     fireEvent.change(editor, { target: { value: '图'.repeat(4050) } })
 
@@ -177,11 +183,7 @@ describe('TellerEditor style contents', () => {
   it('streams AI style extraction in the Chat panel, reads the generated file, and saves edited Markdown with revision', async () => {
     let currentDraft = teller()
     let extractedPath = ''
-    vi.mocked(runConfigManagerStream).mockResolvedValue(streamEvents([
-      { event: 'thinking', data: { content: '正在分析句式和节奏。' } },
-      { event: 'chunk', data: { content: '<style_reference_markdown>\n# 克制雨夜\n\n## 总体原则\n\n短句推进，动作承载情绪。\n</style_reference_markdown>' } },
-      { event: 'done', data: {} },
-    ]))
+    vi.mocked(runConfigManagerStream).mockResolvedValue(streamText('<style_reference_markdown>\n# 克制雨夜\n\n## 总体原则\n\n短句推进，动作承载情绪。\n</style_reference_markdown>'))
     vi.mocked(readStyleReferenceFile).mockImplementation(async (path) => {
       if (path.startsWith('.denova/styles/style-')) {
         extractedPath = path
@@ -219,12 +221,11 @@ describe('TellerEditor style contents', () => {
     fireEvent.change(editor, { target: { value: '雨落得很轻。他没有立刻回答。' } })
     fireEvent.click(within(dialog).getByRole('button', { name: 'AI提炼文风' }))
 
-    await waitFor(() => {
-      expect(within(dialog).getByText('提炼进展')).toBeInTheDocument()
-      expect(within(dialog).getByText(/已写入并选择/)).toBeInTheDocument()
-      expect(editor).toHaveValue('# 克制雨夜\n\n## 总体原则\n\n短句推进，动作承载情绪。')
-      expect(currentDraft.style_refs?.[0]).toMatch(/^\.denova\/styles\/style-\d+\.md$/)
-    })
+    expect(within(dialog).getByText('提炼进展')).toBeInTheDocument()
+    await waitFor(() => expect(readStyleReferenceFile).toHaveBeenCalled())
+    expect(within(dialog).getByText(/已写入并选择/)).toBeInTheDocument()
+    expect(editor).toHaveValue('# 克制雨夜\n\n## 总体原则\n\n短句推进，动作承载情绪。')
+    expect(currentDraft.style_refs?.[0]).toMatch(/^\.denova\/styles\/style-\d+\.md$/)
     expect(readStyleReferenceFile).toHaveBeenCalledWith(extractedPath)
     expect(saveStyleReference).not.toHaveBeenCalled()
 
@@ -300,43 +301,37 @@ describe('TellerEditor style contents', () => {
   it('keeps the teller editor scrollable when style rules grow', () => {
     const { container } = render(<Harness initial={teller()} onChange={() => {}} onSave={() => {}} />)
 
-    expect(container.firstElementChild).toHaveClass('overflow-y-auto')
-    expect(container.firstElementChild).not.toHaveClass('md:overflow-hidden')
+    expect(container.firstElementChild).toHaveClass('overflow-hidden')
 
-    const injectGrid = container.querySelector('.min-h-\\[520px\\]')
+    const contentScroll = screen.getByTestId('teller-content-scroll')
+    expect(contentScroll).toHaveClass('min-h-0', 'flex-1', 'overflow-y-auto')
+    expect(within(contentScroll).getByText('文风参考')).toBeInTheDocument()
+
+    const injectGrid = container.querySelector('.teller-injection-layout')
     expect(injectGrid).toHaveClass('flex-1')
-    expect(injectGrid).toHaveClass('lg:grid-cols-[280px_minmax(0,1fr)]')
+    expect(injectGrid).toHaveClass('min-w-0')
+    expect(injectGrid).not.toHaveClass('overflow-y-auto')
+    expect(injectGrid).not.toHaveClass('lg:grid-cols-[280px_minmax(0,1fr)]')
 
     const sceneInput = screen.getByPlaceholderText('场景描述，如：激烈打斗 / 日常对话 / 压抑悬疑')
     expect(sceneInput).toHaveClass('md:flex-1')
     expect(sceneInput.parentElement).toHaveClass('md:flex-wrap')
   })
 
-  it('allows decimal random event rates without collapsing intermediate input', async () => {
-    let currentDraft = teller()
-    render(
-      <Harness
-        initial={currentDraft}
-        onChange={(draft) => {
-          currentDraft = draft
-        }}
-        onSave={() => {}}
-      />,
-    )
-
-    const rateInput = screen.getByRole('textbox', { name: '随机事件率' })
-    fireEvent.change(rateInput, { target: { value: '0.' } })
-    expect(rateInput).toHaveValue('0.')
-    expect(currentDraft.random_event_rate).toBe(0)
-
-    fireEvent.change(rateInput, { target: { value: '0.15' } })
-    expect(rateInput).toHaveValue('0.15')
-    expect(currentDraft.random_event_rate).toBe(0.15)
-  })
+	it('keeps event cadence controls out of narrative styles', () => {
+		render(<Harness initial={teller()} onChange={() => {}} onSave={() => {}} />)
+		expect(screen.queryByText('随机事件率')).not.toBeInTheDocument()
+		expect(screen.queryByText('事件机会频率')).not.toBeInTheDocument()
+	})
 
   it('keeps orchestration editing out of narrative styles', () => {
     render(<Harness initial={teller()} onChange={() => {}} onSave={() => {}} />)
 
+    const editorShell = screen.getByTestId('teller-editor')
+    expect(editorShell).toHaveClass('teller-editor')
+    expect(within(editorShell).getByTestId('preset-metadata')).toBeInTheDocument()
+    expect(editorShell.querySelector('.teller-injection-layout')).toBeInTheDocument()
+    expect(editorShell.querySelector('.teller-rule-grid')).toBeInTheDocument()
     expect(screen.queryByText('叙事编排')).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '新增事件包' })).not.toBeInTheDocument()
     expect(screen.getByText('注入规则')).toBeInTheDocument()
@@ -354,8 +349,6 @@ function Harness({ initial, onChange, onSave }: { initial: Teller; onChange: (dr
       workspace="/tmp/book"
       draft={draft}
       setDraft={setDraft}
-      tagDraft=""
-      setTagDraft={() => {}}
       activeSlotId="identity"
       setActiveSlotId={() => {}}
       onSave={onSave}
@@ -373,8 +366,6 @@ function ImagePresetHarness({ initial, onChange, onSave }: { initial: ImagePrese
     <ImagePresetEditor
       draft={draft}
       setDraft={setDraft}
-      tagDraft=""
-      setTagDraft={() => {}}
       onSave={onSave}
     />
   )
@@ -388,7 +379,6 @@ function imagePreset(): ImagePreset {
     description: '',
     prompt: '## 图像请求 Prompt（tool_request）\n\n',
     slots: [{ id: 'tool_request', name: '图像请求 Prompt', target: 'tool_request', enabled: true, content: '' }],
-    tags: [],
     custom: true,
   }
 }
@@ -399,10 +389,8 @@ function teller(): Teller {
     id: 'custom',
     name: '自定义',
     description: '',
-    random_event_rate: 0,
     style_refs: [],
     style_rules: [{ scene: '激烈打斗', style_refs: [] }],
-    tags: [],
     context_policy: { creator: 'always', lore: 'relevant', runtime_state: 'always' },
     slots: [{ id: 'identity', name: '系统提示', target: 'system', enabled: true, content: '规则' }],
     custom: true,
@@ -418,12 +406,14 @@ function styleReference() {
   }
 }
 
-function streamEvents(events: Array<{ event: string; data: unknown }>) {
+function streamText(content: string) {
   return new ReadableStream({
     start(controller) {
-      for (const event of events) {
-        controller.enqueue({ event: event.event, data: JSON.stringify(event.data) })
-      }
+      controller.enqueue({ type: 'start', messageId: 'assistant-style' })
+      controller.enqueue({ type: 'text-start', id: 'text-style' })
+      controller.enqueue({ type: 'text-delta', id: 'text-style', delta: content })
+      controller.enqueue({ type: 'text-end', id: 'text-style' })
+      controller.enqueue({ type: 'finish', finishReason: 'stop' })
       controller.close()
     },
   })

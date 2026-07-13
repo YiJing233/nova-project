@@ -3,8 +3,8 @@ import type { LucideIcon } from 'lucide-react'
 import { Archive, BadgeHelp, BarChart3, ClipboardList, Command as CommandIcon, Eraser, Layers3, List, ListTree, PenLine, ScrollText, Send, Sparkles, Square, WandSparkles } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { FileReferencePicker, type ReferencePickerItem } from './FileReferencePicker'
-import { TokenUsageDialog } from './TokenUsagePanel'
-import type { ChatMessage, TextSelection } from '@/lib/api'
+import { TokenUsageDialog, type TokenUsageRecord } from './TokenUsagePanel'
+import type { TextSelection } from '@/lib/api'
 import type { VisibleAgentKey } from '@/features/agents/agent-registry'
 import { Button } from '@/components/ui/button'
 import { AgentComposerShell } from './AgentComposerShell'
@@ -42,7 +42,7 @@ const COMMANDS: Array<{ cmd: string; descKey: string; hintKey: string; icon: Luc
   { cmd: '/rewrite', descKey: 'chat.command.rewrite.desc', hintKey: 'chat.command.rewrite.hint', icon: WandSparkles },
 ]
 
-export interface SkillCommand {
+interface SkillCommand {
   name: string
   description: string
 }
@@ -90,7 +90,8 @@ interface InputAreaProps {
   placeholder?: string
   disabledPlaceholder?: string
   onContextAnalyze?: (message: string) => void | Promise<void>
-  tokenUsageMessages?: ChatMessage[]
+  tokenUsageMessages?: TokenUsageRecord[]
+  onOpenTrace?: (runID: string) => void
   agentKey?: VisibleAgentKey
   workspace?: string
   writingSkillControl?: ReactNode
@@ -131,6 +132,7 @@ export function InputArea({
   disabledPlaceholder,
   onContextAnalyze,
   tokenUsageMessages = [],
+  onOpenTrace,
   agentKey,
   workspace,
   writingSkillControl,
@@ -211,7 +213,7 @@ export function InputArea({
     ...styleScenes.map((scene) => ({ kind: 'style' as const, value: scene, label: scene })),
   ], [knownLoreTokens, loreReferenceLabels, loreReferences, referencedFiles, styleScenes])
   const tokenUsageCount = useMemo(
-    () => Math.min(MAX_TOKEN_USAGE_MENU_COUNT, tokenUsageMessages.filter((message) => message.role === 'token_usage' && Number(message.model_calls || 0) > 0).length),
+    () => Math.min(MAX_TOKEN_USAGE_MENU_COUNT, tokenUsageMessages.filter((message) => (!message.role || message.role === 'token_usage') && Number(message.model_calls || 0) > 0).length),
     [tokenUsageMessages],
   )
 
@@ -629,7 +631,7 @@ export function InputArea({
                 {t('chat.plan.short')}
               </span>
             ) : null}
-            <TokenUsageDialog open={tokenUsageOpen} messages={tokenUsageMessages} onOpenChange={setTokenUsageOpen} />
+            <TokenUsageDialog open={tokenUsageOpen} messages={tokenUsageMessages} onOpenChange={setTokenUsageOpen} onOpenTrace={onOpenTrace} />
           </>
         }
         submitControl={

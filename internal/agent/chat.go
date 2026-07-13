@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/schema"
@@ -104,18 +105,6 @@ func NewRuntime(policy LoopPolicy) *Runtime {
 	return &Runtime{policy: policy.normalized()}
 }
 
-// Run 运行一次聊天请求，并通过 emit 输出流式事件。
-func (s *ChatService) Run(
-	ctx context.Context,
-	runner *adk.Runner,
-	conversation Conversation,
-	bookService *book.Service,
-	req ChatRequest,
-	emit func(Event),
-) {
-	s.RunWithOptions(ctx, runner, conversation, bookService, req, RunOptions{}, emit)
-}
-
 func (s *ChatService) RunWithOptions(
 	ctx context.Context,
 	runner *adk.Runner,
@@ -163,9 +152,25 @@ func (r *Runtime) Run(
 	if ledgerErr != nil {
 		runLogger.Warn("run_ledger_unavailable", slog.String("workspace", workspace), slog.Any("error", ledgerErr))
 	}
-	checkpointID := options.checkpointID(runLedger.ID())
-	observer := newRunObserver(runLedger)
-	usageCollector := newRunTokenUsageCollector(runLedger.ID(), options.AgentKind)
+	rootSpan := StartRootTraceSpan(runLedger, map[string]any{
+		"workspace":  workspace,
+		"task_id":    options.TaskID,
+		"agent_kind": options.AgentKind,
+		"session_id": options.SessionID,
+		"mode":       options.Mode,
+	})
+	rootSpanID := ""
+	if rootSpan != nil {
+		rootSpanID = rootSpan.SpanID()
+	}
+	runID := ""
+	if runLedger != nil {
+		runID = runLedger.ID()
+	}
+	traceCtx := ContextWithRunTrace(ctx, runID, runLedger, rootSpanID)
+	checkpointID := options.checkpointID(runID)
+	observer := newRunObserver(runLedger, rootSpanID)
+	usageCollector := newRunTokenUsageCollector(runID, options.AgentKind)
 	if runLedger != nil {
 		defer func() {
 			if err := runLedger.Close(); err != nil {
@@ -180,14 +185,28 @@ func (r *Runtime) Run(
 		}
 		finished = true
 		usageCollector.EmitIfAny(emit, generatedBytes)
+		if rootSpan != nil {
+			rootSpan.Finish(status, map[string]any{
+				"reason":          strings.TrimSpace(reason),
+				"generated_bytes": generatedBytes,
+			})
+		}
 		if err := runLedger.RecordFinish(status, reason, generatedBytes); err != nil {
 			runLogger.Warn("run_ledger_finish_failed", slog.String("run_id", runLedger.ID()), slog.Any("error", err))
 		}
 	}
 
-	runID := runLedger.ID()
 	if runID == "" {
 		runID = options.TaskID
+	}
+	assistantMetadata := session.MessageMetadata{
+		RunID:         runID,
+		AgentKind:     options.AgentKind,
+		AgentName:     options.RootAgentName,
+		RootAgentName: options.RootAgentName,
+	}
+	if options.RootAgentName != "" {
+		assistantMetadata.RunPath = []string{options.RootAgentName}
 	}
 	subAgentSessions := newSubAgentSessionTracker(runID)
 	recorder := newDisplayEventRecorder(conversation)
@@ -232,6 +251,7 @@ func (r *Runtime) Run(
 	if shouldResumeInterruptedRequest(req.Message) {
 		pendingInterruption = conversation.PendingInterruption()
 	}
+	contextBuildStarted := time.Now()
 	composition := composeAgentInput(req, pendingInterruption, bookService, policy)
 	req = composition.Request
 	originalMessage = composition.OriginalMessage
@@ -256,7 +276,8 @@ func (r *Runtime) Run(
 		return
 	}
 	if compactor, ok := conversation.(ContextCompactionConversation); ok {
-		compactedHistory, compactionResult, compactErr := compactor.CompactContextIfNeeded(ctx, ContextCompactionInput{
+		compactionStarted := time.Now()
+		compactedHistory, compactionResult, compactErr := compactor.CompactContextIfNeeded(ContextWithRunObserver(traceCtx, observer), ContextCompactionInput{
 			Messages:     history,
 			AgentMessage: agentMessage,
 			Phase:        contextCompactionPhasePreRun,
@@ -270,22 +291,44 @@ func (r *Runtime) Run(
 		}
 		history = compactedHistory
 		if compactionResult.Triggered {
-			runLogger.Info("context_compacted", slog.String("phase", compactionResult.Phase), slog.Int("epoch", compactionResult.Epoch), slog.Int("tokens_before", compactionResult.TokensBefore), slog.Int("tokens_after", compactionResult.TokensAfter), slog.Int("context_window_tokens", compactionResult.ContextWindowTokens))
+			runLogger.Info("context_compacted", slog.String("phase", compactionResult.Phase), slog.Int("epoch", compactionResult.Epoch), slog.Int("tokens_before", compactionResult.TokensBefore), slog.Int("projected_tokens_before", compactionResult.ProjectedTokensBefore), slog.Int("tokens_after", compactionResult.TokensAfter), slog.Int("projected_tokens_after", compactionResult.ProjectedTokensAfter), slog.Int("context_window_tokens", compactionResult.ContextWindowTokens))
 			if err := runLedger.Record("context_compaction", map[string]any{
-				"phase":                 compactionResult.Phase,
-				"epoch":                 compactionResult.Epoch,
-				"tokens_before":         compactionResult.TokensBefore,
-				"tokens_after":          compactionResult.TokensAfter,
-				"context_window_tokens": compactionResult.ContextWindowTokens,
-				"threshold":             compactionResult.Threshold,
+				"phase":                       compactionResult.Phase,
+				"epoch":                       compactionResult.Epoch,
+				"tokens_before":               compactionResult.TokensBefore,
+				"projected_tokens_before":     compactionResult.ProjectedTokensBefore,
+				"reserved_completion_tokens":  compactionResult.ReservedCompletionTokens,
+				"reserved_tool_result_tokens": compactionResult.ReservedToolResultTokens,
+				"tokens_after":                compactionResult.TokensAfter,
+				"projected_tokens_after":      compactionResult.ProjectedTokensAfter,
+				"context_window_tokens":       compactionResult.ContextWindowTokens,
+				"threshold":                   compactionResult.Threshold,
 			}); err != nil {
 				runLogger.Warn("run_ledger_context_compaction_failed", slog.String("run_id", runLedger.ID()), slog.Any("error", err))
 			}
+			RecordCompletedTraceSpan(traceCtx, "context_compaction", compactionStarted, "success", map[string]any{
+				"phase":                   compactionResult.Phase,
+				"epoch":                   compactionResult.Epoch,
+				"tokens_before":           compactionResult.TokensBefore,
+				"projected_tokens_before": compactionResult.ProjectedTokensBefore,
+				"tokens_after":            compactionResult.TokensAfter,
+				"projected_tokens_after":  compactionResult.ProjectedTokensAfter,
+				"context_window_tokens":   compactionResult.ContextWindowTokens,
+				"threshold":               compactionResult.Threshold,
+			})
 		}
 	}
 	if err := runLedger.RecordContext(contextLog.Audit()); err != nil {
 		runLogger.Warn("run_ledger_context_failed", slog.String("run_id", runLedger.ID()), slog.Any("error", err))
 	}
+	RecordCompletedTraceSpan(traceCtx, "context_build", contextBuildStarted, "success", map[string]any{
+		"history_messages":    len(history),
+		"context_parts":       len(contextLog.Audit()),
+		"message_chars":       len([]rune(originalMessage)),
+		"agent_message_chars": len([]rune(agentMessage)),
+		"plan_mode":           req.PlanMode,
+		"writing_skill":       req.WritingSkill,
+	})
 	runLogger.Info(
 		"context_composition",
 		slog.String("history", messageListSummary(history)),
@@ -307,7 +350,7 @@ func (r *Runtime) Run(
 		}
 	}
 
-	runCtx, cancelRun := context.WithCancel(contextWithCompactionController(ContextWithRunObserver(ctx, observer), conversation))
+	runCtx, cancelRun := context.WithCancel(contextWithCompactionController(ContextWithRunObserver(traceCtx, observer), conversation))
 	defer cancelRun()
 	runOptions := []adk.AgentRunOption{}
 	if checkpointID != "" {
@@ -337,7 +380,9 @@ func (r *Runtime) Run(
 			flushPlanProtocolParser(planParser, &fullContent, emit)
 			discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
 			generatedBytes := fullContent.Len()
-			appendAssistantIfAny(conversation, &fullContent, &fullThinking)
+			if _, persistErr := appendAssistantIfAny(conversation, &fullContent, &fullThinking, assistantMetadata); persistErr != nil {
+				runLogger.Error("persist_interrupted_assistant_failed", slog.Any("error", persistErr))
+			}
 			finishRun("aborted", err.Error(), generatedBytes)
 			emit(Event{Type: "aborted", Data: map[string]string{}})
 			return
@@ -346,7 +391,10 @@ func (r *Runtime) Run(
 		if waitErr != nil {
 			flushPlanProtocolParser(planParser, &fullContent, emit)
 			discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
-			generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
+			generated, persistErr := appendAssistantIfAny(conversation, &fullContent, &fullThinking, assistantMetadata)
+			if persistErr != nil {
+				runLogger.Error("persist_interrupted_assistant_failed", slog.Any("error", persistErr))
+			}
 			if ctx.Err() != nil {
 				runLogger.Warn("run_interrupted", slog.String("reason", "context"), slog.Any("error", ctx.Err()), slog.Int("generated_bytes", len(generated)))
 				finishRun("aborted", ctx.Err().Error(), len(generated))
@@ -367,7 +415,10 @@ func (r *Runtime) Run(
 			runLogger.Error("run_interrupted", slog.String("reason", "runner_error"), slog.Any("error", event.Err), slog.Int("generated_bytes", fullContent.Len()))
 			flushPlanProtocolParser(planParser, &fullContent, emit)
 			discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
-			generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
+			generated, persistErr := appendAssistantIfAny(conversation, &fullContent, &fullThinking, assistantMetadata)
+			if persistErr != nil {
+				runLogger.Error("persist_interrupted_assistant_failed", slog.Any("error", persistErr))
+			}
 			markInterruptionIfNeeded(conversation, resumeInterruption, originalMessage, generated, event.Err.Error())
 			finishRun("error", event.Err.Error(), len(generated))
 			emit(Event{Type: "error", Data: map[string]string{"message": event.Err.Error()}})
@@ -389,7 +440,10 @@ func (r *Runtime) Run(
 			content, drainErr := drainContent(runCtx, mv, options.IdleTimeout)
 			if drainErr != nil {
 				discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
-				generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
+				generated, persistErr := appendAssistantIfAny(conversation, &fullContent, &fullThinking, assistantMetadata)
+				if persistErr != nil {
+					runLogger.Error("persist_interrupted_assistant_failed", slog.Any("error", persistErr))
+				}
 				if ctx.Err() != nil {
 					runLogger.Warn("run_interrupted", slog.String("reason", "context"), slog.Any("error", ctx.Err()), slog.Int("generated_bytes", len(generated)))
 					finishRun("aborted", ctx.Err().Error(), len(generated))
@@ -444,7 +498,10 @@ func (r *Runtime) Run(
 			if streamErr != nil {
 				flushPlanProtocolParser(planParser, &fullContent, emit)
 				discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
-				generated := appendAssistantIfAny(conversation, &fullContent, &fullThinking)
+				generated, persistErr := appendAssistantIfAny(conversation, &fullContent, &fullThinking, assistantMetadata)
+				if persistErr != nil {
+					runLogger.Error("persist_interrupted_assistant_failed", slog.Any("error", persistErr))
+				}
 				if ctx.Err() != nil {
 					runLogger.Warn("run_interrupted", slog.String("reason", "context"), slog.Any("error", ctx.Err()), slog.Int("generated_bytes", len(generated)))
 					finishRun("aborted", ctx.Err().Error(), len(generated))
@@ -478,7 +535,21 @@ func (r *Runtime) Run(
 	flushPlanProtocolParser(planParser, &fullContent, emit)
 	discardPlanAssistantContentIfNeeded(req.PlanMode, planParser, &fullContent, &fullThinking)
 	generatedBytes := fullContent.Len()
-	appendAssistantIfAny(conversation, &fullContent, &fullThinking)
+	if _, persistErr := appendAssistantIfAny(conversation, &fullContent, &fullThinking, assistantMetadata); persistErr != nil {
+		runLogger.Error("persist_assistant_failed", slog.Any("error", persistErr), slog.Int("generated_bytes", generatedBytes))
+		finishRun("error", persistErr.Error(), generatedBytes)
+		emit(Event{Type: "run_state", Data: map[string]string{
+			"run_id":          runLedger.ID(),
+			"task_id":         options.TaskID,
+			"agent_kind":      options.AgentKind,
+			"session_id":      options.SessionID,
+			"root_agent_name": options.RootAgentName,
+			"phase":           "finished",
+			"status":          "error",
+		}})
+		emit(Event{Type: "error", Data: map[string]string{"message": fmt.Sprintf("生成结果持久化失败: %v", persistErr)}})
+		return
+	}
 	if resumeInterruption != nil {
 		if err := conversation.ResolveInterruption(resumeInterruption.ID); err != nil {
 			runLogger.Error("resolve_interruption_failed", slog.String("interruption_id", resumeInterruption.ID), slog.Any("error", err))

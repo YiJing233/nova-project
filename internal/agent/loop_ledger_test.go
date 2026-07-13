@@ -2,6 +2,7 @@ package agent
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -199,6 +200,186 @@ func TestRunTraceReaderSummarizesLedger(t *testing.T) {
 	}
 	if len(trace.Records) != 10 || trace.Summary.ID != summaries[0].ID {
 		t.Fatalf("unexpected trace detail: %#v", trace)
+	}
+}
+
+func TestRunLedgerRecordsStructuredTraceSpans(t *testing.T) {
+	oldTraceConfig := traceRuntimeConfigSnapshot()
+	SetTraceRuntimeConfig(TraceCaptureSummary, TraceExporterLocal, 100)
+	t.Cleanup(func() {
+		SetTraceRuntimeConfig(oldTraceConfig.CaptureLevel, oldTraceConfig.Exporter, oldTraceConfig.RetentionRuns)
+	})
+
+	workspace := t.TempDir()
+	ledger, err := newRunLedgerWithOptions(workspace, RunLedgerPolicy{Enabled: true, Directory: ".denova/runs", PreviewChars: 8}, RunOptions{
+		AgentKind: AgentKindIDE,
+		TaskID:    "task-structured-trace",
+		Workspace: workspace,
+		Mode:      "ide",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := StartRootTraceSpan(ledger, map[string]any{"agent_kind": AgentKindIDE})
+	if root == nil || root.SpanID() == "" {
+		t.Fatal("expected root trace span")
+	}
+	ctx := ContextWithRunObserver(ContextWithRunTrace(context.Background(), ledger.ID(), ledger, root.SpanID()), newRunObserver(ledger, root.SpanID()))
+	llm, _ := StartTraceSpan(ctx, "llm_call", map[string]any{
+		"call_id":    "call-1",
+		"model":      "test-model",
+		"mode":       "generate",
+		"prompt":     strings.Repeat("secret prompt ", 20),
+		"tool_count": 1,
+	})
+	if llm == nil || llm.SpanID() == "" {
+		t.Fatal("expected llm trace span")
+	}
+	RunObserverFromContext(ctx).RecordLLMSpan(llm.SpanID())
+	llm.Finish("success", map[string]any{
+		"provider_request_id":  "provider-1",
+		"finish_reason":        "tool_calls",
+		"prompt_tokens":        12,
+		"cached_prompt_tokens": 4,
+		"completion_tokens":    6,
+		"total_tokens":         18,
+	})
+	RunObserverFromContext(ctx).RecordToolDecision(ToolDecision{
+		ToolName:   "read_file",
+		ToolCallID: "tool-1",
+		Source:     ToolSourceRead,
+		Capability: "file_read",
+		Action:     "allowed",
+		Target:     "chapters/ch01.md",
+	})
+	RunObserverFromContext(ctx).RecordToolExecution(ToolExecutionRecord{
+		ToolName:      "read_file",
+		ToolCallID:    "tool-1",
+		Status:        "success",
+		Capability:    "file_read",
+		OriginalBytes: 4096,
+		ReturnedBytes: 512,
+		Truncated:     true,
+		Target:        "chapters/ch01.md",
+	})
+	root.Finish("success", map[string]any{"generated_bytes": 32})
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	trace, err := ReadRunTrace(workspace, ledger.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trace.Summary.LLMCalls != 1 {
+		t.Fatalf("expected one llm call in summary: %#v", trace.Summary)
+	}
+	var rootData, llmData, toolData map[string]any
+	for _, record := range readRunLedgerRecords(t, ledger.Path()) {
+		data, _ := record["data"].(map[string]any)
+		switch record["type"] {
+		case "agent_run":
+			rootData = data
+		case "llm_call":
+			llmData = data
+		case "tool_call":
+			toolData = data
+		}
+	}
+	if rootData == nil || llmData == nil || toolData == nil {
+		t.Fatalf("expected root, llm, and tool span records: root=%#v llm=%#v tool=%#v", rootData, llmData, toolData)
+	}
+	if llmData["parent_span_id"] != rootData["span_id"] {
+		t.Fatalf("llm parent span mismatch: llm=%#v root=%#v", llmData, rootData)
+	}
+	if toolData["parent_span_id"] != llmData["span_id"] {
+		t.Fatalf("tool parent span should point at llm span: tool=%#v llm=%#v", toolData, llmData)
+	}
+	llmAttrs := llmData["attrs"].(map[string]any)
+	if llmAttrs["provider_request_id"] != "provider-1" || llmAttrs["total_tokens"].(float64) != 18 {
+		t.Fatalf("llm attrs should include provider id and tokens: %#v", llmAttrs)
+	}
+	promptSummary, ok := llmAttrs["prompt"].(map[string]any)
+	if !ok || promptSummary["hash"] == "" || promptSummary["preview"] == "" {
+		t.Fatalf("prompt should be summarized with hash and preview: %#v", llmAttrs["prompt"])
+	}
+	encoded, _ := json.Marshal(llmData)
+	if strings.Contains(string(encoded), strings.Repeat("secret prompt ", 20)) {
+		t.Fatalf("trace span should not persist full prompt: %s", string(encoded))
+	}
+}
+
+func TestRunTraceSummaryAggregatesLLMCacheUsage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "run-cache.jsonl")
+	content := strings.Join([]string{
+		`{"type":"run_created","run_id":"run-cache","created_at":"2026-07-09T00:00:00Z","data":{"agent_kind":"ide"}}`,
+		`{"type":"llm_call","run_id":"run-cache","created_at":"2026-07-09T00:00:01Z","data":{"attrs":{"prompt_tokens":1000,"cached_prompt_tokens":400,"uncached_prompt_tokens":600,"total_tokens":1200}}}`,
+		`{"type":"llm_call","run_id":"run-cache","created_at":"2026-07-09T00:00:02Z","data":{"attrs":{"prompt_tokens":500,"cached_prompt_tokens":500,"total_tokens":650}}}`,
+		`{"type":"run_finished","run_id":"run-cache","created_at":"2026-07-09T00:00:03Z","data":{"status":"success"}}`,
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	trace, err := readRunTraceFile(path, defaultRunTraceRecordCap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if trace.Summary.LLMCalls != 2 {
+		t.Fatalf("llm calls = %d, want 2", trace.Summary.LLMCalls)
+	}
+	if trace.Summary.PromptTokens != 1500 || trace.Summary.CachedPromptTokens != 900 || trace.Summary.UncachedPromptTokens != 600 {
+		t.Fatalf("cache token summary mismatch: %#v", trace.Summary)
+	}
+	if trace.Summary.CacheHitRate != 0.6 {
+		t.Fatalf("cache hit rate = %.4f, want 0.6", trace.Summary.CacheHitRate)
+	}
+}
+
+func TestReadRunTraceKeepsHeadAndTailWhenTruncated(t *testing.T) {
+	workspace := t.TempDir()
+	ledger, err := newRunLedgerWithOptions(workspace, RunLedgerPolicy{Enabled: true, Directory: ".denova/runs", PreviewChars: 8}, RunOptions{
+		AgentKind: AgentKindIDE,
+		TaskID:    "task-long-trace",
+		Workspace: workspace,
+		Mode:      "ide",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 620; i++ {
+		if err := ledger.Record("event", map[string]any{
+			"event_type": "test_event",
+			"index":      i,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ledger.RecordFinish("success", "", 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	trace, err := ReadRunTrace(workspace, ledger.ID())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !trace.Truncated {
+		t.Fatalf("expected trace to be marked truncated")
+	}
+	if len(trace.Records) != defaultRunTraceRecordCap {
+		t.Fatalf("records = %d, want %d", len(trace.Records), defaultRunTraceRecordCap)
+	}
+	gap := trace.Records[defaultRunTraceRecordCap/2]
+	if gap.Type != "trace_truncated_gap" {
+		t.Fatalf("expected gap marker in middle, got %#v", gap)
+	}
+	if trace.Records[len(trace.Records)-1].Type != "run_finished" {
+		t.Fatalf("tail should include run_finished, got %#v", trace.Records[len(trace.Records)-1])
+	}
+	if omitted, ok := numericInt64Field(gap.Data, "omitted_records"); !ok || omitted <= 0 {
+		t.Fatalf("gap should report omitted records: %#v", gap.Data)
 	}
 }
 

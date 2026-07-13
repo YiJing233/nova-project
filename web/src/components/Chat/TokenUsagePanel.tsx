@@ -1,20 +1,17 @@
-import { BarChart3, Clock3, Hash } from 'lucide-react'
+import { Activity, BarChart3, Clock3, Hash } from 'lucide-react'
 import { useMemo } from 'react'
 import type { ReactNode } from 'react'
 import { useTranslation } from 'react-i18next'
 import { Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle } from '@/components/ui/dialog'
 import type { ChatMessage } from '@/lib/api'
+import type { AgentTokenUsageRecord } from '@/lib/agent-message-view'
 import { focusDialogContentOnOpen } from './dialog-focus'
 
 const MAX_TOKEN_USAGE_MESSAGES = 10
 
-interface TokenUsagePanelProps {
-  messages: ChatMessage[]
-}
-
 type TokenUsageSummary = {
   count: number
-  recent: ChatMessage[]
+  recent: TokenUsageRecord[]
   promptTokens: number
   cachedPromptTokens: number
   uncachedPromptTokens: number
@@ -48,68 +45,17 @@ type TokenUsageRow = {
 
 type TokenUsageGroup = {
   id: string
-  message: ChatMessage
+  message: TokenUsageRecord
   rows: TokenUsageRow[]
 }
 
-export function TokenUsagePanel({ messages }: TokenUsagePanelProps) {
-  const { t } = useTranslation()
-  const stats = useMemo(() => summarizeTokenUsage(messages), [messages])
-  const hasUsage = stats.count > 0
+export type TokenUsageRecord = AgentTokenUsageRecord | ChatMessage
 
-  return (
-    <div className="rounded-md border border-[var(--nova-border)] bg-[var(--nova-surface)] p-2.5 text-xs">
-      <div className="flex items-center gap-2">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--nova-border)] bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]">
-          <BarChart3 className="h-3.5 w-3.5" />
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="font-medium text-[var(--nova-text)]">{t('chat.tokenUsage.title')}</div>
-          <div className="truncate text-[11px] text-[var(--nova-text-faint)]">
-            {hasUsage ? t('chat.tokenUsage.subtitle', { count: stats.count }) : t('chat.tokenUsage.empty')}
-          </div>
-        </div>
-      </div>
-      <div className="mt-2 grid grid-cols-2 gap-1.5 sm:grid-cols-4">
-        <MetricCell label={t('chat.tokenUsage.cacheHit')} value={hasUsage ? formatPercent(stats.cacheHitRate) : '-'} />
-        <MetricCell label={t('chat.tokenUsage.uncachedTokens')} value={hasUsage ? formatCompactNumber(stats.uncachedPromptTokens) : '-'} />
-        <MetricCell label={t('chat.tokenUsage.totalTokens')} value={hasUsage ? formatCompactNumber(stats.totalTokens) : '-'} />
-        <MetricCell label={t('chat.tokenUsage.modelCalls')} value={hasUsage ? formatCompactNumber(stats.modelCalls) : '-'} />
-      </div>
-      {hasUsage ? (
-        <>
-          <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-[var(--nova-surface-2)]">
-            <div className="h-full rounded-full bg-[var(--nova-accent-green)]" style={{ width: `${Math.round(stats.cacheHitRate * 100)}%` }} />
-          </div>
-          <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-[var(--nova-text-faint)]">
-            <span>{t('chat.tokenUsage.promptTokens', { count: formatCompactNumber(stats.promptTokens) })}</span>
-            <span>{t('chat.tokenUsage.cachedTokens', { count: formatCompactNumber(stats.cachedPromptTokens) })}</span>
-            <span>{t('chat.tokenUsage.uncachedTokensWithCount', { count: formatCompactNumber(stats.uncachedPromptTokens) })}</span>
-            <span>{t('chat.tokenUsage.outputTokens', { count: formatCompactNumber(stats.completionTokens) })}</span>
-            <span>{t('chat.tokenUsage.reasoningTokens', { count: formatCompactNumber(stats.reasoningTokens) })}</span>
-          </div>
-          <div className="mt-2 space-y-1 border-t border-[var(--nova-border-soft)] pt-2">
-            {stats.recent.map((message, index) => (
-              <div key={message.run_id || message.id || index} className="flex items-center justify-between gap-2 text-[11px]">
-                <span className="min-w-0 truncate text-[var(--nova-text-faint)]">
-                  {t('chat.tokenUsage.recentRun', { count: index + 1 })}
-                </span>
-                <span className="shrink-0 font-mono text-[var(--nova-text-muted)]">
-                  {formatPercent(numberOrZero(message.cache_hit_rate))} · {t('chat.tokenUsage.uncachedTokensWithCount', { count: formatCompactNumber(messageUncachedPromptTokens(message)) })} · {formatCompactNumber(numberOrZero(message.total_tokens))}
-                </span>
-              </div>
-            ))}
-          </div>
-        </>
-      ) : null}
-    </div>
-  )
-}
-
-export function TokenUsageDialog({ open, messages, onOpenChange }: {
+export function TokenUsageDialog({ open, messages, onOpenChange, onOpenTrace }: {
   open: boolean
-  messages: ChatMessage[]
+  messages: TokenUsageRecord[]
   onOpenChange: (open: boolean) => void
+  onOpenTrace?: (runID: string) => void
 }) {
   const { t } = useTranslation()
   const usageMessages = useMemo(() => normalizeTokenUsageMessages(messages), [messages])
@@ -117,6 +63,11 @@ export function TokenUsageDialog({ open, messages, onOpenChange }: {
   const usageRows = useMemo(() => usageGroups.flatMap((group) => group.rows), [usageGroups])
   const stats = useMemo(() => summarizeTokenUsage(usageMessages), [usageMessages])
   const hasUsage = usageRows.length > 0
+  const handleOpenTrace = (runID: string) => {
+    if (!runID) return
+    onOpenChange(false)
+    onOpenTrace?.(runID)
+  }
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -152,6 +103,7 @@ export function TokenUsageDialog({ open, messages, onOpenChange }: {
                       key={group.id}
                       group={group}
                       requestIndex={groupIndex + 1}
+                      onOpenTrace={onOpenTrace ? handleOpenTrace : undefined}
                     />
                   ))}
                 </div>
@@ -230,7 +182,7 @@ function TokenUsageSummaryGrid({ stats }: { stats: TokenUsageSummary }) {
   )
 }
 
-function TokenUsageRequestGroup({ group, requestIndex }: { group: TokenUsageGroup; requestIndex: number }) {
+function TokenUsageRequestGroup({ group, requestIndex, onOpenTrace }: { group: TokenUsageGroup; requestIndex: number; onOpenTrace?: (runID: string) => void }) {
   const { t } = useTranslation()
   const message = group.message
   const runID = message.run_id || message.id || ''
@@ -247,11 +199,21 @@ function TokenUsageRequestGroup({ group, requestIndex }: { group: TokenUsageGrou
             <span>{t('chat.tokenUsage.columns.run')}: <span className="font-mono" title={runID}>{runID || '-'}</span></span>
           </div>
         </div>
-        <div className="flex flex-wrap gap-x-3 gap-y-1 font-mono text-[var(--nova-text-muted)]">
+        <div className="flex flex-wrap items-center gap-x-3 gap-y-1 font-mono text-[var(--nova-text-muted)]">
           <span>{t('chat.tokenUsage.modelCalls')}: {formatNumber(numberOrZero(message.model_calls))}</span>
           <span>{t('chat.tokenUsage.totalTokens')}: {formatNumber(numberOrZero(message.total_tokens))}</span>
           <span>{t('chat.tokenUsage.uncachedTokens')}: {formatNumber(messageUncachedPromptTokens(message))}</span>
           <span>{t('chat.tokenUsage.cacheHit')}: {formatPercent(numberOrZero(message.cache_hit_rate))}</span>
+          {runID && onOpenTrace ? (
+            <button
+              type="button"
+              onClick={() => onOpenTrace(runID)}
+              className="nova-nav-item inline-flex h-6 items-center gap-1 rounded border border-[var(--nova-border)] px-1.5 font-sans text-[10px] text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]"
+            >
+              <Activity className="h-3 w-3" />
+              {t('chat.tokenUsage.viewTrace')}
+            </button>
+          ) : null}
         </div>
       </div>
       <div className="divide-y divide-[var(--nova-border-soft)]">
@@ -324,7 +286,7 @@ function TokenBreakdown({ row }: { row: TokenUsageRow }) {
   )
 }
 
-function summarizeTokenUsage(messages: ChatMessage[]): TokenUsageSummary {
+function summarizeTokenUsage(messages: TokenUsageRecord[]): TokenUsageSummary {
   const usageMessages = normalizeTokenUsageMessages(messages)
   const summary = usageMessages.reduce<TokenUsageSummary>((acc, message) => {
     acc.count += 1
@@ -352,15 +314,15 @@ function summarizeTokenUsage(messages: ChatMessage[]): TokenUsageSummary {
   return summary
 }
 
-function normalizeTokenUsageMessages(messages: ChatMessage[]) {
+function normalizeTokenUsageMessages(messages: TokenUsageRecord[]) {
   return messages
-    .filter((message) => message.role === 'token_usage' && numberOrZero(message.model_calls) > 0)
+    .filter((message) => (!message.role || message.role === 'token_usage') && numberOrZero(message.model_calls) > 0)
     .slice()
     .sort((a, b) => timestampValue(a.created_at) - timestampValue(b.created_at))
     .slice(-MAX_TOKEN_USAGE_MESSAGES)
 }
 
-function buildTokenUsageGroups(messages: ChatMessage[]): TokenUsageGroup[] {
+function buildTokenUsageGroups(messages: TokenUsageRecord[]): TokenUsageGroup[] {
   return messages.map((message) => {
     const runID = message.run_id || message.id || ''
     const agentKind = message.agent_kind || ''
@@ -425,15 +387,6 @@ function buildTokenUsageGroups(messages: ChatMessage[]): TokenUsageGroup[] {
   })
 }
 
-function MetricCell({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="min-w-0 rounded-md border border-[var(--nova-border-soft)] bg-[var(--nova-surface-2)] px-2 py-1.5">
-      <div className="truncate text-[10px] text-[var(--nova-text-faint)]">{label}</div>
-      <div className="truncate font-mono text-[12px] text-[var(--nova-text)]">{value}</div>
-    </div>
-  )
-}
-
 function numberOrZero(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
@@ -465,11 +418,6 @@ function promptCacheMissTokens(value: PromptCacheUsageValue) {
 function formatPercent(value: number) {
   if (!Number.isFinite(value) || value <= 0) return '0%'
   return `${Math.round(value * 1000) / 10}%`
-}
-
-function formatCompactNumber(value: number) {
-  if (!Number.isFinite(value)) return '0'
-  return new Intl.NumberFormat(undefined, { notation: 'compact', maximumFractionDigits: 1 }).format(value)
 }
 
 function formatNumber(value: number) {

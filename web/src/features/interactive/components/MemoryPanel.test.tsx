@@ -25,7 +25,8 @@ describe('MemoryPanel', () => {
     vi.restoreAllMocks()
   })
 
-  it('auto-starts generation stream when the current turn memory is pending', async () => {
+  it('does not let panel mounting trigger background memory writes', async () => {
+    const onOpenMemoryManager = vi.fn()
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
       if (url.includes('/story-memory/generate/stream')) {
@@ -47,7 +48,7 @@ describe('MemoryPanel', () => {
     })
     vi.stubGlobal('fetch', fetchMock)
 
-    render(<MemoryPanel storyId="story-1" branchId="main" snapshot={{
+    render(<MemoryPanel storyId="story-1" branchId="main" onOpenMemoryManager={onOpenMemoryManager} snapshot={{
       story_id: 'story-1',
       branch_id: 'main',
       turns: [],
@@ -63,32 +64,26 @@ describe('MemoryPanel', () => {
       },
     }} />)
 
-    await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/interactive/stories/story-1/story-memory/generate/stream', expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({ branch_id: 'main', source: 'auto' }),
-    })))
+		await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/interactive/stories/story-1/story-memory?branch=main', expect.anything()))
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/story-memory/generate/stream'))).toBe(false)
     expect(screen.getByText('导演控制台')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '运行' })).toHaveClass('bg-[var(--nova-active)]')
+    expect(screen.getByRole('button', { name: '状态' })).toHaveAttribute('aria-current', 'page')
     expect(screen.queryByTestId('director-rail')).not.toBeInTheDocument()
     expect(screen.queryByText('导演编排可能涉及剧透')).not.toBeInTheDocument()
     expect(screen.queryByText('自动整理当前回合的故事记忆')).not.toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('button', { name: '查看后台执行过程' }))
-    await waitFor(() => expect(screen.getByText('自动整理当前回合的故事记忆')).toBeInTheDocument())
-    expect(screen.getByText('apply_story_memory_patches')).toBeInTheDocument()
-    expect(screen.getByText('整理完成：写入 1 条更新，当前可见 1 条记录')).toBeInTheDocument()
-
     await userEvent.click(screen.getByRole('button', { name: '记忆' }))
-    expect(screen.getByRole('button', { name: '记忆' })).toHaveClass('bg-[var(--nova-active)]')
+    expect(screen.getByRole('button', { name: '记忆' })).toHaveAttribute('aria-current', 'page')
     expect(screen.queryByRole('button', { name: '记忆内容' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '整理过程' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '显示归档项' })).not.toBeInTheDocument()
     expect(screen.queryByText('自动整理当前回合的故事记忆')).not.toBeInTheDocument()
+    const manageButton = screen.getByRole('button', { name: '打开故事记忆管理' })
+    expect(manageButton).toHaveTextContent('管理')
+    await userEvent.click(manageButton)
+    expect(onOpenMemoryManager).toHaveBeenCalledTimes(1)
     expect(screen.getAllByText('顾清漪').length).toBeGreaterThan(0)
-    expect(fetchMock).toHaveBeenCalledWith('/api/interactive/stories/story-1/story-memory/generate/stream', expect.objectContaining({
-      method: 'POST',
-      body: JSON.stringify({ branch_id: 'main', source: 'auto' }),
-    }))
+    expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/story-memory/generate/stream'))).toBe(false)
   })
 
   it('switches console tabs without duplicating tab navigation in a side rail', async () => {
@@ -107,14 +102,16 @@ describe('MemoryPanel', () => {
       director_plan_status: directorStatus('ready'),
     }} />)
 
-    expect(screen.getByRole('button', { name: '运行' })).toHaveClass('bg-[var(--nova-active)]')
-    expect(screen.getByTestId('director-run-summary')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '状态' })).toHaveAttribute('aria-current', 'page')
+    expect(screen.queryByTestId('director-run-summary')).not.toBeInTheDocument()
     expect(screen.queryByTestId('director-rail')).not.toBeInTheDocument()
     expect(screen.queryByText('故事记忆')).not.toBeInTheDocument()
 
-    await userEvent.click(screen.getByRole('button', { name: '状态' }))
-    expect(screen.getByRole('button', { name: '状态' })).toHaveClass('bg-[var(--nova-active)]')
-    expect(screen.getByText('actors')).toBeInTheDocument()
+		expect(screen.queryByText('故事此刻')).not.toBeInTheDocument()
+    expect(screen.getAllByText('protagonist').length).toBeGreaterThan(0)
+
+    await openBackstagePanel()
+    expect(screen.getByTestId('director-run-summary')).toBeInTheDocument()
 
     await userEvent.click(screen.getByRole('button', { name: '记忆' }))
     expect(screen.getAllByText('顾清漪').length).toBeGreaterThan(0)
@@ -163,6 +160,14 @@ describe('MemoryPanel', () => {
             challenge: '潜入检定',
             cost: '失败会损失体力并暴露行踪',
             state: '守阁长老正在靠近',
+            adjudication: {
+              reason: '强闯会触发守阁长老反制。',
+              stakes: '失败会暴露行踪。',
+              difficulty_reason: '守阁长老靠近，难度提高。',
+              roll_mode_reason: '没有明显优势或劣势。',
+              state_paths: ['actors.protagonist.state.resources.hp'],
+            },
+            bonuses: [{ kind: 'environment', source_path: 'scene.familiarity', reason: '熟悉地形', value: 2 }],
             difficulty: 'hard',
             outcomes: {
               critical_success: { result: '无声潜入。' },
@@ -178,10 +183,19 @@ describe('MemoryPanel', () => {
             roll_mode: 'normal',
             rolls: [4],
             kept_roll: 4,
+            base_target: 15,
             bonus_total: 2,
+            bonus_details: [{ kind: 'environment', source_path: 'scene.familiarity', reason: '熟悉地形', value: 2 }],
+            target: 18,
             total: 6,
             outcome: 'failure',
             result: '强闯失败导致主线中断',
+          },
+          state_consumption: {
+            status: 'partial',
+            mode: 'hybrid_auto',
+            applied_actor_ops: [{ op: 'set', actor_id: 'protagonist', field_id: '当前生命', value: 0, source_kind: 'rule_resolution', source_id: 'rr_1' }],
+            warnings: [{ path: 'actors.protagonist.state.conditions.poisoned', reason: '字段不在状态系统中' }],
           },
           terminal_candidate: { type: 'bad_end', reason: '强闯失败导致主线中断', check_id: 'check_1' },
         },
@@ -190,6 +204,7 @@ describe('MemoryPanel', () => {
 
     expect(screen.queryByDisplayValue(/公开压力升高/)).not.toBeInTheDocument()
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/director'))).toBe(false)
+    await openBackstagePanel()
     expect(screen.getByTestId('director-run-summary')).toBeInTheDocument()
     expect(screen.getByText('后台导演运行')).toBeInTheDocument()
     expect(screen.getByText('director unavailable')).toBeInTheDocument()
@@ -201,6 +216,10 @@ describe('MemoryPanel', () => {
     expect(screen.getByText('导演编排可能涉及剧透')).toBeInTheDocument()
     expect(screen.getByText('规则审计')).toBeInTheDocument()
     expect(screen.getByText('失败会损失体力并暴露行踪')).toBeInTheDocument()
+    expect(screen.getByText('投前裁定')).toBeInTheDocument()
+    expect(screen.getByText('强闯会触发守阁长老反制。')).toBeInTheDocument()
+    expect(screen.getByText('状态消费')).toBeInTheDocument()
+    expect(screen.getByText('字段不在状态系统中')).toBeInTheDocument()
     expect(screen.getAllByText('潜入检定').length).toBeGreaterThan(0)
     expect(screen.getByText('failure')).toBeInTheDocument()
     expect(screen.getAllByText('强闯失败导致主线中断').length).toBeGreaterThan(0)
@@ -208,7 +227,7 @@ describe('MemoryPanel', () => {
     expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/director'))).toBe(false)
     await userEvent.click(screen.getByRole('button', { name: '查看导演编排' }))
     await waitFor(() => expect(fetchMock.mock.calls.some(([input]) => String(input).includes('/director?branch=main'))).toBe(true))
-    expect(screen.getAllByText('导演编排').length).toBeGreaterThan(0)
+    expect(screen.getByText('导演节拍表')).toBeInTheDocument()
     expect(screen.getByTestId('director-plan-markdown')).toBeInTheDocument()
     expect(screen.getByText(/公开压力升高/)).toBeInTheDocument()
     expect(screen.queryByDisplayValue(/公开压力升高/)).not.toBeInTheDocument()
@@ -243,6 +262,7 @@ describe('MemoryPanel', () => {
       }),
     }} />)
 
+    await openBackstagePanel()
     await userEvent.click(screen.getByRole('button', { name: '查看后台执行过程' }))
     await waitFor(() => expect(screen.getAllByText('等待首个开局回合后开始规划。').length).toBeGreaterThan(1))
 
@@ -282,6 +302,7 @@ describe('MemoryPanel', () => {
       },
     }} />)
 
+    await openBackstagePanel()
     await waitFor(() => expect(screen.getByRole('button', { name: '分析导演上下文' })).toBeInTheDocument())
     await userEvent.click(screen.getByRole('button', { name: '分析导演上下文' }))
 
@@ -296,7 +317,7 @@ describe('MemoryPanel', () => {
     expect(within(dialog).getByText(/lore index and bounded relevant entries/)).toBeInTheDocument()
   })
 
-  it('rebuilds director plan from the summary action', async () => {
+	it('rebuilds director plan from the summary action', async () => {
     const onSnapshotRefresh = vi.fn()
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
@@ -310,7 +331,8 @@ describe('MemoryPanel', () => {
         return Response.json(storyMemoryState())
       }
       return Response.json({})
-    })
+	})
+
     vi.stubGlobal('fetch', fetchMock)
 
     render(<MemoryPanel storyId="story-1" branchId="main" onSnapshotRefresh={onSnapshotRefresh} snapshot={{
@@ -329,8 +351,36 @@ describe('MemoryPanel', () => {
       method: 'POST',
       body: JSON.stringify({ branch_id: 'main' }),
     })))
-    await waitFor(() => expect(onSnapshotRefresh).toHaveBeenCalledTimes(1))
-  })
+		await waitFor(() => expect(onSnapshotRefresh).toHaveBeenCalledTimes(1))
+	})
+
+	it('shows event runtime only after spoiler reveal and can force evaluation', async () => {
+		const plan = directorPlan() as ReturnType<typeof directorPlan> & { metadata: Record<string, unknown> }
+		plan.metadata.event_runtime = {
+			active: { event_ref: 'default/face-slap', stage: 'seed', summary: '公开质疑已经埋下。' },
+			recent_decisions: [{ id: 'decision-1', source_turn_id: 'turn-1', decision: { mode: 'seed', event_ref: 'default/face-slap' } }],
+		}
+		const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+			const url = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url
+			if (url.includes('/director/run')) return Response.json(directorStatus('running'))
+			if (url.includes('/director')) return Response.json(plan)
+			if (url.includes('/story-memory')) return Response.json(storyMemoryState())
+			return Response.json({})
+		})
+		vi.stubGlobal('fetch', fetchMock)
+
+		render(<MemoryPanel storyId="story-1" branchId="main" snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [], state: {}, director_plan_status: directorStatus('ready') }} />)
+		await openPlanPanel()
+		expect(screen.queryByText('事件编排运行态')).not.toBeInTheDocument()
+		await userEvent.click(screen.getByRole('button', { name: '查看导演编排' }))
+		await waitFor(() => expect(screen.getByText('事件编排运行态')).toBeInTheDocument())
+		expect(screen.getByText('default/face-slap')).toBeInTheDocument()
+		await userEvent.click(screen.getByRole('button', { name: '立即评估' }))
+		await waitFor(() => expect(fetchMock).toHaveBeenCalledWith('/api/interactive/stories/story-1/director/run', expect.objectContaining({
+			method: 'POST',
+			body: JSON.stringify({ branch_id: 'main', force_event_evaluation: true }),
+		})))
+	})
 
   it('saves director plan edits from the summary action', async () => {
     const onSnapshotRefresh = vi.fn()
@@ -441,6 +491,7 @@ describe('MemoryPanel', () => {
       state: {},
     }} />)
 
+    await openBackstagePanel()
     await waitFor(() => expect(screen.getByRole('button', { name: '手动触发导演规划' })).toBeInTheDocument())
     expect(screen.getByText('当前分支暂无导演编排或规则审计')).toBeInTheDocument()
 
@@ -459,8 +510,13 @@ describe('MemoryPanel', () => {
 })
 
 async function openPlanPanel() {
-  await waitFor(() => expect(screen.getByRole('button', { name: '运行' })).toHaveClass('bg-[var(--nova-active)]'))
   await userEvent.click(screen.getByRole('button', { name: '规划' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: '规划' })).toHaveAttribute('aria-current', 'page'))
+}
+
+async function openBackstagePanel() {
+  await userEvent.click(screen.getByRole('button', { name: '后台' }))
+  await waitFor(() => expect(screen.getByRole('button', { name: '后台' })).toHaveAttribute('aria-current', 'page'))
 }
 
 function sse(events: Array<[string, unknown]>) {

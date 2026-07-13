@@ -43,6 +43,9 @@ type Config struct {
 	RuntimeWebPort              int                          `toml:"-"`
 	DevMode                     bool                         `toml:"-"`
 	LLMInputLogEnabled          bool                         `toml:"llm_input_log_enabled"`
+	TraceCaptureLevel           string                       `toml:"trace_capture_level"`
+	TraceExporter               string                       `toml:"trace_exporter"`
+	TraceRetentionRuns          int                          `toml:"trace_retention_runs"`
 	IDEStoryTellerID            string                       `toml:"-"`
 	IDEImagePresetID            string                       `toml:"-"`
 	ImagePresetToolPrompt       string                       `toml:"-"`
@@ -61,7 +64,6 @@ type Config struct {
 	VersionAgentEnabled         bool                         `toml:"-"`
 	VersionAgentCharThreshold   int                          `toml:"-"`
 	InteractiveReplyTargetChars int                          `toml:"-"`
-	InteractiveHotChoices       bool                         `toml:"-"`
 	ResumeLastWorkspace         bool                         `toml:"-"`
 	UpdateCheckEnabled          bool                         `toml:"-"`
 }
@@ -111,6 +113,9 @@ func LoadWithWorkspace(workspace string) (*Config, LayeredSettings, error) {
 		AgentIdleTimeoutSeconds:     settingsAgentIdleTimeoutSeconds(s.AgentIdleTimeoutSeconds),
 		AgentToolResultLimitKB:      settingsAgentToolResultLimitKB(s.AgentToolResultLimitKB),
 		LLMInputLogEnabled:          settingsBool(s.LLMInputLogEnabled, false),
+		TraceCaptureLevel:           settingsString(s.TraceCaptureLevel, DefaultTraceCaptureLevel),
+		TraceExporter:               settingsString(s.TraceExporter, DefaultTraceExporter),
+		TraceRetentionRuns:          settingsInt(s.TraceRetentionRuns, DefaultTraceRetentionRuns),
 		ChapterFilenameFormat:       s.ChapterFilenameFormat,
 		VolumeDirFormat:             s.VolumeDirFormat,
 		HideChapterBodyLiveOutput:   settingsBool(s.HideChapterBodyLiveOutput, false),
@@ -121,7 +126,6 @@ func LoadWithWorkspace(workspace string) (*Config, LayeredSettings, error) {
 		VersionAgentEnabled:         settingsBool(s.VersionAgentEnabled, true),
 		VersionAgentCharThreshold:   settingsInt(s.VersionAgentCharThreshold, 3000),
 		InteractiveReplyTargetChars: 2000,
-		InteractiveHotChoices:       settingsBool(s.InteractiveHotChoices, true),
 		ResumeLastWorkspace:         true,
 		UpdateCheckEnabled:          settingsBool(s.UpdateCheckEnabled, true),
 	}
@@ -242,6 +246,15 @@ func settingsFromConfig(cfg *Config) Settings {
 	if cfg.LLMInputLogEnabled {
 		settings.LLMInputLogEnabled = &cfg.LLMInputLogEnabled
 	}
+	if cfg.TraceCaptureLevel != "" {
+		settings.TraceCaptureLevel = cfg.TraceCaptureLevel
+	}
+	if cfg.TraceExporter != "" {
+		settings.TraceExporter = cfg.TraceExporter
+	}
+	if cfg.TraceRetentionRuns > 0 {
+		settings.TraceRetentionRuns = &cfg.TraceRetentionRuns
+	}
 	if cfg.OpenAIContextWindowTokens > 0 {
 		settings.OpenAIContextWindowTokens = &cfg.OpenAIContextWindowTokens
 	}
@@ -296,6 +309,9 @@ func Load() *Config {
 			AgentIdleTimeoutSeconds:     settingsAgentIdleTimeoutSeconds(d.AgentIdleTimeoutSeconds),
 			AgentToolResultLimitKB:      settingsAgentToolResultLimitKB(d.AgentToolResultLimitKB),
 			LLMInputLogEnabled:          settingsBool(d.LLMInputLogEnabled, false),
+			TraceCaptureLevel:           settingsString(d.TraceCaptureLevel, DefaultTraceCaptureLevel),
+			TraceExporter:               settingsString(d.TraceExporter, DefaultTraceExporter),
+			TraceRetentionRuns:          settingsInt(d.TraceRetentionRuns, DefaultTraceRetentionRuns),
 			ChapterFilenameFormat:       d.ChapterFilenameFormat,
 			VolumeDirFormat:             d.VolumeDirFormat,
 			HideChapterBodyLiveOutput:   settingsBool(d.HideChapterBodyLiveOutput, false),
@@ -306,7 +322,6 @@ func Load() *Config {
 			VersionAgentEnabled:         settingsBool(d.VersionAgentEnabled, true),
 			VersionAgentCharThreshold:   settingsInt(d.VersionAgentCharThreshold, 3000),
 			InteractiveReplyTargetChars: 2000,
-			InteractiveHotChoices:       settingsBool(d.InteractiveHotChoices, true),
 			ResumeLastWorkspace:         true,
 			UpdateCheckEnabled:          settingsBool(d.UpdateCheckEnabled, true),
 		}
@@ -352,19 +367,11 @@ func settingsBool(v *bool, fallback bool) bool {
 	return *v
 }
 
-// LoadForWorkspace 加载配置并明确指定 workspace，用于 CLI 参数场景。
-func LoadForWorkspace(workspace string) *Config {
-	cfg, _, err := LoadWithWorkspace(workspace)
-	if err != nil || cfg == nil {
-		cfg = Load()
-		cfg.Workspace = workspace
+func settingsString(v, fallback string) string {
+	if strings.TrimSpace(v) == "" {
+		return fallback
 	}
-	if cfg.Workspace != "" {
-		if abs, err := filepath.Abs(cfg.Workspace); err == nil {
-			cfg.Workspace = abs
-		}
-	}
-	return cfg
+	return v
 }
 
 // overrideFromEnv 用环境变量覆盖配置

@@ -1,11 +1,9 @@
 import { Children, Fragment, cloneElement, isValidElement, memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import ReactMarkdown from 'react-markdown'
-import type { Components } from 'react-markdown'
-import remarkGfm from 'remark-gfm'
-import { Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, CircleDot, ClipboardCheck, ClipboardList, Clock3, Copy, FileText, ImagePlus, ListTodo, Loader2, PanelRightOpen, Pencil, RefreshCw, Send, X } from 'lucide-react'
+import { Activity, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, CircleDot, ClipboardCheck, ClipboardList, Clock3, Copy, Dice5, FileText, ImagePlus, ListTodo, Loader2, PanelRightOpen, Pencil, RefreshCw, Send, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ImagePreviewDialog } from '@/components/common/ImagePreviewDialog'
+import { MarkdownRenderer, type MarkdownRendererComponents } from '@/components/common/MarkdownRenderer'
 import { workspaceAssetURL, type ChapterIllustration, type ChatMessage, type InteractiveImage, type InteractiveImageError } from '@/lib/api'
 import { findDialogueHighlightRanges } from '@/lib/dialogue-highlight'
 import { isWorkspaceImagePath } from '@/lib/workspace-file-kind'
@@ -17,6 +15,10 @@ import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { boundedPlanDisplay, formatPlanQuestionAnswerMessage, formatPlanQuestionAnswerPreview, parsePlanQuestionSet, recommendedAnswerSet } from '@/lib/plan-mode'
 import type { PlanQuestionAnswer } from '@/lib/plan-mode'
+import { Message as AIMessage, MessageContent as AIMessageContent } from '@/components/ai-elements/message'
+import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai-elements/reasoning'
+import { Plan, PlanContent, PlanHeader } from '@/components/ai-elements/plan'
+import { Tool, ToolContent } from '@/components/ai-elements/tool'
 
 interface MessageItemProps {
   message: ChatMessage
@@ -35,6 +37,7 @@ interface MessageItemProps {
   onApprovePlan?: (message: ChatMessage) => void
   onContinuePlan?: (message: ChatMessage) => void
   onExitPlanMode?: () => void
+  onOpenTrace?: (runID: string) => void
   onPlanCardLayoutChange?: () => void
 }
 
@@ -45,7 +48,7 @@ const messageActionTooltipSideOffset = 3
 const planThinkingPreviewStaleMs = 3500
 
 /** 单条消息组件，根据 role 渲染不同样式 */
-export const MessageItem = memo(function MessageItem({ message, highlightDialogue = false, messageStyle, onEdit, onRegenerate, onSwitchVersion, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, subAgentPresentation = 'card', onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onPlanCardLayoutChange }: MessageItemProps) {
+export const MessageItem = memo(function MessageItem({ message, highlightDialogue = false, messageStyle, onEdit, onRegenerate, onSwitchVersion, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, subAgentPresentation = 'card', onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onOpenTrace, onPlanCardLayoutChange }: MessageItemProps) {
   const { role, content = '' } = message
   const canEdit = role === 'user' && Boolean(message.turn_id) && Boolean(onEdit)
   const canRegenerate = role === 'assistant' && Boolean(message.turn_id) && Boolean(onRegenerate) && !message.streaming
@@ -58,14 +61,14 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
   switch (role) {
     case 'user':
       return (
-        <div className="group flex justify-end gap-2">
+        <AIMessage from="user" className="max-w-none items-end">
           <div className="nova-message-body-with-meta nova-message-body-with-meta-user max-w-[88%]">
-            <div className="nova-user-message rounded-lg px-3.5 py-2.5 text-sm text-[var(--nova-user-message-text)] whitespace-pre-wrap" style={messageStyle}>
+            <AIMessageContent className="nova-user-message rounded-lg bg-[var(--nova-user-message-bg-to)] px-3 py-2 text-sm leading-5 text-[var(--nova-user-message-text)] whitespace-pre-wrap group-[.is-user]:px-3 group-[.is-user]:py-2" style={messageStyle}>
               {content}
-            </div>
-            <MessageInlineMeta message={message} content={content} align="right" onEdit={canEdit ? onEdit : undefined} />
+            </AIMessageContent>
+            <MessageInlineMeta message={message} content={content} align="right" reserveSpace={Boolean(onEdit)} onEdit={canEdit ? onEdit : undefined} />
           </div>
-        </div>
+        </AIMessage>
       )
 
     case 'assistant': {
@@ -87,11 +90,12 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
         ? message.streaming_target_content
         : undefined
       const visibleContent = sanitizeThinkTags(streamingTargetContent || content).trim()
+      const reserveMetaSpace = message.streaming === true || Boolean(onGenerateInteractiveImage || onRegenerate || onSwitchVersion)
       return (
-        <div className="group flex justify-start">
+        <AIMessage from="assistant" className="max-w-none">
           <div className="w-full">
             <div className="nova-message-body-with-meta nova-message-body-with-meta-assistant">
-              <div className="chat-agent-message w-full px-1 text-sm text-[var(--nova-text)]" style={messageStyle}>
+              <AIMessageContent className="chat-agent-message block w-full gap-0 px-1 text-sm text-[var(--nova-text)]" style={messageStyle}>
                 {message.streaming && !visibleContent ? (
                   <StreamingPlaceholder />
                 ) : message.streaming ? (
@@ -99,12 +103,14 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
                 ) : (
                   <MarkdownContent content={content} highlightDialogue={highlightDialogue} />
                 )}
-              </div>
+              </AIMessageContent>
               <InteractiveImageStrip message={message} />
               <MessageInlineMeta
                 message={message}
                 content={content}
                 align="left"
+                reserveSpace={reserveMetaSpace}
+                hideActions={message.streaming === true}
                 onGenerateInteractiveImage={canGenerateInteractiveImage ? onGenerateInteractiveImage : undefined}
                 generatingInteractiveImage={Boolean(message.turn_id && generatingInteractiveImageTurnId === message.turn_id)}
                 onRegenerate={canRegenerate ? onRegenerate : undefined}
@@ -114,7 +120,7 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
               />
             </div>
           </div>
-        </div>
+        </AIMessage>
       )
     }
 
@@ -132,6 +138,9 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
         return <TodoListBlock message={message} />
       }
       return <ToolExecutionBlock message={message} />
+
+    case 'rule_roll':
+      return <RuleRollBlock message={message} />
 
     case 'tool_result':
       if ((message.name || '') === 'generate_interactive_image' || message.interactive_image) {
@@ -152,6 +161,7 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
       return <ProposedPlanBlock message={message} highlightDialogue={highlightDialogue} onApprove={onApprovePlan} onContinue={onContinuePlan} onExit={onExitPlanMode} onLayoutChange={onPlanCardLayoutChange} />
 
     case 'system':
+      if (!content.trim()) return null
       return (
         <div className="flex justify-center">
           <span className="rounded-full border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-1 text-xs text-[var(--nova-text-muted)]">
@@ -163,9 +173,10 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
     case 'error':
       return (
         <div className="flex justify-center">
-          <span className="rounded-full border border-[var(--nova-danger-border)] bg-[var(--nova-danger-bg)] px-3 py-1 text-xs text-[var(--nova-danger)]">
-            {content}
-          </span>
+          <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-2 rounded-full border border-[var(--nova-danger-border)] bg-[var(--nova-danger-bg)] px-3 py-1 text-xs text-[var(--nova-danger)]">
+            <span className="min-w-0 truncate">{content}</span>
+            <TraceLinkButton runID={message.run_id} onOpenTrace={onOpenTrace} />
+          </div>
         </div>
       )
 
@@ -174,34 +185,121 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
   }
 })
 
-function MessageInlineMeta({ message, content, align, onEdit, onGenerateInteractiveImage, generatingInteractiveImage = false, onRegenerate, onSwitchVersion, versionIndex = -1, versionCount = 0 }: { message: ChatMessage; content: string; align: 'left' | 'right'; onEdit?: (message: ChatMessage) => void; onGenerateInteractiveImage?: (message: ChatMessage) => void; generatingInteractiveImage?: boolean; onRegenerate?: (message: ChatMessage) => void; onSwitchVersion?: (message: ChatMessage, direction: -1 | 1) => void; versionIndex?: number; versionCount?: number }) {
+function TraceLinkButton({ runID, onOpenTrace }: { runID?: string; onOpenTrace?: (runID: string) => void }) {
+  const { t } = useTranslation()
+  if (!runID || !onOpenTrace) return null
+  return (
+    <button
+      type="button"
+      onClick={() => onOpenTrace(runID)}
+      className="nova-nav-item inline-flex h-6 shrink-0 items-center gap-1 rounded border border-[var(--nova-border)] px-1.5 text-[10px] text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]"
+    >
+      <Activity className="h-3 w-3" />
+      {t('chat.tracePanel.viewTrace')}
+    </button>
+  )
+}
+
+function RuleRollBlock({ message }: { message: ChatMessage }) {
+  const { t } = useTranslation()
+  const roll = message.rule_roll
+  if (!roll) return null
+  const rolls = roll.rolls?.length ? roll.rolls.join(', ') : '-'
+  const kept = Number.isFinite(roll.kept_roll) ? roll.kept_roll : undefined
+  const bonus = Number.isFinite(roll.bonus_total) ? roll.bonus_total : undefined
+  const total = Number.isFinite(roll.total) ? roll.total : undefined
+  const target = Number.isFinite(roll.target) ? roll.target : undefined
+  const cost = roll.cost || roll.stakes || ''
+  const stateChanges = roll.state_changes || []
+  return (
+    <div className="flex justify-start">
+      <div className="w-full rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] px-3 py-2 text-xs shadow-[var(--nova-shadow)]">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <Dice5 className="h-4 w-4 shrink-0 text-[var(--nova-text-faint)]" />
+          <span className="min-w-0 truncate font-semibold text-[var(--nova-text)]">{roll.label || t('snapshot.ruleRoll.title')}</span>
+          <span className="rounded border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--nova-text-muted)]">{roll.difficulty || t('snapshot.noRecord')}</span>
+          <span className="rounded border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--nova-text-muted)]">{[roll.dice, roll.roll_mode].filter(Boolean).join(' ') || t('snapshot.noRecord')}</span>
+          {roll.outcome ? <span className={`ml-auto shrink-0 font-semibold ${ruleRollOutcomeClass(roll.outcome)}`}>{roll.outcome}</span> : null}
+        </div>
+        <div className="mt-1.5 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-[var(--nova-text-muted)]">
+          <span>{t('snapshot.field.rolls')}: {rolls}</span>
+          {kept !== undefined ? <span>{t('snapshot.field.kept_roll')}: {formatRuleRollNumber(kept)}</span> : null}
+          {bonus !== undefined ? <span>{t('snapshot.field.bonus_total')}: {formatSignedRuleRollNumber(bonus)}</span> : null}
+          {total !== undefined || target !== undefined ? <span>{t('snapshot.ruleRoll.totalTarget', { total: total !== undefined ? formatRuleRollNumber(total) : '-', target: target !== undefined ? formatRuleRollNumber(target) : '-' })}</span> : null}
+          {Number.isFinite(roll.base_target) ? <span>{t('snapshot.field.base_target')}: {formatRuleRollNumber(roll.base_target || 0)}</span> : null}
+        </div>
+        {roll.result ? <div className="mt-1.5 text-[var(--nova-text)]">{roll.result}</div> : null}
+        {cost ? <div className="mt-1 text-[11px] leading-5 text-[var(--nova-text-faint)]">{t('snapshot.ruleRoll.cost')}: {cost}</div> : null}
+        {stateChanges.length ? (
+          <div className="mt-1 flex flex-wrap gap-1">
+            {stateChanges.map((change, index) => (
+				<span key={`${change.actor_id || ''}:${change.field_id || change.path || index}`} className="rounded border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--nova-text-muted)]">
+					{[change.actor_id, change.field_id].filter(Boolean).join(' / ') || change.path} {formatSignedRuleRollNumber(change.change)}
+              </span>
+            ))}
+          </div>
+        ) : null}
+      </div>
+    </div>
+  )
+}
+
+function ruleRollOutcomeClass(outcome: string) {
+  if (outcome.includes('success')) return 'text-[var(--nova-success)]'
+  if (outcome.includes('failure')) return 'text-[var(--nova-danger)]'
+  return 'text-[var(--nova-text-muted)]'
+}
+
+function formatRuleRollNumber(value: number) {
+  if (!Number.isFinite(value)) return '-'
+  return Number.isInteger(value) ? String(value) : value.toFixed(1)
+}
+
+function formatSignedRuleRollNumber(value: number) {
+  if (!Number.isFinite(value)) return '-'
+  const formatted = formatRuleRollNumber(value)
+  return value > 0 ? `+${formatted}` : formatted
+}
+
+function MessageInlineMeta({ message, content, align, reserveSpace = false, hideActions = false, onEdit, onGenerateInteractiveImage, generatingInteractiveImage = false, onRegenerate, onSwitchVersion, versionIndex = -1, versionCount = 0 }: { message: ChatMessage; content: string; align: 'left' | 'right'; reserveSpace?: boolean; hideActions?: boolean; onEdit?: (message: ChatMessage) => void; onGenerateInteractiveImage?: (message: ChatMessage) => void; generatingInteractiveImage?: boolean; onRegenerate?: (message: ChatMessage) => void; onSwitchVersion?: (message: ChatMessage, direction: -1 | 1) => void; versionIndex?: number; versionCount?: number }) {
   const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
   const formatted = formatMessageHoverTime(message.created_at)
   const canSwitchVersion = Boolean(onSwitchVersion && versionCount > 1 && versionIndex >= 0)
+  const hasMessageAction = !hideActions && Boolean(onEdit || onGenerateInteractiveImage || onRegenerate || canSwitchVersion)
+  const showCopyAction = !hideActions && Boolean(content.trim())
   const metaTooltip = {
     tooltipSide: 'top' as const,
     tooltipSideOffset: messageActionTooltipSideOffset,
     useTooltipProvider: false,
   }
-  if (!formatted && !content && !onEdit && !onGenerateInteractiveImage && !onRegenerate && !canSwitchVersion) return null
+  if (!formatted && !showCopyAction && !hasMessageAction) {
+    if (!reserveSpace) return null
+    return (
+      <div className={`nova-message-meta nova-message-meta-${align} nova-message-meta-spacer`} aria-hidden="true">
+        <span />
+      </div>
+    )
+  }
   return (
     <TooltipProvider delayDuration={messageActionTooltipDelayMs} skipDelayDuration={messageActionTooltipSkipDelayMs} disableHoverableContent>
       <div className={`nova-message-meta nova-message-meta-${align}`} aria-label={formatted}>
         {formatted ? <span className="nova-message-time">{formatted}</span> : null}
-        <TooltipIconButton
-          label={copied ? t('chat.action.copyMessageDone') : t('chat.action.copyMessage')}
-          {...metaTooltip}
-          className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)]"
-          onClick={(event) => {
-            event.stopPropagation()
-            setCopied(true)
-            window.setTimeout(() => setCopied(false), copyFeedbackDurationMs)
-            void copyText(content)
-          }}
-        >
-          {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
-        </TooltipIconButton>
+        {showCopyAction && (
+          <TooltipIconButton
+            label={copied ? t('chat.action.copyMessageDone') : t('chat.action.copyMessage')}
+            {...metaTooltip}
+            className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)]"
+            onClick={(event) => {
+              event.stopPropagation()
+              setCopied(true)
+              window.setTimeout(() => setCopied(false), copyFeedbackDurationMs)
+              void copyText(content)
+            }}
+          >
+            {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+          </TooltipIconButton>
+        )}
         {onGenerateInteractiveImage && (
           <TooltipIconButton
             label={message.interactive_images?.length || message.interactive_image ? t('chat.interactiveImage.regenerate') : t('chat.action.generateInteractiveImage')}
@@ -796,24 +894,24 @@ function planActionStatusText(t: ReturnType<typeof useTranslation>['t'], action:
 function PlanShell({ icon, title, badge, children }: { icon: ReactNode; title: string; badge?: string; children: ReactNode }) {
   return (
     <div className="flex justify-start">
-      <div className="w-full overflow-hidden rounded-lg border border-[var(--nova-border)] bg-[var(--nova-surface)] text-xs shadow-[var(--nova-shadow)] backdrop-blur">
-        <div className="flex items-center gap-2 border-b border-[var(--nova-border)] px-3 py-2.5">
+      <Plan defaultOpen className="w-full overflow-hidden rounded-lg border border-[var(--nova-border)] bg-[var(--nova-surface)] text-xs shadow-[var(--nova-shadow)] backdrop-blur">
+        <PlanHeader className="flex-row items-center gap-2 border-b border-[var(--nova-border)] px-3 py-2.5">
           <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--nova-border)] bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]">
             {icon}
           </span>
           <span className="min-w-0 flex-1 text-sm font-medium text-[var(--nova-text)]">{title}</span>
           {badge && <span className="rounded-full border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--nova-text-faint)]">{badge}</span>}
-        </div>
-        <div className="px-3 py-3">
+        </PlanHeader>
+        <PlanContent className="px-3 py-3">
           {children}
-        </div>
-      </div>
+        </PlanContent>
+      </Plan>
     </div>
   )
 }
 
 /** 工具执行卡片，默认以单行展示运行态和结果态。 */
-export function ToolExecutionBlock({ message }: { message: ChatMessage }) {
+function ToolExecutionBlock({ message }: { message: ChatMessage }) {
   const { t } = useTranslation()
   const [expanded, setExpanded] = useState(false)
   const info = parseToolCallContent(message.content || '')
@@ -851,7 +949,7 @@ export function ToolExecutionBlock({ message }: { message: ChatMessage }) {
 
   return (
     <div className="flex justify-start">
-      <div className="w-full overflow-hidden rounded-lg border border-[var(--nova-border)] bg-[var(--nova-surface)] text-xs shadow-[var(--nova-shadow)]">
+      <Tool open={expanded} onOpenChange={setExpanded} className="mb-0 w-full overflow-hidden rounded-lg border border-[var(--nova-border)] bg-[var(--nova-surface)] text-xs shadow-[var(--nova-shadow)]">
         <div className="flex min-h-10 min-w-0 items-center gap-2 px-3 py-2">
           <ToolStatusIcon status={status} />
           <span className="shrink-0 font-medium text-[var(--nova-text)]">{t('chat.tool.calling')}</span>
@@ -890,8 +988,8 @@ export function ToolExecutionBlock({ message }: { message: ChatMessage }) {
             {streamPreview}
           </div>
         )}
-        {expanded && !isStreamingContent && (
-          <div className="grid max-h-48 gap-2 overflow-auto border-t border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2.5 font-mono text-[11px] leading-relaxed text-[var(--nova-text-muted)]">
+        {!isStreamingContent && (
+          <ToolContent className="grid max-h-48 gap-2 overflow-auto border-t border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2.5 font-mono text-[11px] leading-relaxed text-[var(--nova-text-muted)]">
             {isChapterBodyHidden && (
               <div className="grid gap-1 font-sans">
                 {chapterBodyHiddenPath && (
@@ -911,9 +1009,9 @@ export function ToolExecutionBlock({ message }: { message: ChatMessage }) {
             {detailArgs && <pre className="whitespace-pre-wrap">{detailArgs}</pre>}
             {taskSubAgent && result && <div className="text-[var(--nova-text-muted)]">{t('chat.subagent.result')}</div>}
             {result && <pre className="whitespace-pre-wrap text-[var(--nova-accent-green)]">{result}</pre>}
-          </div>
+          </ToolContent>
         )}
-      </div>
+      </Tool>
     </div>
   )
 }
@@ -1130,7 +1228,7 @@ interface TodoItem {
 }
 
 /** Agentic Loop write_todos 工具卡片：渲染为可读的待办列表，兼容流式不完整 args */
-export function TodoListBlock({ message }: { message: ChatMessage }) {
+function TodoListBlock({ message }: { message: ChatMessage }) {
   const { t } = useTranslation()
   const args = message.args || ''
   const todos = parseTodosFromArgs(args)
@@ -1489,20 +1587,15 @@ function sanitizeThinkTags(text: string): string {
 
 const MarkdownContent = memo(function MarkdownContent({ content, highlightDialogue }: { content: string; highlightDialogue: boolean }) {
   return (
-    <ReactMarkdown
-      remarkPlugins={[remarkGfm]}
-      components={highlightDialogue ? dialogueMarkdownComponents : markdownComponents}
-    >
-      {content}
-    </ReactMarkdown>
+    <MarkdownRenderer content={content} components={highlightDialogue ? dialogueMarkdownComponents : markdownComponents} />
   )
 })
 
-const markdownComponents: Components = {
+const markdownComponents: MarkdownRendererComponents = {
   img: ChatMarkdownImage,
 }
 
-const dialogueMarkdownComponents: Components = {
+const dialogueMarkdownComponents: MarkdownRendererComponents = {
   ...markdownComponents,
   p: ({ children }: { children?: ReactNode }) => <p>{highlightDialogueNodes(children)}</p>,
   li: ({ children }: { children?: ReactNode }) => <li>{highlightDialogueNodes(children)}</li>,
@@ -1587,20 +1680,16 @@ function ThinkingBlock({ message, content, streaming }: { message: ChatMessage; 
   return (
     <div className="flex justify-start">
       <div className="w-full">
-        <button
-          type="button"
-          className="flex items-center gap-1 py-1 text-xs text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]"
-          onClick={() => setExpanded(!expanded)}
-        >
-          {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-          💭 {t('chat.trace.thinking')}
-          {message.subagent && <AgentSourceBadge message={message} compact />}
-        </button>
-        {expanded && (
-          <div className="border-l border-[var(--nova-border)] px-3 py-2 text-xs text-[var(--nova-text-muted)] whitespace-pre-wrap">
+        <Reasoning isStreaming={streaming} open={expanded} onOpenChange={setExpanded} className="mb-0">
+          <ReasoningTrigger className="flex items-center gap-1 py-1 text-xs text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]">
+            {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
+            <span>{t('chat.trace.thinking')}</span>
+            {message.subagent && <AgentSourceBadge message={message} compact />}
+          </ReasoningTrigger>
+          <ReasoningContent className="mt-0 border-l border-[var(--nova-border)] px-3 py-2 text-xs text-[var(--nova-text-muted)] whitespace-pre-wrap">
             {content}
-          </div>
-        )}
+          </ReasoningContent>
+        </Reasoning>
       </div>
     </div>
   )

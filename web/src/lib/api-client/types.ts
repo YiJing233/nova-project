@@ -1,6 +1,8 @@
+// MessageItem render model. Agent API/history/stream payloads use AgentUIMessage;
+// this shape remains for the render adapter and local legacy interactive state.
 export interface ChatMessage {
   type?: 'message' | 'clear'
-  role?: 'user' | 'assistant' | 'thinking' | 'tool_call' | 'tool_result' | 'context_compaction' | 'token_usage' | 'plan_question' | 'proposed_plan' | 'system' | 'error'
+  role?: 'user' | 'assistant' | 'thinking' | 'tool_call' | 'tool_result' | 'rule_roll' | 'context_compaction' | 'token_usage' | 'plan_question' | 'proposed_plan' | 'system' | 'error'
   content?: string
   id?: string
   render_key?: string
@@ -16,10 +18,15 @@ export interface ChatMessage {
   interactive_images?: InteractiveImage[]
   interactive_image_error?: InteractiveImageError
   interactive_image_status?: 'running' | 'success' | 'error'
+  rule_roll?: PublicRuleRoll
   phase?: string
   attempt?: number
   tokens_before?: number
   tokens_after?: number
+	projected_tokens_before?: number
+	projected_tokens_after?: number
+	reserved_completion_tokens?: number
+	reserved_tool_result_tokens?: number
   context_window_tokens?: number
   threshold?: number
   target_ratio?: number
@@ -56,6 +63,33 @@ export interface ChatMessage {
   created_at?: string
   turn_versions?: { turn_id: string; ts: string; current?: boolean }[]
   turn_version_index?: number
+}
+
+export interface PublicRuleRoll {
+  resolution_id?: string
+  label?: string
+  difficulty?: string
+  dice?: string
+  roll_mode?: string
+  rolls?: number[]
+  kept_roll?: number
+  base_target?: number
+  target?: number
+  bonus_total?: number
+  total?: number
+  outcome?: string
+  result?: string
+  cost?: string
+  stakes?: string
+  state_changes?: PublicRuleStateChange[]
+}
+
+export interface PublicRuleStateChange {
+	actor_id?: string
+	field_id?: string
+	path?: string
+  change: number
+  reason?: string
 }
 
 export interface ChapterIllustration {
@@ -143,6 +177,18 @@ export interface AgentRunTraceSummary {
   reason?: string
   events: number
   context_parts: number
+  tool_calls?: number
+  tool_successes?: number
+  tool_blocked?: number
+  tool_errors?: number
+  tool_truncated?: number
+  invalid_tool_args?: number
+  llm_calls?: number
+  prompt_tokens?: number
+  cached_prompt_tokens?: number
+  uncached_prompt_tokens?: number
+  cache_hit_rate?: number
+  duration_ms?: number
   task_id?: string
   agent_kind?: string
   session_id?: string
@@ -200,6 +246,9 @@ export interface ContextAnalysis {
   context_messages: ContextAnalysisPart[]
   message_count: number
   token_estimate?: number
+	projected_token_estimate?: number
+	reserved_completion_tokens?: number
+	reserved_tool_result_tokens?: number
   context_window_tokens?: number
   context_usage_ratio?: number
   compaction_epoch?: number
@@ -329,13 +378,13 @@ export interface CharacterCardPreview {
   compatibility: CharacterCardCompatibilityReport
 }
 
-export interface CharacterCardCompatibilityReport {
+interface CharacterCardCompatibilityReport {
   imported_fields: string[]
   downgraded_fields: string[]
   unsupported_fields: string[]
 }
 
-export interface NovelImportChapter {
+interface NovelImportChapter {
   index: number
   title: string
   chars: number
@@ -380,7 +429,7 @@ export interface BookMeta {
   updated_at: string
 }
 
-export type VersionSource = 'manual' | 'timer' | 'agent' | 'rollback_backup'
+type VersionSource = 'manual' | 'timer' | 'agent' | 'rollback_backup'
 
 export interface VersionChange {
   path: string
@@ -397,7 +446,7 @@ export interface VersionEntry {
   changed_paths: string[]
 }
 
-export interface VersionAutoInfo {
+interface VersionAutoInfo {
   timed_enabled: boolean
   timed_interval_minutes: number
   agent_enabled: boolean
@@ -420,9 +469,9 @@ export interface VersionCommandResult {
   status?: VersionStatus
 }
 
-export type VersionRestoreScope = 'workspace' | 'paths'
+type VersionRestoreScope = 'workspace' | 'paths'
 
-export interface VersionRestoreChange {
+interface VersionRestoreChange {
   path: string
   status: 'added' | 'modified' | 'deleted'
   text: boolean
@@ -480,7 +529,7 @@ export interface LoreItem {
   image?: LoreItemImage
 }
 
-export interface LoreItemImage {
+interface LoreItemImage {
   schema: 'lore_item_image.v1' | string
   image_path: string
   meta_path: string
@@ -582,20 +631,20 @@ export interface SkillInstallResult {
 
 export type LoreItemInput = Omit<LoreItem, 'created_at' | 'updated_at'>
 
-export type AutomationScope = 'user' | 'workspace'
-export type AutomationTemplate = 'memory_consolidation' | 'review' | 'continue_writing' | 'custom_prompt'
-export type AutomationWritePolicy = 'read_only' | 'allow_lore_write' | 'allow_file_write' | 'allow_lore_and_file_write'
-export type AutomationWriteMode = 'read_only' | 'confirm_write' | 'auto_write'
-export type AutomationWriteScope = 'none' | 'lore' | 'file' | 'lore_and_file'
-export type AutomationOutputPolicy = 'run_record_only' | 'optional_file'
-export type AutomationScheduleKind = 'manual' | 'daily' | 'weekly' | 'monthly' | 'every_hours'
+type AutomationScope = 'user' | 'workspace'
+type AutomationTemplate = 'memory_consolidation' | 'review' | 'continue_writing' | 'custom_prompt'
+type AutomationWritePolicy = 'read_only' | 'allow_lore_write' | 'allow_file_write' | 'allow_lore_and_file_write'
+type AutomationWriteMode = 'read_only' | 'confirm_write' | 'auto_write'
+type AutomationWriteScope = 'none' | 'lore' | 'file' | 'lore_and_file'
+type AutomationOutputPolicy = 'run_record_only' | 'optional_file'
+type AutomationScheduleKind = 'manual' | 'daily' | 'weekly' | 'monthly' | 'every_hours'
 export type AutomationTriggerType = 'manual' | 'schedule' | 'semantic' | 'chapter_batch'
-export type AutomationActionPolicy = 'confirm' | 'auto_run' | 'notify_only'
+type AutomationActionPolicy = 'confirm' | 'auto_run' | 'notify_only'
 export type AutomationNotifyPolicy = 'inbox' | 'silent'
-export type AutomationInboxStatus = 'pending' | 'dismissed' | 'confirmed' | 'auto_run'
-export type AutomationInboxPurpose = 'trigger' | 'write_confirmation'
+type AutomationInboxStatus = 'pending' | 'dismissed' | 'confirmed' | 'auto_run'
+type AutomationInboxPurpose = 'trigger' | 'write_confirmation'
 
-export interface AutomationSchedule {
+interface AutomationSchedule {
   kind: AutomationScheduleKind
   every_hours?: number
   weekday?: number
@@ -617,7 +666,7 @@ export interface AutomationTriggerDefinition {
   chapter_batch_size?: number
 }
 
-export interface AutomationTriggerState {
+interface AutomationTriggerState {
   last_checked_at?: string
   last_matched_at?: string
   last_evidence_fingerprint?: string
@@ -663,11 +712,6 @@ export interface AutomationTask {
   recent_runs: AutomationRunRecord[]
   created_at?: string
   updated_at?: string
-}
-
-export interface AutomationRunResult {
-  task: AutomationTask
-  run: AutomationRunRecord
 }
 
 export interface AutomationActiveRun {

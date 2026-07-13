@@ -230,6 +230,50 @@ func TestPrepareInteractiveTurnToolUsesRuleResolutionCallback(t *testing.T) {
 	}
 }
 
+func TestSubmitInteractiveTurnResultToolStagesStructuredOutcome(t *testing.T) {
+	want := interactive.TurnResult{
+		Contract:       interactive.TurnContract{PlayerIntent: "调查丹炉", SceneGoal: "确认药味来源"},
+		FactCandidates: []interactive.StoryFactCandidate{{Kind: "clue", Subject: "丹炉", Fact: "药味中混有陌生灵气", Visibility: "player_known", Importance: "high"}},
+		Choices:        []string{"检查炉灰", "询问苏灿灿"},
+	}
+	called := false
+	tools, err := newInteractiveTurnTools(InteractiveStoryToolContext{
+		SubmitTurnResult: func(_ context.Context, input interactive.TurnResult) (interactive.TurnResult, error) {
+			called = true
+			if input.Contract.SceneGoal != want.Contract.SceneGoal {
+				t.Fatalf("unexpected turn result: %#v", input)
+			}
+			return input, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]tool.BaseTool{}
+	for _, item := range tools {
+		info, err := item.Info(context.Background())
+		if err != nil {
+			t.Fatal(err)
+		}
+		byName[info.Name] = item
+	}
+	submit, ok := byName["submit_interactive_turn_result"].(tool.InvokableTool)
+	if !ok {
+		t.Fatalf("submit_interactive_turn_result missing: %#v", byName)
+	}
+	payload, err := json.Marshal(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := submit.InvokableRun(context.Background(), string(payload))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !called || !strings.Contains(result, "确认药味来源") {
+		t.Fatalf("submit callback/result mismatch: called=%v result=%s", called, result)
+	}
+}
+
 func TestPrepareInteractiveTurnToolSchemaDocumentsEnums(t *testing.T) {
 	tools, err := newInteractiveTurnTools(InteractiveStoryToolContext{
 		PrepareTurn: func(ctx context.Context, request interactive.TurnCheckRequest) (interactive.RuleResolution, error) {
@@ -267,6 +311,11 @@ func TestPrepareInteractiveTurnToolSchemaDocumentsEnums(t *testing.T) {
 		`"very_hard"`,
 		`"template"`,
 		`"dice_check"`,
+		`"1d20"`,
+		`"modifier"`,
+		`"binding_id"`,
+		`"actor_id"`,
+		`"target_actor_id"`,
 		`"roll_mode"`,
 		`"advantage"`,
 		`"disadvantage"`,
@@ -277,7 +326,7 @@ func TestPrepareInteractiveTurnToolSchemaDocumentsEnums(t *testing.T) {
 			t.Fatalf("prepare_interactive_turn schema missing %q:\n%s", want, schemaText)
 		}
 	}
-	if !strings.Contains(info.Desc, "difficulty") || !strings.Contains(info.Desc, "very_easy/easy/normal/hard/very_hard") || !strings.Contains(info.Desc, "不要使用 medium/moderate") {
+	if !strings.Contains(info.Desc, "difficulty") || !strings.Contains(info.Desc, "very_easy/easy/normal/hard/very_hard") || !strings.Contains(info.Desc, "固定 d20") || !strings.Contains(info.Desc, "正数更难") || !strings.Contains(info.Desc, "difficulty_guidance") || !strings.Contains(info.Desc, "state_effect_guidance") || !strings.Contains(info.Desc, "must_check_examples") || !strings.Contains(info.Desc, "skip_check_examples") || !strings.Contains(info.Desc, "state_bindings") {
 		t.Fatalf("prepare_interactive_turn description should spell out enum protocol:\n%s", info.Desc)
 	}
 }

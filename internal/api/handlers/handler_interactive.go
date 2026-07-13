@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log"
+	"path/filepath"
 	"strings"
 
 	"github.com/cloudwego/hertz/pkg/app"
@@ -30,7 +31,7 @@ func (h *Handlers) HandleInteractiveStoryCreate(ctx context.Context, c *app.Requ
 		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
 		return
 	}
-	story, err := h.app.CreateInteractiveStory(body)
+	story, err := h.app.CreateInteractiveStoryContext(ctx, body)
 	if err != nil {
 		writeError(c, consts.StatusBadRequest, err.Error())
 		return
@@ -38,13 +39,13 @@ func (h *Handlers) HandleInteractiveStoryCreate(ctx context.Context, c *app.Requ
 	writeJSON(c, consts.StatusOK, story)
 }
 
-func (h *Handlers) HandleInteractiveOpeningRoll(ctx context.Context, c *app.RequestContext) {
-	var body interactive.OpeningRollRequest
+func (h *Handlers) HandleInteractiveActorTraitRoll(ctx context.Context, c *app.RequestContext) {
+	var body interactive.ActorTraitRollRequest
 	if err := c.BindJSON(&body); err != nil {
 		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
 		return
 	}
-	result, err := h.app.RollInteractiveOpening(body)
+	result, err := h.app.RollInteractiveActorTraits(body)
 	if err != nil {
 		writeError(c, consts.StatusBadRequest, err.Error())
 		return
@@ -444,23 +445,6 @@ func (h *Handlers) HandleInteractiveTurnVersionSwitch(ctx context.Context, c *ap
 	writeJSON(c, consts.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (h *Handlers) HandleInteractiveHotChoices(ctx context.Context, c *app.RequestContext) {
-	var body struct {
-		Branch         string   `json:"branch"`
-		ExcludeChoices []string `json:"exclude_choices"`
-	}
-	if err := c.BindJSON(&body); err != nil && len(c.Request.Body()) > 0 {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	result, err := h.app.GenerateInteractiveHotChoices(ctx, c.Param("id"), body.Branch, body.ExcludeChoices)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, result)
-}
-
 func (h *Handlers) HandleInteractiveChat(ctx context.Context, c *app.RequestContext) {
 	var body struct {
 		Mode               string   `json:"mode"`
@@ -608,9 +592,13 @@ func (h *Handlers) HandleInteractiveTellerUpdate(ctx context.Context, c *app.Req
 	var body struct {
 		interactive.Teller
 		BaseRevision string `json:"base_revision"`
+		Workspace    string `json:"workspace"`
 	}
 	if err := c.BindJSON(&body); err != nil {
 		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
+		return
+	}
+	if !h.ensurePresetMutationWorkspace(c, body.Workspace) {
 		return
 	}
 	teller, err := h.app.UpdateInteractiveTeller(c.Param("id"), body.Teller, body.BaseRevision)
@@ -669,9 +657,13 @@ func (h *Handlers) HandleStoryDirectorUpdate(ctx context.Context, c *app.Request
 	var body struct {
 		interactive.StoryDirector
 		BaseRevision string `json:"base_revision"`
+		Workspace    string `json:"workspace"`
 	}
 	if err := c.BindJSON(&body); err != nil {
 		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
+		return
+	}
+	if !h.ensurePresetMutationWorkspace(c, body.Workspace) {
 		return
 	}
 	director, err := h.app.UpdateStoryDirector(c.Param("id"), body.StoryDirector, body.BaseRevision)
@@ -730,9 +722,13 @@ func (h *Handlers) HandleEventPackageUpdate(ctx context.Context, c *app.RequestC
 	var body struct {
 		interactive.EventPackageModule
 		BaseRevision string `json:"base_revision"`
+		Workspace    string `json:"workspace"`
 	}
 	if err := c.BindJSON(&body); err != nil {
 		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
+		return
+	}
+	if !h.ensurePresetMutationWorkspace(c, body.Workspace) {
 		return
 	}
 	item, err := h.app.UpdateEventPackage(c.Param("id"), body.EventPackageModule, body.BaseRevision)
@@ -749,67 +745,6 @@ func (h *Handlers) HandleEventPackageUpdate(ctx context.Context, c *app.RequestC
 
 func (h *Handlers) HandleEventPackageDelete(ctx context.Context, c *app.RequestContext) {
 	if err := h.app.DeleteEventPackage(c.Param("id")); err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (h *Handlers) HandleEventSystems(ctx context.Context, c *app.RequestContext) {
-	items, err := h.app.EventSystems()
-	if err != nil {
-		writeError(c, consts.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, map[string]any{"event_systems": items})
-}
-
-func (h *Handlers) HandleEventSystem(ctx context.Context, c *app.RequestContext) {
-	item, err := h.app.EventSystem(c.Param("id"))
-	if err != nil {
-		writeError(c, consts.StatusNotFound, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, item)
-}
-
-func (h *Handlers) HandleEventSystemCreate(ctx context.Context, c *app.RequestContext) {
-	var body interactive.EventSystemModule
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	item, err := h.app.CreateEventSystem(body)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, item)
-}
-
-func (h *Handlers) HandleEventSystemUpdate(ctx context.Context, c *app.RequestContext) {
-	var body struct {
-		interactive.EventSystemModule
-		BaseRevision string `json:"base_revision"`
-	}
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	item, err := h.app.UpdateEventSystem(c.Param("id"), body.EventSystemModule, body.BaseRevision)
-	if err != nil {
-		if errors.Is(err, interactive.ErrEventSystemRevisionConflict) {
-			writeErrorKey(c, consts.StatusConflict, "api.resource.revisionConflict")
-			return
-		}
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, item)
-}
-
-func (h *Handlers) HandleEventSystemDelete(ctx context.Context, c *app.RequestContext) {
-	if err := h.app.DeleteEventSystem(c.Param("id")); err != nil {
 		writeError(c, consts.StatusBadRequest, err.Error())
 		return
 	}
@@ -852,9 +787,13 @@ func (h *Handlers) HandleRuleSystemUpdate(ctx context.Context, c *app.RequestCon
 	var body struct {
 		interactive.RuleSystemModule
 		BaseRevision string `json:"base_revision"`
+		Workspace    string `json:"workspace"`
 	}
 	if err := c.BindJSON(&body); err != nil {
 		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
+		return
+	}
+	if !h.ensurePresetMutationWorkspace(c, body.Workspace) {
 		return
 	}
 	item, err := h.app.UpdateRuleSystem(c.Param("id"), body.RuleSystemModule, body.BaseRevision)
@@ -913,9 +852,13 @@ func (h *Handlers) HandleActorStateUpdate(ctx context.Context, c *app.RequestCon
 	var body struct {
 		interactive.ActorStateModule
 		BaseRevision string `json:"base_revision"`
+		Workspace    string `json:"workspace"`
 	}
 	if err := c.BindJSON(&body); err != nil {
 		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
+		return
+	}
+	if !h.ensurePresetMutationWorkspace(c, body.Workspace) {
 		return
 	}
 	item, err := h.app.UpdateActorState(c.Param("id"), body.ActorStateModule, body.BaseRevision)
@@ -974,9 +917,13 @@ func (h *Handlers) HandleStoryMemoryStructureUpdate(ctx context.Context, c *app.
 	var body struct {
 		interactive.StoryMemoryStructureModule
 		BaseRevision string `json:"base_revision"`
+		Workspace    string `json:"workspace"`
 	}
 	if err := c.BindJSON(&body); err != nil {
 		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
+		return
+	}
+	if !h.ensurePresetMutationWorkspace(c, body.Workspace) {
 		return
 	}
 	item, err := h.app.UpdateStoryMemoryStructure(c.Param("id"), body.StoryMemoryStructureModule, body.BaseRevision)
@@ -993,67 +940,6 @@ func (h *Handlers) HandleStoryMemoryStructureUpdate(ctx context.Context, c *app.
 
 func (h *Handlers) HandleStoryMemoryStructurePresetDelete(ctx context.Context, c *app.RequestContext) {
 	if err := h.app.DeleteStoryMemoryStructurePreset(c.Param("id")); err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (h *Handlers) HandleOpeningSelectors(ctx context.Context, c *app.RequestContext) {
-	items, err := h.app.OpeningSelectors()
-	if err != nil {
-		writeError(c, consts.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, map[string]any{"opening_selectors": items})
-}
-
-func (h *Handlers) HandleOpeningSelector(ctx context.Context, c *app.RequestContext) {
-	item, err := h.app.OpeningSelector(c.Param("id"))
-	if err != nil {
-		writeError(c, consts.StatusNotFound, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, item)
-}
-
-func (h *Handlers) HandleOpeningSelectorCreate(ctx context.Context, c *app.RequestContext) {
-	var body interactive.OpeningSelectorModule
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	item, err := h.app.CreateOpeningSelector(body)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, item)
-}
-
-func (h *Handlers) HandleOpeningSelectorUpdate(ctx context.Context, c *app.RequestContext) {
-	var body struct {
-		interactive.OpeningSelectorModule
-		BaseRevision string `json:"base_revision"`
-	}
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	item, err := h.app.UpdateOpeningSelector(c.Param("id"), body.OpeningSelectorModule, body.BaseRevision)
-	if err != nil {
-		if errors.Is(err, interactive.ErrOpeningSelectorRevisionConflict) {
-			writeErrorKey(c, consts.StatusConflict, "api.resource.revisionConflict")
-			return
-		}
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, item)
-}
-
-func (h *Handlers) HandleOpeningSelectorDelete(ctx context.Context, c *app.RequestContext) {
-	if err := h.app.DeleteOpeningSelector(c.Param("id")); err != nil {
 		writeError(c, consts.StatusBadRequest, err.Error())
 		return
 	}
@@ -1096,9 +982,13 @@ func (h *Handlers) HandleImagePresetUpdate(ctx context.Context, c *app.RequestCo
 	var body struct {
 		imagepreset.Preset
 		BaseRevision string `json:"base_revision"`
+		Workspace    string `json:"workspace"`
 	}
 	if err := c.BindJSON(&body); err != nil {
 		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
+		return
+	}
+	if !h.ensurePresetMutationWorkspace(c, body.Workspace) {
 		return
 	}
 	preset, err := h.app.UpdateImagePreset(c.Param("id"), body.Preset, body.BaseRevision)
@@ -1111,6 +1001,19 @@ func (h *Handlers) HandleImagePresetUpdate(ctx context.Context, c *app.RequestCo
 		return
 	}
 	writeJSON(c, consts.StatusOK, preset)
+}
+
+func (h *Handlers) ensurePresetMutationWorkspace(c *app.RequestContext, expected string) bool {
+	expected = strings.TrimSpace(expected)
+	if expected == "" {
+		return true
+	}
+	current := strings.TrimSpace(h.app.Workspace())
+	if current != "" && filepath.Clean(current) == filepath.Clean(expected) {
+		return true
+	}
+	writeErrorKey(c, consts.StatusConflict, "api.workspace.changedDuringRequest")
+	return false
 }
 
 func (h *Handlers) HandleImagePresetDelete(ctx context.Context, c *app.RequestContext) {

@@ -5,10 +5,9 @@ import { VirtuosoMockContext } from 'react-virtuoso'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { StoryStage } from './StoryStage'
 import { mergeInteractiveTurnPersistedSnapshot, useInteractiveStore } from '../stores/interactive-store'
-import type { InteractiveTurnPersistedEvent, Snapshot, StorySummary } from '../types'
+import type { InteractiveTurnPersistedEvent, Snapshot, StorySummary, TurnEvent } from '../types'
 
-const { generateInteractiveHotChoicesMock, generateInteractiveImageMock, runInteractiveDirectorMock, sendInteractiveMessageMock, useSkillCommandsMock } = vi.hoisted(() => ({
-  generateInteractiveHotChoicesMock: vi.fn(),
+const { generateInteractiveImageMock, runInteractiveDirectorMock, sendInteractiveMessageMock, useSkillCommandsMock } = vi.hoisted(() => ({
   generateInteractiveImageMock: vi.fn(),
   runInteractiveDirectorMock: vi.fn(),
   sendInteractiveMessageMock: vi.fn(),
@@ -27,7 +26,6 @@ vi.mock('../api', () => ({
   abortInteractiveChat: vi.fn(),
   analyzeInteractiveContext: vi.fn(),
   compactInteractiveContext: vi.fn(),
-  generateInteractiveHotChoices: generateInteractiveHotChoicesMock,
   generateInteractiveImage: generateInteractiveImageMock,
   removeInteractiveContextCompaction: vi.fn(),
   runInteractiveDirector: runInteractiveDirectorMock,
@@ -38,7 +36,6 @@ vi.mock('../api', () => ({
 beforeEach(() => {
   window.localStorage.clear()
   useInteractiveStore.setState({ storyStageRuns: {} })
-  generateInteractiveHotChoicesMock.mockReset()
   generateInteractiveImageMock.mockReset()
   generateInteractiveImageMock.mockResolvedValue({ enabled: false, skipped: true })
   runInteractiveDirectorMock.mockReset()
@@ -48,88 +45,82 @@ beforeEach(() => {
   useSkillCommandsMock.mockReturnValue([])
 })
 
-describe('StoryStage hot choices mode', () => {
-  it('defaults to auto and keeps generated choices hidden until the user opens them', async () => {
+describe('StoryStage TurnResult choices', () => {
+	it('uses persisted TurnResult choices and only reveals them after the user opens the panel', async () => {
+		const user = userEvent.setup()
+		const turn = {
+			id: 'turn-1',
+			parent_id: null,
+			branch_id: 'main',
+			ts: '2026-06-28T00:00:00Z',
+			user: '检查钟楼',
+			narrative: '钟楼上有反光一闪。',
+			state_status: 'ready' as const,
+			memory_status: 'running' as const,
+			turn_result: {
+				contract: { player_intent: '检查钟楼', scene_goal: '确认反光来源' },
+				scene_result: { status: 'continued', scene_id: '旧城钟楼', summary: '发现钟楼上的可疑反光', next_scene_goal: '找到观察角度' },
+				choices: ['绕到钟楼背面', '询问附近守夜人'],
+			},
+		}
+		render(
+			<VirtuosoMockContext.Provider value={{ viewportHeight: 1200, itemHeight: 120 }}>
+				<StoryStage
+					workspace="/tmp/book"
+					stories={[story()]}
+					story={story()}
+					tellers={[]}
+					storyId="story-1"
+					branchId="main"
+					snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [turn], current_turn: turn, state: {} }}
+					onDone={() => undefined}
+				/>
+			</VirtuosoMockContext.Provider>,
+		)
+
+		expect(screen.queryByText('绕到钟楼背面')).not.toBeInTheDocument()
+		expect(screen.queryByLabelText('当前故事态势')).not.toBeInTheDocument()
+		await user.click(screen.getByRole('button', { name: '获取行动选择' }))
+		expect(await screen.findByText('绕到钟楼背面')).toBeInTheDocument()
+	})
+
+  it('does not open persisted choices when they arrive during the story stream', async () => {
     const user = userEvent.setup()
-    sendInteractiveMessageMock.mockResolvedValue(interactiveStream([
-      { event: 'chunk', data: JSON.stringify({ content: '故事继续。' }) },
-      { event: 'done', data: '{}' },
-    ]))
-    generateInteractiveHotChoicesMock.mockResolvedValue({
-      enabled: true,
-      choices: ['查看门后', '询问守夜人'],
-    })
+    const stream = controllableInteractiveStream()
+    const persisted = persistedTurnEvent()
+    persisted.turn.turn_result = {
+      contract: { player_intent: '推门', scene_goal: '确认门外情况' },
+      choices: ['沿墙观察', '询问守夜人'],
+    }
+    sendInteractiveMessageMock.mockResolvedValue(stream.readable)
 
-    render(<StoryStageHarness />)
+    try {
+      render(<PersistedTurnHarness onDone={vi.fn().mockResolvedValue(undefined)} />)
 
-    await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
-    await user.click(screen.getByRole('button', { name: '发送' }))
+      await user.type(screen.getByPlaceholderText('你要做什么？'), '推门')
+      await user.click(screen.getByRole('button', { name: '发送' }))
+      await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
 
-    await waitFor(() => {
-      expect(generateInteractiveHotChoicesMock).toHaveBeenCalledWith('story-1', expect.objectContaining({
-        branch: 'main',
-        exclude_choices: [],
-      }))
-    })
-    expect(screen.queryByText('查看门后')).not.toBeInTheDocument()
+      act(() => {
+        stream.enqueue({ event: 'chunk', data: JSON.stringify({ content: '门外传来脚步声。' }) })
+        stream.enqueue({ event: 'interactive_turn_persisted', data: JSON.stringify(persisted) })
+      })
+      expect(screen.queryByText('沿墙观察')).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '获取行动选择' }))
+      act(() => {
+        stream.enqueue({ event: 'done', data: '{}' })
+        stream.close()
+      })
+      await waitFor(() => expect(screen.getByRole('button', { name: '获取行动选择' })).not.toBeDisabled())
+      expect(screen.queryByText('沿墙观察')).not.toBeInTheDocument()
 
-    expect(await screen.findByText('查看门后')).toBeInTheDocument()
-    expect(screen.getByTestId('story-stage-hot-choices-list')).toHaveClass('flex-wrap')
+      await user.click(screen.getByRole('button', { name: '获取行动选择' }))
+      expect(await screen.findByText('沿墙观察')).toBeInTheDocument()
+    } finally {
+      stream.close()
+    }
   })
 
-  it('opens the choices panel with a loading state while background generation is pending', async () => {
-    const user = userEvent.setup()
-    const pendingChoices = deferred<{ enabled: boolean; choices: string[] }>()
-    sendInteractiveMessageMock.mockResolvedValue(interactiveStream([
-      { event: 'chunk', data: JSON.stringify({ content: '故事继续。' }) },
-      { event: 'done', data: '{}' },
-    ]))
-    generateInteractiveHotChoicesMock.mockReturnValue(pendingChoices.promise)
-
-    render(<StoryStageHarness />)
-
-    await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
-    await user.click(screen.getByRole('button', { name: '发送' }))
-
-    await waitFor(() => expect(generateInteractiveHotChoicesMock).toHaveBeenCalled())
-    await user.click(screen.getByRole('button', { name: '获取行动选择' }))
-
-    expect(screen.getByText('正在生成可选择行动…')).toBeInTheDocument()
-
-    pendingChoices.resolve({ enabled: true, choices: ['贴近门缝听动静'] })
-
-    expect(await screen.findByText('贴近门缝听动静')).toBeInTheDocument()
-  })
-
-  it('does not auto-generate choices after switching to manual mode', async () => {
-    const user = userEvent.setup()
-    sendInteractiveMessageMock.mockResolvedValue(interactiveStream([
-      { event: 'chunk', data: JSON.stringify({ content: '故事继续。' }) },
-      { event: 'done', data: '{}' },
-    ]))
-    generateInteractiveHotChoicesMock.mockResolvedValue({
-      enabled: true,
-      choices: ['查看门后'],
-    })
-
-    render(<StoryStageHarness />)
-
-    fireEvent.pointerDown(screen.getByRole('button', { name: '输入动作' }))
-    await waitFor(() => expect(screen.getByRole('menuitem', { name: /行动选项/ })).toBeInTheDocument())
-    await user.hover(screen.getByRole('menuitem', { name: /行动选项/ }))
-    await waitFor(() => expect(screen.getByRole('menuitem', { name: '手动生成' })).toBeInTheDocument())
-    fireEvent.click(screen.getByRole('menuitem', { name: '手动生成' }))
-    await user.keyboard('{Escape}')
-    await waitFor(() => expect(screen.queryByRole('menuitem', { name: '手动生成' })).not.toBeInTheDocument())
-
-    await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
-    await user.click(screen.getByRole('button', { name: '发送' }))
-
-    await waitFor(() => expect(screen.getByText('故事继续。')).toBeInTheDocument())
-    expect(generateInteractiveHotChoicesMock).not.toHaveBeenCalled()
-  })
 })
 
 describe('StoryStage composer', () => {
@@ -141,7 +132,6 @@ describe('StoryStage composer', () => {
     expect(screen.queryByLabelText('Plan Mode 已开启')).not.toBeInTheDocument()
 
     fireEvent.pointerDown(screen.getByRole('button', { name: '输入动作' }))
-    await waitFor(() => expect(screen.getByRole('menuitem', { name: /行动选项/ })).toBeInTheDocument())
 
     expect(screen.queryByRole('menuitemcheckbox', { name: /Plan/ })).not.toBeInTheDocument()
   })
@@ -179,9 +169,94 @@ describe('StoryStage composer', () => {
     expect(screen.getByRole('button', { name: '发送' })).toBeDisabled()
   })
 
+  it('keeps rule rolls hidden on the stage when visibility is audit-only', () => {
+    render(
+      <StoryStage
+        workspace="/tmp/book"
+        stories={[story()]}
+        story={story()}
+        storyDirectors={[storyDirector('audit_only')]}
+        tellers={[]}
+        storyId="story-1"
+        branchId="main"
+        snapshot={snapshotWithRuleResolution()}
+        onDone={() => {}}
+      />,
+    )
+
+    expect(screen.getByText('守阁长老拦在门前。')).toBeInTheDocument()
+    expect(screen.queryByText('总值 6 / 目标 18')).not.toBeInTheDocument()
+  })
+
+  it('shows a public rule roll card before the prose when enabled by the story director', () => {
+    render(
+      <StoryStage
+        workspace="/tmp/book"
+        stories={[story()]}
+        story={story()}
+        storyDirectors={[storyDirector('public_roll')]}
+        tellers={[]}
+        storyId="story-1"
+        branchId="main"
+        snapshot={snapshotWithRuleResolution()}
+        onDone={() => {}}
+      />,
+    )
+
+    expect(screen.getByText('潜入检定')).toBeInTheDocument()
+    expect(screen.getByText('总值 6 / 目标 18')).toBeInTheDocument()
+    expect(screen.getByText(/失败会损失体力并暴露行踪/)).toBeInTheDocument()
+    expect(screen.getByText('actors.protagonist.state.resources.hp -10')).toBeInTheDocument()
+    expect(screen.getByText('守阁长老拦在门前。')).toBeInTheDocument()
+  })
+
+  it('shows a temporary public rule roll card from the streaming tool result', async () => {
+    const user = userEvent.setup()
+    sendInteractiveMessageMock.mockResolvedValue(interactiveStream([
+      { event: 'tool_call', data: JSON.stringify({ id: 'call-1', name: 'prepare_interactive_turn', args: '{}' }) },
+      { event: 'tool_result', data: JSON.stringify({ id: 'call-1', name: 'prepare_interactive_turn', content: JSON.stringify({
+        resolution_id: 'rr_live',
+        label: '潜入检定',
+        dice: '1d20',
+        roll_mode: 'normal',
+        rolls: [4],
+        kept_roll: 4,
+        bonus_total: 2,
+        total: 6,
+        target: 18,
+        difficulty: 'hard',
+        outcome: 'failure',
+        result: '强闯失败导致主线中断',
+        cost: '失败会损失体力并暴露行踪',
+      }) }) },
+      { event: 'chunk', data: JSON.stringify({ content: '守阁长老拦在门前。' }) },
+      { event: 'done', data: '{}' },
+    ]))
+
+    render(
+      <StoryStage
+        workspace="/tmp/book"
+        stories={[story()]}
+        story={story()}
+        storyDirectors={[storyDirector('public_roll')]}
+        tellers={[]}
+        storyId="story-1"
+        branchId="main"
+        snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [], state: {} }}
+        onDone={() => {}}
+      />,
+    )
+
+    await user.type(screen.getByPlaceholderText('你要做什么？'), '强行闯入藏书阁')
+    await user.click(screen.getByRole('button', { name: '发送' }))
+
+    expect(await screen.findByText('潜入检定')).toBeInTheDocument()
+    expect(screen.getByText('总值 6 / 目标 18')).toBeInTheDocument()
+    expect(screen.getByText('强闯失败导致主线中断')).toBeInTheDocument()
+  })
+
   it('keeps forward actions available while the initial director plan runs in the background', async () => {
     const user = userEvent.setup()
-    generateInteractiveHotChoicesMock.mockResolvedValue({ enabled: true, choices: ['继续观察'] })
     render(
       <StoryStage
         workspace="/tmp/book"
@@ -201,6 +276,7 @@ describe('StoryStage composer', () => {
             ts: '2026-06-28T00:00:00Z',
             user: '开局',
             narrative: '雨停了。',
+            turn_result: { contract: { player_intent: '开局', scene_goal: '观察环境' }, choices: ['继续观察', '询问路人'] },
           }],
           current_turn: {
             id: 'turn-1',
@@ -209,6 +285,7 @@ describe('StoryStage composer', () => {
             ts: '2026-06-28T00:00:00Z',
             user: '开局',
             narrative: '雨停了。',
+            turn_result: { contract: { player_intent: '开局', scene_goal: '观察环境' }, choices: ['继续观察', '询问路人'] },
           },
           director_plan_status: directorStatus('running', { completed_docs: 1, blocking: true }),
         }}
@@ -223,7 +300,7 @@ describe('StoryStage composer', () => {
     await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
     expect(screen.getByRole('button', { name: '发送' })).not.toBeDisabled()
     await user.click(screen.getByRole('button', { name: '获取行动选择' }))
-    expect(generateInteractiveHotChoicesMock).toHaveBeenCalled()
+    expect(await screen.findByText('继续观察')).toBeInTheDocument()
   })
 
   it('inserts interactive Skills as inline tokens and sends compatible text', async () => {
@@ -366,6 +443,29 @@ describe('StoryStage composer', () => {
 })
 
 describe('StoryStage streaming rendering', () => {
+	it('discards optimistic narrative when done arrives without persistence confirmation', async () => {
+		const user = userEvent.setup()
+		const stream = controllableInteractiveStream()
+		const handleDone = vi.fn().mockResolvedValue(undefined)
+		try {
+			sendInteractiveMessageMock.mockResolvedValue(stream.readable)
+			render(<StoryStageHarness onDone={handleDone} />)
+			await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
+			await user.click(screen.getByRole('button', { name: '发送' }))
+			await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
+			act(() => {
+				stream.enqueue({ event: 'chunk', data: JSON.stringify({ content: '这段正文没有落盘。' }) })
+				stream.enqueue({ event: 'done', data: '{}' })
+				stream.close()
+			})
+			expect(await screen.findByText(/没有收到持久化确认/)).toBeInTheDocument()
+			expect(screen.queryByText('这段正文没有落盘。')).not.toBeInTheDocument()
+			await waitFor(() => expect(handleDone).toHaveBeenCalled())
+		} finally {
+			stream.close()
+		}
+	})
+
   it('batches fast interactive chunks into one animation frame without slicing text', async () => {
     const user = userEvent.setup()
     const stream = controllableInteractiveStream()
@@ -405,6 +505,7 @@ describe('StoryStage streaming rendering', () => {
       act(() => runAnimationFrames(frames))
 
       expect(await screen.findByText('青石镇外风声忽然停了。')).toBeInTheDocument()
+			stream.enqueue({ event: 'interactive_turn_persisted', data: JSON.stringify(persistedTurnEvent()) })
       stream.enqueue({ event: 'done', data: '{}' })
       stream.close()
     } finally {
@@ -412,6 +513,166 @@ describe('StoryStage streaming rendering', () => {
       window.requestAnimationFrame = originalRequestAnimationFrame
       window.cancelAnimationFrame = originalCancelAnimationFrame
     }
+  })
+
+  it('keeps live thinking visible while narrative output starts', async () => {
+    const user = userEvent.setup()
+    const stream = controllableInteractiveStream()
+
+    try {
+      sendInteractiveMessageMock.mockResolvedValue(stream.readable)
+      render(<StoryStageHarness />)
+
+      await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
+      await user.click(screen.getByRole('button', { name: '发送' }))
+      await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
+
+      act(() => {
+        stream.enqueue({ event: 'thinking', data: JSON.stringify({ content: '正在判断门后的声响。' }) })
+      })
+      expect(await screen.findByText('正在判断门后的声响。')).toBeInTheDocument()
+
+      act(() => {
+        stream.enqueue({ event: 'chunk', data: JSON.stringify({ content: '门后传来脚步声。' }) })
+      })
+
+      await waitFor(() => expect(screen.getByText('门后传来脚步声。')).toBeInTheDocument())
+      expect(screen.getByText('正在判断门后的声响。')).toBeInTheDocument()
+    } finally {
+      stream.close()
+    }
+  })
+
+  it('groups live thinking and tool calls into one trace block and collapses them after completion', async () => {
+    const user = userEvent.setup()
+    const stream = controllableInteractiveStream()
+    const refresh = deferred<Snapshot | void>()
+    const handleDone = vi.fn(() => refresh.promise)
+
+    try {
+      sendInteractiveMessageMock.mockResolvedValue(stream.readable)
+      render(
+        <VirtuosoMockContext.Provider value={{ viewportHeight: 1200, itemHeight: 120 }}>
+          <StoryStage
+            workspace="/tmp/book"
+            stories={[story()]}
+            story={story()}
+            tellers={[]}
+            storyId="story-1"
+            branchId="main"
+            snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [], state: {} }}
+            onDone={handleDone}
+          />
+        </VirtuosoMockContext.Provider>,
+      )
+
+      await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
+      await user.click(screen.getByRole('button', { name: '发送' }))
+      await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
+
+      act(() => {
+        stream.enqueue({ event: 'thinking', data: JSON.stringify({ content: '正在检查开场资料。' }) })
+        stream.enqueue({ event: 'tool_call', data: JSON.stringify({ id: 'call-lore', name: 'list_lore_items', args: '{}' }) })
+      })
+
+      expect(await screen.findByRole('button', { name: /思考过程.*1 次工具调用/ })).toBeInTheDocument()
+      expect(screen.getByText('正在检查开场资料。')).toBeInTheDocument()
+      expect(screen.getByText('list_lore_items')).toBeInTheDocument()
+
+      act(() => {
+        stream.enqueue({ event: 'tool_result', data: JSON.stringify({ id: 'call-lore', name: 'list_lore_items', content: '找到 3 条资料' }) })
+      })
+
+      await waitFor(() => expect(screen.getByText('正在检查开场资料。')).toBeInTheDocument())
+      expect(screen.getByText('list_lore_items')).toBeInTheDocument()
+
+		act(() => {
+        stream.enqueue({ event: 'chunk', data: JSON.stringify({ content: '门外有灯。' }) })
+			})
+
+		act(() => {
+				stream.enqueue({ event: 'interactive_turn_persisted', data: JSON.stringify(persistedTurnEvent()) })
+        stream.enqueue({ event: 'done', data: '{}' })
+        stream.close()
+      })
+
+      await waitFor(() => expect(handleDone).toHaveBeenCalled())
+      await waitFor(() => expect(screen.queryByText('正在检查开场资料。')).not.toBeInTheDocument())
+      expect(screen.queryByText('list_lore_items')).not.toBeInTheDocument()
+
+      await user.click(screen.getByRole('button', { name: /思考过程.*1 次工具调用/ }))
+      expect(screen.getByText('正在检查开场资料。')).toBeInTheDocument()
+      expect(screen.getByText('list_lore_items')).toBeInTheDocument()
+    } finally {
+      refresh.resolve(undefined)
+      stream.close()
+    }
+  })
+
+  it('keeps background Director events out of the Game Agent timeline', async () => {
+    const user = userEvent.setup()
+    const turn: TurnEvent = {
+      id: 'turn-1',
+      parent_id: null,
+      branch_id: 'main',
+      ts: '2026-07-11T00:00:00Z',
+      user: '推开石门',
+      narrative: '石门后传来锁链拖地的声音。',
+      display_events: [
+        {
+          id: 'game-thinking',
+          role: 'thinking' as const,
+          content: '正在判断石门后的威胁。',
+          agent_kind: 'interactive_story',
+        },
+        {
+          id: 'game-tool',
+          role: 'tool_call' as const,
+          name: 'list_lore_items',
+          content: 'list_lore_items',
+          status: 'success',
+          agent_kind: 'interactive_story',
+        },
+        {
+          id: 'director-thinking',
+          role: 'thinking' as const,
+          content: '正在重新安排后续分支。',
+          agent_kind: 'interactive_director',
+        },
+        {
+          id: 'director-write',
+          role: 'tool_call' as const,
+          name: 'write_file',
+          content: 'write_file',
+          args: '{"file_path":"director.md"}',
+          status: 'success',
+          agent_kind: 'interactive_director',
+        },
+      ],
+    }
+
+    render(
+      <VirtuosoMockContext.Provider value={{ viewportHeight: 1200, itemHeight: 120 }}>
+        <StoryStage
+          workspace="/tmp/book"
+          stories={[story()]}
+          story={story()}
+          tellers={[]}
+          storyId="story-1"
+          branchId="main"
+          snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [turn], current_turn: turn, state: {} }}
+          onDone={() => undefined}
+        />
+      </VirtuosoMockContext.Provider>,
+    )
+
+    expect(screen.getByText('石门后传来锁链拖地的声音。')).toBeInTheDocument()
+    const traceButton = screen.getByRole('button', { name: /思考过程.*1 次工具调用/ })
+    await user.click(traceButton)
+    expect(screen.getByText('正在判断石门后的威胁。')).toBeInTheDocument()
+    expect(screen.getByText('list_lore_items')).toBeInTheDocument()
+    expect(screen.queryByText('正在重新安排后续分支。')).not.toBeInTheDocument()
+    expect(screen.queryByText('write_file')).not.toBeInTheDocument()
   })
 
   it('updates a live tool card when an index-based call later receives an id', async () => {
@@ -675,7 +936,7 @@ describe('StoryStage opening panel', () => {
   })
 })
 
-function StoryStageHarness() {
+function StoryStageHarness({ onDone }: { onDone?: (options?: { silent?: boolean }) => Promise<Snapshot | void> } = {}) {
   const [snapshot, setSnapshot] = useState<Snapshot>({ story_id: 'story-1', branch_id: 'main', turns: [], state: {} })
   const nextSnapshot: Snapshot = {
     story_id: 'story-1',
@@ -701,10 +962,10 @@ function StoryStageHarness() {
         storyId="story-1"
         branchId="main"
         snapshot={snapshot}
-        onDone={() => {
+		onDone={onDone || (() => {
           setSnapshot(nextSnapshot)
           return Promise.resolve(nextSnapshot)
-        }}
+		})}
       />
     </VirtuosoMockContext.Provider>
   )
@@ -791,7 +1052,13 @@ function directorStatus(status: string, overrides: Partial<NonNullable<Snapshot[
 function interactiveStream(events: Array<{ event: string; data: string }>) {
   return new ReadableStream({
     start(controller) {
+			let persisted = false
       for (const event of events) {
+				if (event.event === 'interactive_turn_persisted') persisted = true
+				if (event.event === 'done' && !persisted) {
+					controller.enqueue({ event: 'interactive_turn_persisted', data: JSON.stringify(persistedTurnEvent()) })
+					persisted = true
+				}
         controller.enqueue(event)
       }
       controller.close()
@@ -853,5 +1120,72 @@ function story(): StorySummary {
     updated_at: '2026-06-27T00:00:00Z',
     branches: 1,
     events: 0,
+  }
+}
+
+function storyDirector(ruleVisibilityMode: string) {
+  return {
+    version: 3,
+    id: 'default',
+    name: '默认故事导演',
+    description: '',
+    strategy: {
+      enabled: true,
+      rule_visibility_mode: ruleVisibilityMode,
+    },
+    trpg_system: { rule_templates: [] },
+    opening_selector: { enabled: true },
+    custom: false,
+  }
+}
+
+function snapshotWithRuleResolution(): Snapshot {
+  return {
+    story_id: 'story-1',
+    branch_id: 'main',
+    state: {},
+    turns: [{
+      id: 'turn-1',
+      parent_id: null,
+      branch_id: 'main',
+      ts: '2026-06-28T00:00:00Z',
+      user: '强行闯入藏书阁',
+      narrative: '守阁长老拦在门前。',
+      rule_resolution: {
+        id: 'rr_1',
+        request: {
+          action: '强行闯入藏书阁',
+          intent: '冒险',
+          challenge: '潜入检定',
+          cost: '失败会损失体力并暴露行踪',
+          state: '守阁长老正在靠近',
+          adjudication: {
+            stakes: '失败会暴露行踪。',
+          },
+          difficulty: 'hard',
+          outcomes: {
+            critical_success: { result: '无声潜入。' },
+            success: { result: '成功潜入。' },
+            failure: { result: '强闯失败导致主线中断', state_changes: [{ path: 'actors.protagonist.state.resources.hp', change: -10, reason: '被禁制反震' }] },
+            critical_failure: { result: '被当场抓住。' },
+          },
+        },
+        result: {
+          id: 'check_1',
+          label: '潜入检定',
+          dice: '1d20',
+          roll_mode: 'normal',
+          rolls: [4],
+          kept_roll: 4,
+          base_target: 15,
+          bonus_total: 2,
+          target: 18,
+          total: 6,
+          outcome: 'failure',
+          result: '强闯失败导致主线中断',
+          state_changes: [{ path: 'actors.protagonist.state.resources.hp', change: -10, reason: '被禁制反震' }],
+        },
+      },
+    }],
   }
 }

@@ -7,6 +7,7 @@ import StarterKit from '@tiptap/starter-kit'
 import Placeholder from '@tiptap/extension-placeholder'
 import { CharacterCount } from '@tiptap/extension-character-count'
 import Image from '@tiptap/extension-image'
+import { TableKit } from '@tiptap/extension-table'
 import { Markdown } from '@tiptap/markdown'
 import type { Node as ProseMirrorNode } from '@tiptap/pm/model'
 import { Plugin, PluginKey, TextSelection as PmTextSelection } from '@tiptap/pm/state'
@@ -23,12 +24,11 @@ import { isEditableTarget } from '@/lib/keyboard'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { TooltipIconButton } from '@/components/common/tooltip-icon-button'
-import { formatLocaleNumber } from '@/i18n'
 
 interface MarkdownEditorProps {
   fileName: string | null
   content: string
-  onSave: (content: string) => Promise<boolean>
+  onSave: (fileName: string, content: string) => Promise<boolean>
   onQuoteSelection?: (sel: QuoteSelection) => void
   saveSignal?: number
   autoSaveEnabled?: boolean
@@ -38,9 +38,10 @@ interface MarkdownEditorProps {
   onGenerateIllustration?: (chapterPath: string) => void
   generateIllustrationDisabled?: boolean
   illustrationInsertSignal?: { illustration: ChapterIllustration; nonce: number } | null
+  onLineChange?: (line: number) => void
 }
 
-export interface EditorSearchIntent {
+interface EditorSearchIntent {
   query: string
   line: number
   nonce: number
@@ -48,7 +49,12 @@ export interface EditorSearchIntent {
 
 type EditorTheme = 'ide' | 'paper' | 'sepia'
 type SaveStatus = 'dirty' | 'auto-saving' | 'auto-saved' | 'manual-saving' | 'manual-saved' | 'error'
-type PendingSave = { text: string; mode: 'manual' | 'auto' }
+type PendingSave = {
+  fileName: string
+  text: string
+  mode: 'manual' | 'auto'
+  save: (fileName: string, content: string) => Promise<boolean>
+}
 
 interface EditorSettings {
   lineHeight: number
@@ -202,6 +208,7 @@ export function MarkdownEditor({
   onGenerateIllustration,
   generateIllustrationDisabled = false,
   illustrationInsertSignal,
+  onLineChange,
 }: MarkdownEditorProps) {
   const { t } = useTranslation()
   const [saveStatus, setSaveStatus] = useState<SaveStatus | null>(null)
@@ -216,13 +223,15 @@ export function MarkdownEditor({
   const autoSaveTimer = useRef<number | null>(null)
   const saveStatusClearTimer = useRef<number | null>(null)
   const saveInFlightRef = useRef(false)
-  const pendingSaveRef = useRef<PendingSave | null>(null)
+  const pendingSavesRef = useRef<PendingSave[]>([])
+  const scheduledSaveRef = useRef<PendingSave | null>(null)
   const lastSyncedFileRef = useRef<string | null>(null)
   const lastSyncedContentRef = useRef('')
   const fileNameRef = useRef<string | null>(fileName)
+  const onSaveRef = useRef(onSave)
   const autoSaveEnabledRef = useRef(autoSaveEnabled)
   const autoSaveDelayMsRef = useRef(normalizeAutoSaveDelayMs(autoSaveDelayMs))
-  const saveEditorContentRef = useRef<(mode: 'manual' | 'auto') => Promise<void>>(async () => {})
+  const queueEditorSaveRef = useRef<(save: PendingSave) => Promise<void>>(async () => {})
   const searchInputRef = useRef<HTMLInputElement>(null)
   const lastSaveSignalRef = useRef(saveSignal)
   const lastIllustrationInsertNonceRef = useRef<number | null>(null)
@@ -255,7 +264,10 @@ export function MarkdownEditor({
         },
         addKeyboardShortcuts() {
           return {
-            'Shift-Enter': () => this.editor.commands.setHardBreak(),
+            'Shift-Enter': () => {
+              if (!this.editor || this.editor.isDestroyed) return false
+              return this.editor.commands.setHardBreak()
+            },
           }
         },
         addCommands() {
@@ -272,6 +284,11 @@ export function MarkdownEditor({
       searchExtension,
       dialogueHighlightExtension,
       workspaceImageExtension,
+      TableKit.configure({
+        table: {
+          resizable: false,
+        },
+      }),
       Markdown.configure({
         markedOptions: {
           gfm: true,
@@ -294,13 +311,15 @@ export function MarkdownEditor({
 
   useEffect(() => {
     fileNameRef.current = fileName
-  }, [fileName])
+    onSaveRef.current = onSave
+  }, [fileName, onSave])
 
   useEffect(() => {
     autoSaveEnabledRef.current = autoSaveEnabled
     if (!autoSaveEnabled && autoSaveTimer.current) {
       window.clearTimeout(autoSaveTimer.current)
       autoSaveTimer.current = null
+      scheduledSaveRef.current = null
     }
   }, [autoSaveEnabled])
 
@@ -309,10 +328,12 @@ export function MarkdownEditor({
   }, [resolvedAutoSaveDelayMs])
 
   useEffect(() => {
-    if (autoSaveTimer.current) {
-      window.clearTimeout(autoSaveTimer.current)
-      autoSaveTimer.current = null
-    }
+    const scheduled = scheduledSaveRef.current
+    if (!scheduled || scheduled.fileName === fileName) return
+    if (autoSaveTimer.current) window.clearTimeout(autoSaveTimer.current)
+    autoSaveTimer.current = null
+    scheduledSaveRef.current = null
+    void queueEditorSaveRef.current(scheduled)
   }, [fileName])
 
   const updateSearch = useCallback((query: string, nextIndex = 0) => {
@@ -331,7 +352,7 @@ export function MarkdownEditor({
 
   // 仅在切换文件或外部内容真正变化时同步，避免自动保存后重置光标。
   useLayoutEffect(() => {
-    if (!editor) return
+    if (!editor || editor.isDestroyed) return
 
     const fileChanged = lastSyncedFileRef.current !== fileName
     const contentChanged = lastSyncedContentRef.current !== content
@@ -362,6 +383,7 @@ export function MarkdownEditor({
       editor.commands.setContent(content, { emitUpdate: false, contentType: 'markdown' })
     }
     updateCharacterStats(editor, setSelectedCharacters)
+    onLineChange?.(getLineNumber(editor.state.doc, editor.state.selection.head))
     updateSearch(searchStateRef.current.query, 0)
 
     // 切换文件后：等待 DOM 渲染完成再恢复位置并显示
@@ -372,13 +394,16 @@ export function MarkdownEditor({
         scrollEl.style.visibility = ''
       })
     }
-  }, [content, editor, fileName, updateSearch])
+  }, [content, editor, fileName, onLineChange, updateSearch])
 
-  // 监听 TipTap 内容和选区变化，实时更新选区字数。
+  // 监听 TipTap 内容和选区变化，实时更新选区字数与光标行号。
   useEffect(() => {
     if (!editor) return
 
-    const updateStats = () => updateCharacterStats(editor, setSelectedCharacters)
+    const updateStats = () => {
+      updateCharacterStats(editor, setSelectedCharacters)
+      onLineChange?.(getLineNumber(editor.state.doc, editor.state.selection.head))
+    }
     updateStats()
     editor.on('update', updateStats)
     editor.on('selectionUpdate', updateStats)
@@ -386,7 +411,7 @@ export function MarkdownEditor({
       editor.off('update', updateStats)
       editor.off('selectionUpdate', updateStats)
     }
-  }, [editor])
+  }, [editor, onLineChange])
 
   // 保存编辑器设置
   useEffect(() => {
@@ -468,43 +493,56 @@ export function MarkdownEditor({
 
   useEffect(() => clearSaveStatusTimer, [clearSaveStatusTimer])
 
-  const persistEditorContent = useCallback(async (text: string, mode: 'manual' | 'auto') => {
-    clearSaveStatusTimer()
-    setSaveStatus(mode === 'auto' ? 'auto-saving' : 'manual-saving')
-    const ok = await onSave(text)
+  const persistEditorContent = useCallback(async ({ fileName: targetFile, text, mode, save }: PendingSave) => {
+    if (fileNameRef.current === targetFile) {
+      clearSaveStatusTimer()
+      setSaveStatus(mode === 'auto' ? 'auto-saving' : 'manual-saving')
+    }
+    const ok = await save(targetFile, text)
     const nextStatus: SaveStatus = ok ? (mode === 'auto' ? 'auto-saved' : 'manual-saved') : 'error'
-    setSaveStatus(nextStatus)
+    if (fileNameRef.current === targetFile) setSaveStatus(nextStatus)
     if (mode === 'manual') {
       if (!ok) toast.error(t('editor.saveFailed'))
     }
-    scheduleSaveStatusClear(nextStatus, mode === 'auto' ? 1400 : 2000)
-  }, [clearSaveStatusTimer, onSave, scheduleSaveStatusClear, t])
+    if (fileNameRef.current === targetFile) {
+      scheduleSaveStatusClear(nextStatus, mode === 'auto' ? 1400 : 2000)
+    }
+  }, [clearSaveStatusTimer, scheduleSaveStatusClear, t])
 
-  const queueEditorSave = useCallback(async (text: string, mode: 'manual' | 'auto') => {
-    lastSyncedContentRef.current = text
+  const queueEditorSave = useCallback(async (save: PendingSave) => {
+    if (fileNameRef.current === save.fileName) lastSyncedContentRef.current = save.text
     if (saveInFlightRef.current) {
-      const pendingMode = mode === 'manual' || pendingSaveRef.current?.mode === 'manual' ? 'manual' : 'auto'
-      pendingSaveRef.current = { text, mode: pendingMode }
-      setSaveStatus(pendingMode === 'auto' ? 'auto-saving' : 'manual-saving')
+      const existingIndex = pendingSavesRef.current.findIndex((pending) => (
+        pending.fileName === save.fileName && pending.save === save.save
+      ))
+      const existing = existingIndex >= 0 ? pendingSavesRef.current[existingIndex] : null
+      const pending = {
+        ...save,
+        mode: save.mode === 'manual' || existing?.mode === 'manual' ? 'manual' : 'auto',
+      } satisfies PendingSave
+      if (existingIndex >= 0) pendingSavesRef.current[existingIndex] = pending
+      else pendingSavesRef.current.push(pending)
+      if (fileNameRef.current === save.fileName) {
+        setSaveStatus(pending.mode === 'auto' ? 'auto-saving' : 'manual-saving')
+      }
       return
     }
 
     saveInFlightRef.current = true
-    let nextText = text
-    let nextMode = mode
+    let nextSave: PendingSave | undefined = save
     try {
-      for (;;) {
-        pendingSaveRef.current = null
-        await persistEditorContent(nextText, nextMode)
-        const pending = pendingSaveRef.current as PendingSave | null
-        if (!pending || pending.text === nextText) break
-        nextText = pending.text
-        nextMode = pending.mode
+      while (nextSave) {
+        await persistEditorContent(nextSave)
+        nextSave = pendingSavesRef.current.shift()
       }
     } finally {
       saveInFlightRef.current = false
     }
   }, [persistEditorContent])
+
+  useEffect(() => {
+    queueEditorSaveRef.current = queueEditorSave
+  }, [queueEditorSave])
 
   /** 保存当前编辑内容 */
   const saveEditorContent = useCallback(async (mode: 'manual' | 'auto') => {
@@ -512,12 +550,8 @@ export function MarkdownEditor({
     const text = isTxtFile(fileName)
       ? normalizeEditorText(editor.getText({ blockSeparator: '\n' }))
       : normalizeEditorText(editor.getMarkdown())
-    await queueEditorSave(text, mode)
-  }, [editor, fileName, queueEditorSave])
-
-  useEffect(() => {
-    saveEditorContentRef.current = saveEditorContent
-  }, [saveEditorContent])
+    await queueEditorSave({ fileName, text, mode, save: onSave })
+  }, [editor, fileName, onSave, queueEditorSave])
 
   /** 执行手动保存 */
   const handleSave = useCallback(async () => {
@@ -525,6 +559,7 @@ export function MarkdownEditor({
       window.clearTimeout(autoSaveTimer.current)
       autoSaveTimer.current = null
     }
+    scheduledSaveRef.current = null
     await saveEditorContent('manual')
   }, [saveEditorContent])
 
@@ -539,7 +574,8 @@ export function MarkdownEditor({
     if (!editor) return
 
     const handleUpdate = () => {
-      if (!fileNameRef.current) return
+      const targetFile = fileNameRef.current
+      if (!targetFile) return
       clearSaveStatusTimer()
       setSaveStatus('dirty')
       if (!autoSaveEnabledRef.current) {
@@ -547,14 +583,22 @@ export function MarkdownEditor({
           window.clearTimeout(autoSaveTimer.current)
           autoSaveTimer.current = null
         }
+        scheduledSaveRef.current = null
         return
       }
       if (autoSaveTimer.current) {
         window.clearTimeout(autoSaveTimer.current)
       }
+      const text = isTxtFile(targetFile)
+        ? normalizeEditorText(editor.getText({ blockSeparator: '\n' }))
+        : normalizeEditorText(editor.getMarkdown())
+      const scheduled: PendingSave = { fileName: targetFile, text, mode: 'auto', save: onSaveRef.current }
+      scheduledSaveRef.current = scheduled
       autoSaveTimer.current = window.setTimeout(() => {
         autoSaveTimer.current = null
-        void saveEditorContentRef.current('auto')
+        if (scheduledSaveRef.current !== scheduled) return
+        scheduledSaveRef.current = null
+        void queueEditorSaveRef.current(scheduled)
       }, autoSaveDelayMsRef.current)
     }
 
@@ -571,7 +615,9 @@ export function MarkdownEditor({
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       // 当焦点在 chat 输入框等 textarea/input 时，不拦截快捷键
-      const inCurrentEditor = e.target instanceof globalThis.Node && editor?.view.dom.contains(e.target)
+      const inCurrentEditor = Boolean(
+        editor && !editor.isDestroyed && e.target instanceof globalThis.Node && editor.view.dom.contains(e.target),
+      )
       if (isEditableTarget(e.target) && !inCurrentEditor) return
 
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'f') {
@@ -581,7 +627,7 @@ export function MarkdownEditor({
     }
     document.addEventListener('keydown', handler)
     return () => document.removeEventListener('keydown', handler)
-  }, [])
+  }, [editor])
 
   /** 引用当前选区到 Chat */
   const quoteCurrentSelection = useCallback(() => {
@@ -599,7 +645,9 @@ export function MarkdownEditor({
   // Cmd+Shift+L 快捷键：引用选区到 Chat
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      const inCurrentEditor = e.target instanceof globalThis.Node && editor?.view.dom.contains(e.target)
+      const inCurrentEditor = Boolean(
+        editor && !editor.isDestroyed && e.target instanceof globalThis.Node && editor.view.dom.contains(e.target),
+      )
       if (isEditableTarget(e.target) && !inCurrentEditor) return
 
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'l') {
@@ -788,12 +836,6 @@ export function MarkdownEditor({
         {/* 选区浮动工具条 */}
         {editor && selectedCharacters > 0 && onQuoteSelection && (
           <SelectionToolbar editor={editor} onQuote={quoteCurrentSelection} />
-        )}
-      </div>
-      <div className="nova-editor-statusbar flex h-7 shrink-0 items-center gap-4 border-t px-3 text-[11px] text-[var(--nova-text-faint)]">
-        {chapterSummary && <span>{t('editor.updatedAt', { time: chapterSummary.updated_at || t('editor.unknownTime') })}</span>}
-        {selectedCharacters > 0 && (
-          <span className="text-[var(--nova-text-muted)]">{t('editor.selectedWords', { count: formatNumber(selectedCharacters) })}</span>
         )}
       </div>
     </div>
@@ -1077,10 +1119,6 @@ function updateCharacterStats(
 
 function countTextCharacters(text: string) {
   return Array.from(text.replace(/\s/g, '')).length
-}
-
-function formatNumber(value: number) {
-  return formatLocaleNumber(value)
 }
 
 /** 创建编辑器搜索高亮扩展，使用 ProseMirror Decoration 标记匹配项。 */

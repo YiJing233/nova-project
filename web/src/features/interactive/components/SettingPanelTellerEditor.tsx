@@ -1,12 +1,14 @@
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { Check, ChevronDown, Edit3, FileText, Loader2, Plus, Save, Sparkles, Trash2, Upload } from 'lucide-react'
+import { readUIMessageStream } from 'ai'
 import { useTranslation } from 'react-i18next'
 import { runConfigManagerStream } from '@/lib/api'
-import type { ChatMessage } from '@/lib/api'
 import { isSaveShortcut } from '@/lib/keyboard'
 import { readTextFile } from '@/lib/text-file'
 import { MessageList } from '@/components/Chat/MessageList'
-import { appendConfigManagerMessage, configManagerToolKey, parseConfigManagerPayload, reduceConfigManagerMessages, type ConfigManagerToolPayload } from '@/components/Chat/config-manager-events'
+import { agentViewContent, buildAgentMessageViews } from '@/lib/agent-message-view'
+import { normalizeAgentUIMessages, type AgentUIMessage } from '@/lib/agent-ui'
+import { createAgentDataMessage, createAgentTextMessage } from '@/hooks/useAgentUIMessageStream'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -16,6 +18,7 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogTitle } from '@/components/ui/dialog'
 import { getStyleReferences, readStyleReferenceFile, saveStyleReference, updateStyleReferenceFile } from '../api'
 import type { StyleReference, StyleReferenceFileDocument, StyleRule, Teller, TellerPromptSlot } from '../types'
+import { PresetEmptyState, PresetMetadataPanel } from './preset-config/PresetEditorChrome'
 
 const TELLER_TARGET_OPTIONS = [{ value: 'system' }, { value: 'turn_context' }, { value: 'state_memory' }] as const
 
@@ -23,17 +26,16 @@ type TellerTarget = TellerPromptSlot['target']
 const actionButtonClassName = 'nova-nav-item gap-1.5 border-[var(--nova-border)] bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]'
 const iconActionClassName = 'nova-nav-item border-[var(--nova-border)] bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]'
 const inputClassName = 'nova-field h-8 text-xs focus-visible:ring-0'
-const selectClassName = 'nova-field h-8 text-xs focus:ring-0'
+const selectClassName = 'nova-field h-8 w-full text-xs focus:ring-0'
 const STYLE_SOURCE_LIMIT = 40000
 const STYLE_FILE_ACCEPT = '.txt,.md,.markdown,text/plain,text/markdown,text/x-markdown'
 const STYLE_MARKDOWN_TAG = 'style_reference_markdown'
 
-export function TellerEditor({ workspace, draft, setDraft, tagDraft, setTagDraft, activeSlotId, setActiveSlotId, onSave }: { workspace: string; draft: Teller | null; setDraft: (draft: Teller | null) => void; tagDraft: string; setTagDraft: (value: string) => void; activeSlotId: string; setActiveSlotId: (id: string) => void; onSave: () => void }) {
+export function TellerEditor({ workspace, draft, setDraft, activeSlotId, setActiveSlotId, onSave }: { workspace: string; draft: Teller | null; setDraft: (draft: Teller | null) => void; activeSlotId: string; setActiveSlotId: (id: string) => void; onSave: () => void }) {
   const { t } = useTranslation()
   const activeSlot = draft?.slots?.find((slot) => slot.id === activeSlotId) || draft?.slots?.[0] || null
   const [targetPickerOpen, setTargetPickerOpen] = useState(false)
-  const [randomEventRateInput, setRandomEventRateInput] = useState(() => formatRandomEventRate(draft?.random_event_rate))
-  const [styleReferences, setStyleReferences] = useState<StyleReference[]>([])
+	const [styleReferences, setStyleReferences] = useState<StyleReference[]>([])
 
   const refreshStyleReferences = async () => {
     if (!workspace) {
@@ -59,10 +61,6 @@ export function TellerEditor({ workspace, draft, setDraft, tagDraft, setTagDraft
     setTargetPickerOpen(false)
   }, [activeSlotId])
 
-  useEffect(() => {
-    setRandomEventRateInput(formatRandomEventRate(draft?.random_event_rate))
-  }, [draft?.id])
-
   const updateSlotById = (slotId: string, patch: Partial<TellerPromptSlot>) => {
     if (!draft) return
     setDraft({
@@ -81,7 +79,7 @@ export function TellerEditor({ workspace, draft, setDraft, tagDraft, setTagDraft
     const id = `slot-${Date.now()}`
     const slot: TellerPromptSlot = {
       id,
-      name: '新规则',
+      name: t('settingPanel.injectRules.newRuleName'),
       target: 'turn_context',
       enabled: true,
       content: '',
@@ -97,64 +95,42 @@ export function TellerEditor({ workspace, draft, setDraft, tagDraft, setTagDraft
     setActiveSlotId(nextSlots[0]?.id || '')
   }
 
-  const updateRandomEventRate = (value: string) => {
-    setRandomEventRateInput(value)
-    if (!draft || !isDecimalInput(value)) return
-    setDraft({
-      ...draft,
-      random_event_rate: parseDecimalInput(value),
-    })
-  }
-
   if (!draft) {
-    return <EmptyState title={t('settingPanel.editor.noTellerSelected')} description={t('settingPanel.editor.noTellerSelectedDesc')} />
+    return <PresetEmptyState title={t('settingPanel.editor.noTellerSelected')} description={t('settingPanel.editor.noTellerSelectedDesc')} />
   }
 
   const selectedTarget = targetOption(activeSlot?.target || 'turn_context')
+  const editHint = draft.custom ? t('settingPanel.storyDirector.customEditable') : t('settingPanel.storyDirector.builtInCopyHint')
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-y-auto overflow-x-hidden">
-      <div className="grid shrink-0 gap-3 border-b border-[var(--nova-border)] bg-[var(--nova-surface)] p-4 lg:grid-cols-[minmax(220px,1fr)_minmax(220px,1fr)_150px_150px]">
-        <Field label={t('settingPanel.field.name')}>
-          <Input className={inputClassName} value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} />
-        </Field>
-        <Field label={t('settingPanel.field.description')}>
-          <Input className={inputClassName} value={draft.description} onChange={(event) => setDraft({ ...draft, description: event.target.value })} placeholder={t('settingPanel.placeholder.description')} />
-        </Field>
-        <Field label={t('settingPanel.field.randomEventRate')}>
-          <Input
-            className={inputClassName}
-            aria-label={t('settingPanel.field.randomEventRate')}
-            inputMode="decimal"
-            value={randomEventRateInput}
-            onChange={(event) => updateRandomEventRate(event.target.value)}
+    <div data-testid="teller-editor" className="teller-editor flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+      <PresetMetadataPanel
+        name={draft.name}
+        description={draft.description}
+        status={draft.custom ? t('settingPanel.custom') : draft.builtin_overridden ? t('settingPanel.builtInOverridden') : t('settingPanel.builtIn')}
+        hint={editHint}
+        onNameChange={(name) => setDraft({ ...draft, name })}
+        onDescriptionChange={(description) => setDraft({ ...draft, description })}
+	/>
+
+      <div data-testid="teller-content-scroll" className="flex min-h-0 min-w-0 flex-1 flex-col overflow-y-auto">
+        <section className="shrink-0 border-b border-[var(--preset-line)] bg-[var(--preset-surface)] p-3 sm:p-4">
+          <div className="mb-3">
+            <div className="text-xs font-medium text-[var(--nova-text)]">{t('settingPanel.styleRules.title')}</div>
+            <div className="mt-1 text-[11px] leading-5 text-[var(--nova-text-faint)]">{t('settingPanel.styleRules.desc')}</div>
+          </div>
+          <InteractiveStyleReferencesEditor
+            references={styleReferences}
+            refreshReferences={refreshStyleReferences}
+            globalRefs={draft.style_refs ?? []}
+            onGlobalRefsChange={(style_refs) => setDraft({ ...draft, style_refs })}
+            rules={draft.style_rules ?? []}
+            onRulesChange={(style_rules) => setDraft({ ...draft, style_rules })}
           />
-        </Field>
-        <Field label={t('settingPanel.field.tags')}>
-          <Input className={inputClassName} value={tagDraft} onChange={(event) => setTagDraft(event.target.value)} placeholder={t('settingPanel.placeholder.tags')} />
-        </Field>
-        <div className="flex items-end">
-          <span className="rounded border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-2 py-1 text-xs text-[var(--nova-text-faint)]">{draft.custom ? t('settingPanel.custom') : draft.builtin_overridden ? t('settingPanel.builtInOverridden') : t('settingPanel.builtIn')}</span>
-        </div>
-      </div>
+        </section>
 
-      <div className="shrink-0 border-b border-[var(--nova-border)] bg-[var(--nova-surface)] p-4">
-        <div className="mb-3">
-          <div className="text-xs font-medium text-[var(--nova-text)]">{t('settingPanel.styleRules.title')}</div>
-          <div className="mt-1 text-[11px] leading-5 text-[var(--nova-text-faint)]">{t('settingPanel.styleRules.desc')}</div>
-        </div>
-        <InteractiveStyleReferencesEditor
-          references={styleReferences}
-          refreshReferences={refreshStyleReferences}
-          globalRefs={draft.style_refs ?? []}
-          onGlobalRefsChange={(style_refs) => setDraft({ ...draft, style_refs })}
-          rules={draft.style_rules ?? []}
-          onRulesChange={(style_rules) => setDraft({ ...draft, style_rules })}
-        />
-      </div>
-
-      <div className="grid min-h-[520px] flex-1 grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)]">
-        <aside className="flex max-h-60 min-h-0 flex-col overflow-hidden border-b border-[var(--nova-border)] bg-[var(--nova-surface)] lg:max-h-none lg:border-b-0 lg:border-r">
+        <div className="teller-injection-layout grid min-h-[320px] min-w-0 flex-1">
+        <aside className="teller-injection-rules flex max-h-56 min-h-0 min-w-0 flex-col overflow-hidden border-b border-[var(--preset-line)] bg-[var(--preset-surface)]">
           <div className="flex h-11 items-center justify-between border-b border-[var(--nova-border)] px-3">
             <div className="text-xs font-medium text-[var(--nova-text-muted)]">{t('settingPanel.injectRules.title')}</div>
             <Button className={iconActionClassName} variant="outline" size="icon" onClick={addSlot} aria-label={t('settingPanel.injectRules.new')}>
@@ -164,7 +140,7 @@ export function TellerEditor({ workspace, draft, setDraft, tagDraft, setTagDraft
           <ScrollArea className="min-h-0 flex-1">
             <div className="p-2">
               {(draft.slots || []).map((slot) => (
-                <div key={slot.id} className={`mb-1 flex min-h-12 w-full items-center gap-2 rounded-md border px-3 py-2 text-xs transition ${activeSlot?.id === slot.id ? 'border-[var(--nova-accent)]/45 bg-[var(--nova-active)] text-[var(--nova-text)] shadow-[inset_3px_0_0_var(--nova-accent)]' : 'border-transparent text-[var(--nova-text-muted)] hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]'}`}>
+                <div key={slot.id} className={`mb-0.5 flex min-h-10 w-full items-center gap-2 rounded-[9px] border px-2.5 py-1.5 text-xs transition ${activeSlot?.id === slot.id ? 'border-[var(--preset-line)] bg-[var(--nova-active)] text-[var(--nova-text)]' : 'border-transparent text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]'}`}>
                   <button type="button" onClick={() => setActiveSlotId(slot.id)} className="flex min-w-0 flex-1 items-center gap-2 text-left">
                     <FileText className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-faint)]" />
                     <span className="min-w-0 flex-1">
@@ -184,9 +160,9 @@ export function TellerEditor({ workspace, draft, setDraft, tagDraft, setTagDraft
         </aside>
 
         {activeSlot ? (
-          <section className="flex min-h-0 flex-col">
-            <div className="shrink-0 border-b border-[var(--nova-border)] bg-[var(--nova-surface)] p-4">
-              <div className="grid gap-3 lg:grid-cols-[minmax(220px,1fr)_minmax(240px,320px)_32px]">
+          <section className="flex min-h-0 min-w-0 flex-col overflow-hidden">
+            <div className="shrink-0 border-b border-[var(--preset-line)] bg-[var(--preset-surface)] p-3 sm:p-4">
+              <div className="teller-rule-grid grid min-w-0 gap-3">
                 <Field label={t('settingPanel.field.ruleName')}>
                   <Input className={inputClassName} value={activeSlot.name} onChange={(event) => updateSlot({ name: event.target.value })} />
                 </Field>
@@ -231,8 +207,8 @@ export function TellerEditor({ workspace, draft, setDraft, tagDraft, setTagDraft
                     <Trash2 className="h-4 w-4" />
                   </Button>
                 </div>
-                <div className="lg:col-span-3">
-                  <div className="min-w-0 rounded-md border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2.5">
+                <div className="teller-rule-summary">
+                  <div className="min-w-0 rounded-[12px] border border-[var(--preset-line)] bg-[var(--preset-raised)] px-3 py-2.5">
                     <div className="flex items-center gap-2 text-xs font-medium text-[var(--nova-text)]">
                       <span>{targetLabel(selectedTarget.value as TellerTarget, t)}</span>
                       <span className="h-1 w-1 rounded-full bg-[var(--nova-text-faint)]/50" />
@@ -243,10 +219,10 @@ export function TellerEditor({ workspace, draft, setDraft, tagDraft, setTagDraft
                 </div>
               </div>
             </div>
-            <div className="min-h-[420px] flex-1 p-4 lg:min-h-0">
+            <div className="min-h-[280px] flex-1 p-3 sm:p-4">
               <Textarea
                 autoResize={false}
-                className="nova-field h-full min-h-[360px] resize-none font-mono text-sm leading-7 shadow-none focus-visible:ring-0"
+                className="nova-field h-full min-h-[240px] resize-none font-mono text-sm leading-7 shadow-none"
                 value={activeSlot.content}
                 onChange={(event) => updateSlot({ content: event.target.value })}
                 onKeyDown={(event) => {
@@ -260,26 +236,12 @@ export function TellerEditor({ workspace, draft, setDraft, tagDraft, setTagDraft
             </div>
           </section>
         ) : (
-          <EmptyState title={t('settingPanel.injectRules.emptyTitle')} description={t('settingPanel.injectRules.emptyDesc')} />
+          <PresetEmptyState title={t('settingPanel.injectRules.emptyTitle')} description={t('settingPanel.injectRules.emptyDesc')} />
         )}
+        </div>
       </div>
     </div>
   )
-}
-
-function formatRandomEventRate(value: number | undefined) {
-  return Number.isFinite(value) ? String(value) : '0'
-}
-
-function isDecimalInput(value: string) {
-  return /^\d*(?:\.\d*)?$/.test(value.trim())
-}
-
-function parseDecimalInput(value: string) {
-  const normalized = value.trim()
-  if (normalized === '' || normalized === '.') return 0
-  const parsed = Number(normalized)
-  return Number.isFinite(parsed) ? parsed : 0
 }
 
 function InteractiveStyleReferencesEditor({ references, refreshReferences, globalRefs, onGlobalRefsChange, rules, onRulesChange }: { references: StyleReference[]; refreshReferences: () => Promise<StyleReference[]>; globalRefs: string[]; onGlobalRefsChange: (refs: string[]) => void; rules: StyleRule[]; onRulesChange: (rules: StyleRule[]) => void }) {
@@ -359,7 +321,7 @@ function StyleReferenceControls({ references, refreshReferences, refs, contents 
   const [uploading, setUploading] = useState<'extract' | 'direct' | null>(null)
   const [uploadError, setUploadError] = useState('')
   const [uploadNotice, setUploadNotice] = useState('')
-  const [extractMessages, setExtractMessages] = useState<ChatMessage[]>([])
+  const [extractMessages, setExtractMessages] = useState<AgentUIMessage[]>([])
   const [uploadDocument, setUploadDocument] = useState<StyleReferenceFileDocument | null>(null)
   const [editOpen, setEditOpen] = useState(false)
   const [editLoading, setEditLoading] = useState(false)
@@ -507,16 +469,8 @@ function StyleReferenceControls({ references, refreshReferences, refs, contents 
       const request = normalizeStyleUploadDraft(uploadDraft)
       const targetPath = styleReferenceTargetPath(request)
       setExtractMessages([
-        {
-          id: `style-extract-user-${Date.now()}`,
-          role: 'user',
-          content: `${t('settingPanel.style.extractSave')}: ${request.name}`,
-        },
-        {
-          id: `style-extract-connect-${Date.now()}`,
-          role: 'system',
-          content: t('settingPanel.style.extractProgress.connecting'),
-        },
+        createAgentTextMessage('user', `${t('settingPanel.style.extractSave')}: ${request.name}`),
+        createAgentTextMessage('system', t('settingPanel.style.extractProgress.connecting')),
       ])
       const stream = await runConfigManagerStream({
         origin: 'teller',
@@ -530,42 +484,17 @@ function StyleReferenceControls({ references, refreshReferences, refs, contents 
       })
       const toolArgsByKey: Record<string, { name: string; args: string }> = {}
       let generated = ''
-      const reader = stream.getReader()
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        const payload = parseConfigManagerPayload<ConfigManagerToolPayload>(value.data)
-        setExtractMessages((current) => reduceConfigManagerMessages(current, value, {
-          idPrefix: 'style-extract',
-          toolLabel: t('configManager.tool'),
-          failureMessage: t('settingPanel.style.extractFailed'),
-        }))
-        if (value.event === 'chunk') {
-          generated += readString(payload?.content)
-          continue
-        }
-        if (value.event === 'tool_call') {
-          const key = configManagerToolKey(payload)
-          const name = readString(payload?.name)
-          if (key && name) toolArgsByKey[key] = { name, args: readString(payload?.args) }
-          continue
-        }
-        if (value.event === 'tool_args_delta') {
-          const key = configManagerToolKey(payload)
-          if (key) {
-            const current = toolArgsByKey[key] || { name: readString(payload?.name), args: '' }
-            toolArgsByKey[key] = { ...current, name: current.name || readString(payload?.name), args: `${current.args}${readString(payload?.delta)}` }
+      for await (const message of readUIMessageStream<AgentUIMessage>({ stream, terminateOnError: true })) {
+        const normalized = normalizeAgentUIMessages([message])[0] || message
+        setExtractMessages(current => normalizeAgentUIMessages(upsertAgentUIMessage(current, normalized)))
+        for (const view of buildAgentMessageViews([normalized])) {
+          if (view.kind === 'assistant') {
+            generated = agentViewContent(view)
+          } else if (view.kind === 'tool' && view.toolName) {
+            toolArgsByKey[view.partId] = { name: view.toolName, args: stringifyToolInput(view.input) }
+          } else if (view.kind === 'error') {
+            throw new Error(agentViewContent(view) || t('settingPanel.style.extractFailed'))
           }
-          continue
-        }
-        if (value.event === 'tool_result') {
-          const key = configManagerToolKey(payload)
-          const name = readString(payload?.name)
-          if (key && toolArgsByKey[key]) toolArgsByKey[key] = { ...toolArgsByKey[key], name: toolArgsByKey[key].name || name }
-          continue
-        }
-        if (value.event === 'error') {
-          throw new Error(readString((payload as { message?: string } | null)?.message) || t('settingPanel.style.extractFailed'))
         }
       }
       const markdownFromTool = extractStyleReferenceMarkdownFromToolArgs(toolArgsByKey)
@@ -583,16 +512,14 @@ function StyleReferenceControls({ references, refreshReferences, refs, contents 
         content: limitStyleSource(doc.content),
       })
       setUploadNotice(t('settingPanel.style.extractSaved', { path: created.display_path }))
-      setExtractMessages((current) => appendConfigManagerMessage(current, {
-        role: 'system',
+      setExtractMessages((current) => [...current, createAgentDataMessage('agent-system', {
         content: `${t('settingPanel.style.extractProgress.saved')}: ${created.display_path}`,
-      }, 'style-extract'))
+      })])
     } catch (err) {
       setUploadError(err instanceof Error ? err.message : t('settingPanel.style.extractFailed'))
-      setExtractMessages((current) => appendConfigManagerMessage(current, {
-        role: 'error',
+      setExtractMessages((current) => [...current, createAgentDataMessage('agent-error', {
         content: err instanceof Error ? err.message : t('settingPanel.style.extractFailed'),
-      }, 'style-extract'))
+      })])
     } finally {
       setUploading(null)
     }
@@ -802,7 +729,7 @@ interface StyleUploadDraft {
   content: string
 }
 
-function StyleExtractionChatPanel({ messages, active }: { messages: ChatMessage[]; active: boolean }) {
+function StyleExtractionChatPanel({ messages, active }: { messages: AgentUIMessage[]; active: boolean }) {
   const { t } = useTranslation()
   return (
     <aside className="flex min-h-[220px] min-w-0 flex-col overflow-hidden rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)]/75">
@@ -829,6 +756,22 @@ function StyleExtractionChatPanel({ messages, active }: { messages: ChatMessage[
       </div>
     </aside>
   )
+}
+
+function upsertAgentUIMessage(messages: AgentUIMessage[], next: AgentUIMessage) {
+  const index = messages.findIndex(message => message.id === next.id)
+  if (index < 0) return [...messages, next]
+  return messages.map((message, messageIndex) => messageIndex === index ? next : message)
+}
+
+function stringifyToolInput(input: unknown) {
+  if (input === undefined || input === null) return ''
+  if (typeof input === 'string') return input
+  try {
+    return JSON.stringify(input)
+  } catch {
+    return String(input)
+  }
 }
 
 function limitStyleSource(value: string) {
@@ -978,17 +921,6 @@ function Field({ label, children, className = '' }: { label: string; children: R
       <span className="text-[11px] text-[var(--nova-text-faint)]">{label}</span>
       {children}
     </label>
-  )
-}
-
-function EmptyState({ title, description }: { title: string; description: string }) {
-  return (
-    <div className="flex min-h-0 flex-1 items-center justify-center p-6">
-      <div className="rounded-[var(--nova-radius)] border border-dashed border-[var(--nova-border)] bg-[var(--nova-surface)] px-6 py-5 text-center">
-        <div className="text-sm font-medium text-[var(--nova-text)]">{title}</div>
-        <div className="mt-1 text-xs text-[var(--nova-text-faint)]">{description}</div>
-      </div>
-    </div>
   )
 }
 

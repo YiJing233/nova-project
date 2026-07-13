@@ -1,15 +1,18 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ElementType, ReactNode } from 'react'
-import { Bot, CheckCircle2, Copy, Download, FileCode2, FileText, GitBranch, Loader2, Lock, PanelLeft, PanelRight, Plus, RefreshCw, Save, Search, Settings2, Sparkles, Trash2, Upload, X } from 'lucide-react'
+import { Bot, CheckCircle2, Copy, Download, Eye, FileCode2, FileText, Link2, ListTree, Loader2, Lock, PanelLeft, PanelRight, PencilLine, Plus, RefreshCw, Save, Search, Settings2, Sparkles, Trash2, Upload, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { InlineErrorNotice } from '@/components/common/inline-error-notice'
 import { ConfigManagerChat } from '@/components/Chat/ConfigManagerChat'
+import { ThemedMarkdownRenderer } from '@/components/common/MarkdownRenderer'
 import { AdaptiveSurface } from '@/components/layout/adaptive-surface'
+import { FileTree } from '@/components/Sidebar/FileTree'
 import { Textarea } from '@/components/ui/textarea'
-import { createSkill, deleteSkillDocument, getSkillDocument, getSkillFileDocument, getSkills, installSkillGitHub, installSkillZip, previewSkillGitHubInstall, previewSkillZipInstall, saveSkillDocument, saveSkillFileDocument } from '@/lib/api'
+import { createSkill, deleteSkillDocument, getSkillDocument, getSkillFileDocument, getSkills, installSkillRemote, installSkillZip, previewSkillRemoteInstall, previewSkillZipInstall, saveSkillDocument, saveSkillFileDocument } from '@/lib/api'
 import type { SkillDocument, SkillFile, SkillFileDocument, SkillInstallCandidate, SkillInstallResult, SkillScope, SkillScopeInfo, SkillSnapshot, SkillSummary } from '@/lib/api'
 import { AGENTS } from '@/features/agents/agent-registry'
 import type { AgentViewDefinition, VisibleAgentKey } from '@/features/agents/agent-registry'
+import type { FileNode } from '@/hooks/useWorkspace'
 
 const skillNamePattern = /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/
 const skillEntryFile = 'SKILL.md'
@@ -23,7 +26,8 @@ interface SkillsViewProps {
 }
 
 type SkillsMode = 'editor' | 'create' | 'config' | 'install'
-type SkillInstallSource = 'github' | 'zip'
+type SkillInstallSource = 'remote' | 'zip'
+type SkillContentViewMode = 'preview' | 'raw'
 
 export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewProps) {
   void onRequestAgent
@@ -35,6 +39,8 @@ export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewPro
   const [selectedFilePath, setSelectedFilePath] = useState(skillEntryFile)
   const [fileDocument, setFileDocument] = useState<SkillFileDocument | null>(null)
   const [fileDraft, setFileDraft] = useState('')
+  const [contentViewMode, setContentViewMode] = useState<SkillContentViewMode>('preview')
+  const [fileTreeOpen, setFileTreeOpen] = useState(false)
   const [fileLoading, setFileLoading] = useState(false)
   const [loading, setLoading] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -44,12 +50,12 @@ export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewPro
   const [newName, setNewName] = useState('')
   const [newDescription, setNewDescription] = useState('')
   const [newAgents, setNewAgents] = useState<VisibleAgentKey[]>(['ide'])
-  const [installSource, setInstallSource] = useState<SkillInstallSource>('github')
+  const [installSource, setInstallSource] = useState<SkillInstallSource>('remote')
   const [installScope, setInstallScope] = useState<SkillScope>('user')
   const [installFile, setInstallFile] = useState<File | null>(null)
-  const [installGitHubURL, setInstallGitHubURL] = useState('')
-  const [installGitHubRef, setInstallGitHubRef] = useState('')
-  const [installGitHubSubdir, setInstallGitHubSubdir] = useState('')
+  const [installRemoteURL, setInstallRemoteURL] = useState('')
+  const [installRemoteRef, setInstallRemoteRef] = useState('')
+  const [installRemoteSubdir, setInstallRemoteSubdir] = useState('')
   const [installCandidates, setInstallCandidates] = useState<SkillInstallCandidate[]>([])
   const [selectedInstallIds, setSelectedInstallIds] = useState<string[]>([])
   const [installMessage, setInstallMessage] = useState<string | null>(null)
@@ -63,8 +69,13 @@ export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewPro
   const editingEntryFile = selectedFilePath === skillEntryFile
   const dirty = document ? (editingEntryFile ? draft !== document.content : Boolean(fileDocument && fileDraft !== fileDocument.content)) : false
   const activeContent = editingEntryFile ? draft : fileDraft
+  const activePreviewContent = stripSkillMarkdownFrontmatter(activeContent)
   const activeEditable = editingEntryFile ? Boolean(document?.editable) : Boolean(fileDocument?.file.editable)
   const activeDisplayPath = document ? skillDisplayPath(document, selectedFilePath) : ''
+  const activeIsMarkdown = isMarkdownSkillFile(selectedFilePath)
+  const activeViewMode: SkillContentViewMode = activeIsMarkdown ? contentViewMode : 'raw'
+  const skillFileTree = useMemo(() => document ? skillFileTreeForDocument(document) : [], [document])
+  const skillFileTreeExpandedPaths = useMemo(() => collectSkillFileTreeDirs(skillFileTree), [skillFileTree])
   const writableScopes = useMemo(() => snapshot.scopes.filter((scope) => scope.writable), [snapshot.scopes])
   const builtinOverrideScope = useMemo(() => preferredBuiltinOverrideScope(snapshot.scopes), [snapshot.scopes])
   const builtinOverride = useMemo(() => {
@@ -124,6 +135,8 @@ export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewPro
         setSelectedFilePath(skillEntryFile)
         setFileDocument(null)
         setFileDraft('')
+        setContentViewMode('preview')
+        setFileTreeOpen(false)
       })
       .catch((e) => {
         if (!cancelled) {
@@ -181,10 +194,10 @@ export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewPro
     try {
       const preview = installSource === 'zip'
         ? await previewSkillZipInstall(requireInstallFile(installFile, t), installScope)
-        : await previewSkillGitHubInstall({
-            url: installGitHubURL.trim(),
-            ref: installGitHubRef.trim(),
-            subdir: installGitHubSubdir.trim(),
+        : await previewSkillRemoteInstall({
+            url: installRemoteURL.trim(),
+            ref: installRemoteRef.trim(),
+            subdir: installRemoteSubdir.trim(),
             scope: installScope,
           })
       applyInstallPreview(preview.candidates || [])
@@ -207,10 +220,10 @@ export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewPro
     try {
       const result = installSource === 'zip'
         ? await installSkillZip(requireInstallFile(installFile, t), installScope, candidateIds)
-        : await installSkillGitHub({
-            url: installGitHubURL.trim(),
-            ref: installGitHubRef.trim(),
-            subdir: installGitHubSubdir.trim(),
+        : await installSkillRemote({
+            url: installRemoteURL.trim(),
+            ref: installRemoteRef.trim(),
+            subdir: installRemoteSubdir.trim(),
             scope: installScope,
             candidateIds,
           })
@@ -600,9 +613,9 @@ export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewPro
                 scope={installScope}
                 scopes={writableScopes}
                 file={installFile}
-                githubURL={installGitHubURL}
-                githubRef={installGitHubRef}
-                githubSubdir={installGitHubSubdir}
+                remoteURL={installRemoteURL}
+                remoteRef={installRemoteRef}
+                remoteSubdir={installRemoteSubdir}
                 candidates={installCandidates}
                 selectedIds={selectedInstallIds}
                 saving={saving}
@@ -626,9 +639,9 @@ export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewPro
                   setSelectedInstallIds([])
                   setInstallMessage(null)
                 }}
-                onGithubURLChange={setInstallGitHubURL}
-                onGithubRefChange={setInstallGitHubRef}
-                onGithubSubdirChange={setInstallGitHubSubdir}
+                onRemoteURLChange={setInstallRemoteURL}
+                onRemoteRefChange={setInstallRemoteRef}
+                onRemoteSubdirChange={setInstallRemoteSubdir}
                 onPreview={() => void onPreviewInstall()}
                 onInstall={() => void onInstallSelected()}
                 onSelectedIdsChange={setSelectedInstallIds}
@@ -699,6 +712,37 @@ export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewPro
                     </button>
                   </>
                 )}
+                <button
+                  type="button"
+                  onClick={() => setFileTreeOpen((value) => !value)}
+                  aria-pressed={fileTreeOpen}
+                  className={`nova-nav-item inline-flex h-7 shrink-0 items-center gap-1 rounded border border-[var(--nova-border)] px-2 text-[11px] ${fileTreeOpen ? 'is-active' : 'bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]'}`}
+                >
+                  <ListTree className="h-3.5 w-3.5" />
+                  {t('skills.files.title')}
+                </button>
+                <div className="inline-flex shrink-0 overflow-hidden rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setContentViewMode('preview')}
+                    disabled={!activeIsMarkdown}
+                    aria-pressed={activeViewMode === 'preview'}
+                    title={!activeIsMarkdown ? t('skills.editor.previewUnavailable') : t('skills.editor.preview')}
+                    className={`nova-nav-item inline-flex h-6 items-center gap-1 rounded px-2 text-[11px] disabled:cursor-not-allowed disabled:opacity-45 ${activeViewMode === 'preview' ? 'is-active' : 'text-[var(--nova-text-muted)]'}`}
+                  >
+                    <Eye className="h-3.5 w-3.5" />
+                    {t('skills.editor.preview')}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setContentViewMode('raw')}
+                    aria-pressed={activeViewMode === 'raw'}
+                    className={`nova-nav-item inline-flex h-6 items-center gap-1 rounded px-2 text-[11px] ${activeViewMode === 'raw' ? 'is-active' : 'text-[var(--nova-text-muted)]'}`}
+                  >
+                    <PencilLine className="h-3.5 w-3.5" />
+                    {t('skills.editor.raw')}
+                  </button>
+                </div>
                 {document.scope === 'builtin' && (
                   <button
                     type="button"
@@ -714,26 +758,46 @@ export function SkillsView({ workspace, onClose, onRequestAgent }: SkillsViewPro
                   </button>
                 )}
               </div>
-              <SkillFileStrip
-                files={skillFilesForDocument(document)}
-                selectedPath={selectedFilePath}
-                onSelect={(path) => void selectSkillFile(path)}
-              />
-              {fileLoading ? (
-                <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-xs text-[var(--nova-text-faint)]">
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  {t('skills.files.loading')}
+              <div className="flex min-h-0 flex-1">
+                {fileTreeOpen && (
+                  <aside className="flex min-h-0 w-[min(42vw,15rem)] min-w-36 shrink-0 flex-col border-r border-[var(--nova-border)] bg-[var(--nova-surface)]">
+                    <div className="flex h-9 shrink-0 items-center gap-2 border-b border-[var(--nova-border)] px-3 text-[10px] font-medium uppercase text-[var(--nova-text-faint)]">
+                      <FileText className="h-3.5 w-3.5" />
+                      <span className="truncate">{t('skills.files.title')}</span>
+                    </div>
+                    <div className="min-h-0 flex-1 overflow-y-auto p-2">
+                      <FileTree
+                        key={keyOf(document)}
+                        nodes={skillFileTree}
+                        selectedFile={selectedFilePath}
+                        onSelectFile={(path) => void selectSkillFile(path)}
+                        defaultExpandedPaths={skillFileTreeExpandedPaths}
+                      />
+                    </div>
+                  </aside>
+                )}
+                <div className="min-h-0 min-w-0 flex flex-1 flex-col">
+                  {fileLoading ? (
+                    <div className="flex min-h-0 flex-1 items-center justify-center gap-2 text-xs text-[var(--nova-text-faint)]">
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                      {t('skills.files.loading')}
+                    </div>
+                  ) : activeViewMode === 'preview' ? (
+                    <div className="min-h-0 flex-1 overflow-y-auto bg-[var(--nova-bg)] px-5 py-4">
+                      <ThemedMarkdownRenderer content={activePreviewContent} className="max-w-4xl text-xs leading-5" />
+                    </div>
+                  ) : (
+                    <Textarea
+                      autoResize={false}
+                      value={activeContent}
+                      onChange={(event) => editingEntryFile ? setDraft(event.target.value) : setFileDraft(event.target.value)}
+                      readOnly={!activeEditable}
+                      spellCheck={false}
+                      className="min-h-0 flex-1 resize-none rounded-none border-0 bg-[var(--nova-bg)] px-5 py-4 font-mono text-xs leading-5 text-[var(--nova-text)] shadow-none focus-visible:ring-0"
+                    />
+                  )}
                 </div>
-              ) : (
-                <Textarea
-                  autoResize={false}
-                  value={activeContent}
-                  onChange={(event) => editingEntryFile ? setDraft(event.target.value) : setFileDraft(event.target.value)}
-                  readOnly={!activeEditable}
-                  spellCheck={false}
-                  className="min-h-0 flex-1 resize-none rounded-none border-0 bg-[var(--nova-bg)] px-5 py-4 font-mono text-xs leading-5 text-[var(--nova-text)] shadow-none focus-visible:ring-0"
-                />
-              )}
+              </div>
               </>
             ) : (
               <div className="flex h-full items-center justify-center px-6 text-center text-xs text-[var(--nova-text-faint)]">
@@ -898,9 +962,9 @@ function InstallSkillPanel({
   scope,
   scopes,
   file,
-  githubURL,
-  githubRef,
-  githubSubdir,
+  remoteURL,
+  remoteRef,
+  remoteSubdir,
   candidates,
   selectedIds,
   saving,
@@ -908,9 +972,9 @@ function InstallSkillPanel({
   onSourceChange,
   onScopeChange,
   onFileChange,
-  onGithubURLChange,
-  onGithubRefChange,
-  onGithubSubdirChange,
+  onRemoteURLChange,
+  onRemoteRefChange,
+  onRemoteSubdirChange,
   onPreview,
   onInstall,
   onSelectedIdsChange,
@@ -919,9 +983,9 @@ function InstallSkillPanel({
   scope: SkillScope
   scopes: SkillScopeInfo[]
   file: File | null
-  githubURL: string
-  githubRef: string
-  githubSubdir: string
+  remoteURL: string
+  remoteRef: string
+  remoteSubdir: string
   candidates: SkillInstallCandidate[]
   selectedIds: string[]
   saving: boolean
@@ -929,9 +993,9 @@ function InstallSkillPanel({
   onSourceChange: (value: SkillInstallSource) => void
   onScopeChange: (value: SkillScope) => void
   onFileChange: (value: File | null) => void
-  onGithubURLChange: (value: string) => void
-  onGithubRefChange: (value: string) => void
-  onGithubSubdirChange: (value: string) => void
+  onRemoteURLChange: (value: string) => void
+  onRemoteRefChange: (value: string) => void
+  onRemoteSubdirChange: (value: string) => void
   onPreview: () => void
   onInstall: () => void
   onSelectedIdsChange: (value: string[]) => void
@@ -939,7 +1003,7 @@ function InstallSkillPanel({
   const { t } = useTranslation()
   const installable = candidates.filter(isInstallableCandidate)
   const selectedInstallable = selectedIds.filter((id) => installable.some((candidate) => candidate.id === id))
-  const canPreview = source === 'zip' ? Boolean(file) : githubURL.trim() !== ''
+  const canPreview = source === 'zip' ? Boolean(file) : remoteURL.trim() !== ''
   const toggleSelected = (id: string, checked: boolean) => {
     if (checked) {
       onSelectedIdsChange(selectedIds.includes(id) ? selectedIds : [...selectedIds, id])
@@ -991,11 +1055,11 @@ function InstallSkillPanel({
                   <div className="grid grid-cols-2 gap-1">
                     <button
                       type="button"
-                      onClick={() => onSourceChange('github')}
-                      className={`nova-nav-item inline-flex h-8 items-center justify-center gap-1.5 rounded-[var(--nova-radius)] px-2 ${source === 'github' ? 'is-active' : 'bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]'}`}
+                      onClick={() => onSourceChange('remote')}
+                      className={`nova-nav-item inline-flex h-8 items-center justify-center gap-1.5 rounded-[var(--nova-radius)] px-2 ${source === 'remote' ? 'is-active' : 'bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]'}`}
                     >
-                      <GitBranch className="h-3.5 w-3.5" />
-                      {t('skills.install.github')}
+                      <Link2 className="h-3.5 w-3.5" />
+                      {t('skills.install.remote')}
                     </button>
                     <button
                       type="button"
@@ -1009,21 +1073,21 @@ function InstallSkillPanel({
                 </Field>
               </div>
 
-              {source === 'github' ? (
+              {source === 'remote' ? (
                 <div className="grid gap-3 md:grid-cols-[minmax(0,1.4fr)_minmax(0,0.7fr)_minmax(0,0.9fr)]">
-                  <Field label={t('skills.install.githubUrl')}>
+                  <Field label={t('skills.install.remoteUrl')}>
                     <input
-                      value={githubURL}
-                      onChange={(event) => onGithubURLChange(event.target.value)}
-                      aria-label={t('skills.install.githubUrl')}
-                      placeholder="owner/repo"
+                      value={remoteURL}
+                      onChange={(event) => onRemoteURLChange(event.target.value)}
+                      aria-label={t('skills.install.remoteUrl')}
+                      placeholder="owner/repo or https://github.com/owner/repo/tree/main/skills"
                       className="nova-field h-8 w-full rounded-[var(--nova-radius)] border px-2.5 font-mono outline-none"
                     />
                   </Field>
                   <Field label={t('skills.install.ref')}>
                     <input
-                      value={githubRef}
-                      onChange={(event) => onGithubRefChange(event.target.value)}
+                      value={remoteRef}
+                      onChange={(event) => onRemoteRefChange(event.target.value)}
                       aria-label={t('skills.install.ref')}
                       placeholder="main"
                       className="nova-field h-8 w-full rounded-[var(--nova-radius)] border px-2.5 font-mono outline-none"
@@ -1031,8 +1095,8 @@ function InstallSkillPanel({
                   </Field>
                   <Field label={t('skills.install.subdir')}>
                     <input
-                      value={githubSubdir}
-                      onChange={(event) => onGithubSubdirChange(event.target.value)}
+                      value={remoteSubdir}
+                      onChange={(event) => onRemoteSubdirChange(event.target.value)}
                       aria-label={t('skills.install.subdir')}
                       placeholder="skills/foo"
                       className="nova-field h-8 w-full rounded-[var(--nova-radius)] border px-2.5 font-mono outline-none"
@@ -1386,45 +1450,6 @@ function SkillScopeList({
   )
 }
 
-function SkillFileStrip({
-  files,
-  selectedPath,
-  onSelect,
-}: {
-  files: SkillFile[]
-  selectedPath: string
-  onSelect: (path: string) => void
-}) {
-  const { t } = useTranslation()
-  return (
-    <div className="flex min-h-10 shrink-0 items-center gap-2 overflow-x-auto border-b border-[var(--nova-border)] bg-[var(--nova-surface)] px-4 py-1.5">
-      <span className="shrink-0 text-[10px] font-medium uppercase text-[var(--nova-text-faint)]">{t('skills.files.title')}</span>
-      <div className="flex min-w-0 flex-1 gap-1">
-        {files.map((file) => {
-          const active = selectedPath === file.path
-          return (
-            <button
-              key={file.path}
-              type="button"
-              onClick={() => onSelect(file.path)}
-              className={`nova-nav-item inline-flex h-7 max-w-56 shrink-0 items-center gap-1.5 rounded-[var(--nova-radius)] border px-2 font-mono text-[11px] ${
-                active
-                  ? 'is-active border-[var(--nova-border)]'
-                  : 'border-transparent bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)] hover:border-[var(--nova-border)]'
-              }`}
-              title={`${file.path} · ${formatFileSize(file.size)}`}
-            >
-              {file.entry ? <FileCode2 className="h-3.5 w-3.5 shrink-0" /> : <FileText className="h-3.5 w-3.5 shrink-0" />}
-              <span className="min-w-0 truncate">{file.path}</span>
-              {!file.editable && <Lock className="h-3 w-3 shrink-0 text-[var(--nova-text-faint)]" />}
-            </button>
-          )
-        })}
-      </div>
-    </div>
-  )
-}
-
 function SectionTitle({ icon: Icon, title }: { icon: ElementType; title: string }) {
   return (
     <div className="flex items-center gap-2 text-xs font-medium text-[var(--nova-text)]">
@@ -1482,11 +1507,48 @@ function skillFilesForDocument(document: SkillDocument): SkillFile[] {
   ]
 }
 
-function formatFileSize(size: number) {
-  if (!Number.isFinite(size) || size <= 0) return '0 B'
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`
+function skillFileTreeForDocument(document: SkillDocument): FileNode[] {
+  const roots: FileNode[] = []
+  for (const file of skillFilesForDocument(document)) {
+    appendSkillFileTreeNode(roots, file.path.split('/').filter(Boolean))
+  }
+  return roots
+}
+
+function appendSkillFileTreeNode(nodes: FileNode[], parts: string[]) {
+  const [name, ...rest] = parts
+  if (!name) return
+  if (rest.length === 0) {
+    if (!nodes.some((node) => node.name === name && node.type === 'file')) {
+      nodes.push({ name, type: 'file' })
+    }
+    return
+  }
+  let dir = nodes.find((node) => node.name === name && node.type === 'dir')
+  if (!dir) {
+    dir = { name, type: 'dir', children: [] }
+    nodes.push(dir)
+  }
+  appendSkillFileTreeNode(dir.children ?? (dir.children = []), rest)
+}
+
+function collectSkillFileTreeDirs(nodes: FileNode[], basePath = ''): string[] {
+  const paths: string[] = []
+  for (const node of nodes) {
+    if (node.type !== 'dir') continue
+    const path = basePath ? `${basePath}/${node.name}` : node.name
+    paths.push(path)
+    paths.push(...collectSkillFileTreeDirs(node.children || [], path))
+  }
+  return paths
+}
+
+function isMarkdownSkillFile(path: string) {
+  return /\.(?:md|markdown)$/i.test(path)
+}
+
+function stripSkillMarkdownFrontmatter(content: string) {
+  return content.replace(/^\uFEFF?---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/, '')
 }
 
 function parseAgentKeys(agentField?: string): VisibleAgentKey[] {

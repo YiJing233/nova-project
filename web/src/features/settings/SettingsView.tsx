@@ -47,6 +47,14 @@ const IMAGE_API_INHERIT_VALUE = '__inherit__'
 const IMAGE_API_PROVIDER_DEFAULT_VALUE = '__provider_default__'
 const IMAGE_API_QUALITY_OPTIONS = ['auto', 'high', 'medium', 'low', 'standard', 'hd']
 const IMAGE_API_FORMAT_OPTIONS = ['png', 'jpeg']
+const TRACE_CAPTURE_OPTIONS = [
+  { value: 'summary', labelKey: 'settings.debug.traceCaptureSummary' },
+  { value: 'debug', labelKey: 'settings.debug.traceCaptureDebug' },
+  { value: 'off', labelKey: 'settings.debug.traceCaptureOff' },
+] as const
+const TRACE_EXPORTER_OPTIONS = [
+  { value: 'local', labelKey: 'settings.debug.traceExporterLocal' },
+] as const
 let nextSettingsEventSourceID = 1
 
 export function SettingsView({ onClose }: { onClose?: () => void }) {
@@ -450,8 +458,21 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
           <BoolTri label={t('settings.debug.llmInputLog')} value={draft.llm_input_log_enabled ?? null}
                    effective={effective.llm_input_log_enabled}
                    onChange={(v) => setField('llm_input_log_enabled', v)} />
+          <TraceCaptureSelect label={t('settings.debug.traceCaptureLevel')} value={draft.trace_capture_level}
+                              effective={effective.trace_capture_level}
+                              onChange={(v) => setField('trace_capture_level', v)} />
+          <TraceExporterSelect label={t('settings.debug.traceExporter')} value={draft.trace_exporter}
+                               effective={effective.trace_exporter}
+                               onChange={(v) => setField('trace_exporter', v)} />
+          <Num label={t('settings.debug.traceRetentionRuns')} value={draft.trace_retention_runs ?? null}
+               placeholder={placeholderFor('trace_retention_runs')}
+               min={0}
+               onChange={(v) => setField('trace_retention_runs', v)} />
           <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-xs leading-5 text-[var(--nova-text-faint)]">
             {t('settings.debug.llmInputLogHelp')}
+          </div>
+          <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-xs leading-5 text-[var(--nova-text-faint)]">
+            {t('settings.debug.traceHelp')}
           </div>
         </>
       ) : (
@@ -540,25 +561,15 @@ export function SettingsView({ onClose }: { onClose?: () => void }) {
       group: t('settings.group.interactive'),
       title: t('settings.section.interactive'),
       children: activeLayer === 'workspace' ? (
-        <>
-          <BoolTri label={t('settings.interactive.hotChoices')} value={draft.interactive_hot_choices_enabled ?? null}
-                   effective={effective.interactive_hot_choices_enabled}
-                   onChange={(v) => setField('interactive_hot_choices_enabled', v)} />
-          <Num label={t('settings.interactive.lineHeight')} value={draft.interactive_stage_line_height ?? null}
-               placeholder={placeholderFor('interactive_stage_line_height')}
-               step={0.05}
-               onChange={(v) => setField('interactive_stage_line_height', v)} />
-        </>
+        <Num label={t('settings.interactive.lineHeight')} value={draft.interactive_stage_line_height ?? null}
+             placeholder={placeholderFor('interactive_stage_line_height')}
+             step={0.05}
+             onChange={(v) => setField('interactive_stage_line_height', v)} />
       ) : (
-        <>
-          <BoolTri label={t('settings.interactive.hotChoices')} value={draft.interactive_hot_choices_enabled ?? null}
-                   effective={effective.interactive_hot_choices_enabled}
-                   onChange={(v) => setField('interactive_hot_choices_enabled', v)} />
-          <Num label={t('settings.interactive.lineHeight')} value={draft.interactive_stage_line_height ?? null}
-               placeholder={placeholderFor('interactive_stage_line_height')}
-               step={0.05}
-               onChange={(v) => setField('interactive_stage_line_height', v)} />
-        </>
+        <Num label={t('settings.interactive.lineHeight')} value={draft.interactive_stage_line_height ?? null}
+             placeholder={placeholderFor('interactive_stage_line_height')}
+             step={0.05}
+             onChange={(v) => setField('interactive_stage_line_height', v)} />
       ),
     },
   ]
@@ -1098,6 +1109,57 @@ function BoolTri({ label, value, effective, onChange }: {
         <option value="">{t('common.inherit', { value: eff })}</option>
         <option value="true">{t('settings.bool.true')}</option>
         <option value="false">{t('settings.bool.false')}</option>
+      </select>
+    </FieldRow>
+  )
+}
+
+function TraceCaptureSelect({ label, value, effective, onChange }: {
+  label: string
+  value?: string
+  effective?: string
+  onChange: (v: string) => void
+}) {
+  const { t } = useTranslation()
+  const effectiveValue = effective || 'summary'
+  const effectiveLabel = t(TRACE_CAPTURE_OPTIONS.find((option) => option.value === effectiveValue)?.labelKey || 'settings.debug.traceCaptureSummary')
+  return (
+    <FieldRow label={label}>
+      <select
+        value={value ?? ''}
+        onChange={(e) => onChange(e.target.value)}
+        className={fieldCls}
+      >
+        <option value="">{t('common.inherit', { value: effectiveLabel })}</option>
+        {TRACE_CAPTURE_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>{t(option.labelKey)}</option>
+        ))}
+      </select>
+    </FieldRow>
+  )
+}
+
+function TraceExporterSelect({ label, value, effective, onChange }: {
+  label: string
+  value?: string
+  effective?: string
+  onChange: (v: string) => void
+}) {
+  const { t } = useTranslation()
+  const effectiveValue = TRACE_EXPORTER_OPTIONS.some((option) => option.value === effective) ? effective || 'local' : 'local'
+  const selectedValue = TRACE_EXPORTER_OPTIONS.some((option) => option.value === value) ? value || '' : ''
+  const effectiveLabel = t(TRACE_EXPORTER_OPTIONS.find((option) => option.value === effectiveValue)?.labelKey || 'settings.debug.traceExporterLocal')
+  return (
+    <FieldRow label={label}>
+      <select
+        value={selectedValue}
+        onChange={(e) => onChange(e.target.value)}
+        className={fieldCls}
+      >
+        <option value="">{t('common.inherit', { value: effectiveLabel })}</option>
+        {TRACE_EXPORTER_OPTIONS.map((option) => (
+          <option key={option.value} value={option.value}>{t(option.labelKey)}</option>
+        ))}
       </select>
     </FieldRow>
   )

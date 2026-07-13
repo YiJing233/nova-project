@@ -27,8 +27,11 @@ const tiptapMock = vi.hoisted(() => {
       },
     },
     state: {
-      doc: { textContent: '' },
-      selection: { from: 0, to: 0, empty: true },
+      doc: {
+        textContent: '',
+        forEach: vi.fn(),
+      },
+      selection: { from: 0, to: 0, head: 0, empty: true },
       tr: { setMeta: vi.fn() },
     },
     view: {
@@ -52,6 +55,7 @@ const tiptapMock = vi.hoisted(() => {
     editor,
     chainApi,
     handlers,
+    useEditorOptions: null as unknown,
     markdown: '',
     text: '',
     emit(event: string) {
@@ -59,9 +63,11 @@ const tiptapMock = vi.hoisted(() => {
     },
     reset() {
       handlers.clear()
+      this.useEditorOptions = null
       this.markdown = ''
       this.text = ''
-      editor.state.selection = { from: 0, to: 0, empty: true }
+      editor.state.selection = { from: 0, to: 0, head: 0, empty: true }
+      editor.state.doc.forEach.mockReset()
       vi.clearAllMocks()
     },
   }
@@ -69,13 +75,17 @@ const tiptapMock = vi.hoisted(() => {
 
 vi.mock('@tiptap/react', () => ({
   EditorContent: () => <div data-testid="editor-content" />,
-  useEditor: () => tiptapMock.editor,
+  useEditor: (options: unknown) => {
+    tiptapMock.useEditorOptions = options
+    return tiptapMock.editor
+  },
 }))
 
 vi.mock('@tiptap/starter-kit', () => ({ default: { configure: () => ({}) } }))
 vi.mock('@tiptap/extension-character-count', () => ({ CharacterCount: { configure: () => ({}) } }))
 vi.mock('@tiptap/extension-placeholder', () => ({ default: { configure: () => ({}) } }))
 vi.mock('@tiptap/extension-image', () => ({ default: { extend: () => ({ configure: () => ({}) }) } }))
+vi.mock('@tiptap/extension-table', () => ({ TableKit: { configure: vi.fn((options) => ({ name: 'tableKit', options })) } }))
 vi.mock('@tiptap/markdown', () => ({ Markdown: { configure: () => ({}) } }))
 vi.mock('sonner', () => ({ toast: toastMock }))
 
@@ -114,6 +124,66 @@ describe('MarkdownEditor', () => {
     expect(screen.getByText('背景主题')).toBeInTheDocument()
   })
 
+  it('在更新时间右侧实时显示光标所在行号', () => {
+    const onLineChange = vi.fn()
+    tiptapMock.editor.state.doc.forEach.mockImplementation((callback) => {
+      callback({ nodeSize: 3 }, 0)
+      callback({ nodeSize: 3 }, 3)
+      callback({ nodeSize: 3 }, 6)
+    })
+
+    render(
+      <MarkdownEditor
+        fileName="chapters/ch01.md"
+        content="第一行\n\n第二行\n\n第三行"
+        onSave={vi.fn()}
+        onLineChange={onLineChange}
+        chapterSummary={{
+          path: 'chapters/ch01.md',
+          file_name: 'ch01.md',
+          display_title: '第一章',
+          index: 1,
+          words: 10,
+          status: 'draft',
+          confirmed: false,
+          updated_at: '2026-07-11 22:00',
+          volume: '',
+          volume_path: '',
+        }}
+      />,
+    )
+
+    expect(onLineChange).toHaveBeenLastCalledWith(1)
+
+    act(() => {
+      tiptapMock.editor.state.selection = { from: 7, to: 7, head: 7, empty: true }
+      tiptapMock.emit('selectionUpdate')
+    })
+
+    expect(onLineChange).toHaveBeenLastCalledWith(3)
+    expect(document.querySelector('.nova-editor-statusbar')).not.toBeInTheDocument()
+  })
+
+  it('注册 TipTap table 扩展以展示 GFM Markdown 表格', () => {
+    render(
+      <MarkdownEditor
+        fileName="chapters/ch01.md"
+        content={'| 角色 | 状态 |\n| --- | --- |\n| 阿宁 | 待命 |'}
+        onSave={vi.fn()}
+      />,
+    )
+
+    const options = tiptapMock.useEditorOptions as { extensions?: Array<{ name?: string; options?: unknown }> }
+    expect(options.extensions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          name: 'tableKit',
+          options: { table: { resizable: false } },
+        }),
+      ]),
+    )
+  })
+
   it('默认对白高亮跟随编辑器背景主题变化，手动颜色优先', async () => {
     const user = userEvent.setup()
 
@@ -148,7 +218,7 @@ describe('MarkdownEditor', () => {
   it('自动保存进行中继续编辑时串行保存最新内容，避免旧请求晚返回覆盖新内容', async () => {
     vi.useFakeTimers()
     const firstSave = deferred<boolean>()
-    const onSave = vi.fn((content: string) => content === '第一版' ? firstSave.promise : Promise.resolve(true))
+    const onSave = vi.fn((_path: string, content: string) => content === '第一版\n' ? firstSave.promise : Promise.resolve(true))
 
     render(
       <MarkdownEditor
@@ -166,7 +236,7 @@ describe('MarkdownEditor', () => {
     })
 
     expect(onSave).toHaveBeenCalledTimes(1)
-    expect(onSave).toHaveBeenLastCalledWith('第一版\n')
+    expect(onSave).toHaveBeenLastCalledWith('chapters/ch01.md', '第一版\n')
 
     act(() => {
       tiptapMock.markdown = '第二版'
@@ -183,7 +253,92 @@ describe('MarkdownEditor', () => {
     })
 
     expect(onSave).toHaveBeenCalledTimes(2)
-    expect(onSave).toHaveBeenLastCalledWith('第二版\n')
+    expect(onSave).toHaveBeenLastCalledWith('chapters/ch01.md', '第二版\n')
+  })
+
+  it('切换文件时为排队中的自动保存保留各自的目标文件', async () => {
+    vi.useFakeTimers()
+    const firstSave = deferred<boolean>()
+    const saveOutline = vi.fn(() => firstSave.promise)
+    const saveProgress = vi.fn(() => Promise.resolve(true))
+    const { rerender } = render(
+      <MarkdownEditor
+        fileName="setting/outline.md"
+        content="大纲初始内容"
+        onSave={saveOutline}
+        autoSaveDelayMs={1200}
+      />,
+    )
+
+    act(() => {
+      tiptapMock.markdown = '大纲修改后'
+      tiptapMock.emit('update')
+      vi.advanceTimersByTime(1200)
+    })
+
+    expect(saveOutline).toHaveBeenCalledWith('setting/outline.md', '大纲修改后\n')
+
+    rerender(
+      <MarkdownEditor
+        fileName="setting/progress.md"
+        content="进度初始内容"
+        onSave={saveProgress}
+        autoSaveDelayMs={1200}
+      />,
+    )
+
+    act(() => {
+      tiptapMock.markdown = '进度修改后'
+      tiptapMock.emit('update')
+      vi.advanceTimersByTime(1200)
+    })
+
+    expect(saveProgress).not.toHaveBeenCalled()
+
+    await act(async () => {
+      firstSave.resolve(true)
+      await firstSave.promise
+      await Promise.resolve()
+    })
+
+    expect(saveOutline).toHaveBeenCalledTimes(1)
+    expect(saveProgress).toHaveBeenCalledTimes(1)
+    expect(saveProgress).toHaveBeenCalledWith('setting/progress.md', '进度修改后\n')
+  })
+
+  it('自动保存延迟期间切换文件会立即保存旧文件草稿', async () => {
+    vi.useFakeTimers()
+    const onSave = vi.fn(() => Promise.resolve(true))
+    const { rerender } = render(
+      <MarkdownEditor
+        fileName="setting/outline.md"
+        content="大纲初始内容"
+        onSave={onSave}
+        autoSaveDelayMs={1200}
+      />,
+    )
+
+    act(() => {
+      tiptapMock.markdown = '大纲尚未到保存时间'
+      tiptapMock.emit('update')
+      vi.advanceTimersByTime(600)
+    })
+
+    rerender(
+      <MarkdownEditor
+        fileName="setting/progress.md"
+        content="进度初始内容"
+        onSave={onSave}
+        autoSaveDelayMs={1200}
+      />,
+    )
+
+    await act(async () => {
+      await Promise.resolve()
+    })
+
+    expect(onSave).toHaveBeenCalledTimes(1)
+    expect(onSave).toHaveBeenCalledWith('setting/outline.md', '大纲尚未到保存时间\n')
   })
 
   it('用户修改后按配置延迟自动保存，不按周期重复保存', async () => {
@@ -213,7 +368,7 @@ describe('MarkdownEditor', () => {
     })
 
     expect(onSave).toHaveBeenCalledTimes(1)
-    expect(onSave).toHaveBeenLastCalledWith('修改后\n')
+    expect(onSave).toHaveBeenLastCalledWith('chapters/ch01.md', '修改后\n')
 
     await act(async () => {
       vi.advanceTimersByTime(5000)
@@ -242,7 +397,7 @@ describe('MarkdownEditor', () => {
 
     await user.click(screen.getByRole('button', { name: '保存' }))
 
-    expect(onSave).toHaveBeenCalledWith('修改后\n')
+    expect(onSave).toHaveBeenCalledWith('chapters/ch01.md', '修改后\n')
     expect(toastMock.success).not.toHaveBeenCalled()
   })
 
@@ -331,7 +486,7 @@ describe('MarkdownEditor', () => {
   })
 
   it('插入插画 signal 时向 Markdown 文档插入 image node', async () => {
-    tiptapMock.editor.state.selection = { from: 5, to: 5, empty: true }
+    tiptapMock.editor.state.selection = { from: 5, to: 5, head: 5, empty: true }
 
     render(
       <MarkdownEditor

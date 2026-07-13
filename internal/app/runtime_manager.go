@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/cloudwego/eino/adk"
-
 	"denova/config"
 	"denova/internal/agent"
 	"denova/internal/book"
@@ -46,18 +44,6 @@ func (s *WorkspaceRuntimeManager) Workspace() string {
 	return a.workspace
 }
 
-// BookState 返回当前作品状态管理器。
-func (a *App) BookState() *book.State {
-	return a.runtime().BookState()
-}
-
-func (s *WorkspaceRuntimeManager) BookState() *book.State {
-	a := s.app
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.bookState
-}
-
 // BookService 返回当前作品文件服务。
 func (a *App) BookService() *book.Service {
 	return a.runtime().BookService()
@@ -80,18 +66,6 @@ func (s *WorkspaceRuntimeManager) Session() *session.Session {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.session
-}
-
-// Runner 返回当前 Agent Runner。
-func (a *App) Runner() *adk.Runner {
-	return a.runtime().Runner()
-}
-
-func (s *WorkspaceRuntimeManager) Runner() *adk.Runner {
-	a := s.app
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.agentRunner
 }
 
 // ChatService 返回聊天服务。
@@ -124,6 +98,7 @@ func (s *WorkspaceRuntimeManager) SwitchWorkspace(ctx context.Context, path stri
 	if err != nil {
 		return "", err
 	}
+	a.stopWorkspaceDirectorTasks()
 
 	a.mu.Lock()
 	a.applyRuntime(runtime)
@@ -236,6 +211,7 @@ func (s *WorkspaceRuntimeManager) activateFallbackWorkspace(ctx context.Context)
 		}
 		log.Printf("[books] 切换删除后的备用书籍失败 path=%s err=%v", record.Path, err)
 	}
+	a.stopWorkspaceDirectorTasks()
 	a.mu.Lock()
 	a.clearRuntime()
 	a.mu.Unlock()
@@ -531,6 +507,9 @@ func (s *WorkspaceRuntimeManager) UpdateWorkspaceSettings(settings config.Settin
 		return config.LayeredSettings{}, fmt.Errorf("当前没有打开的工作区")
 	}
 	settings.LLMInputLogEnabled = nil
+	settings.TraceCaptureLevel = ""
+	settings.TraceExporter = ""
+	settings.TraceRetentionRuns = nil
 	path := config.WorkspaceConfigPath(workspace)
 	if err := config.WriteSettingsFileIfRevision(path, settings, baseRevision); err != nil {
 		return config.LayeredSettings{}, err
@@ -631,6 +610,15 @@ func applyLayeredSettingsToConfig(cfg *config.Config, layered config.LayeredSett
 	if effective.LLMInputLogEnabled != nil {
 		cfg.LLMInputLogEnabled = *effective.LLMInputLogEnabled
 	}
+	if effective.TraceCaptureLevel != "" {
+		cfg.TraceCaptureLevel = effective.TraceCaptureLevel
+	}
+	if effective.TraceExporter != "" {
+		cfg.TraceExporter = effective.TraceExporter
+	}
+	if effective.TraceRetentionRuns != nil {
+		cfg.TraceRetentionRuns = appSettingsInt(effective.TraceRetentionRuns, config.DefaultTraceRetentionRuns)
+	}
 	if effective.ChapterFilenameFormat != "" {
 		cfg.ChapterFilenameFormat = effective.ChapterFilenameFormat
 	}
@@ -645,9 +633,6 @@ func applyLayeredSettingsToConfig(cfg *config.Config, layered config.LayeredSett
 	}
 	if effective.ChapterGroupMax != nil {
 		cfg.ChapterGroupMax = appSettingsInt(effective.ChapterGroupMax, 8)
-	}
-	if effective.InteractiveHotChoices != nil {
-		cfg.InteractiveHotChoices = *effective.InteractiveHotChoices
 	}
 	if effective.VersionTimedEnabled != nil {
 		cfg.VersionTimedEnabled = *effective.VersionTimedEnabled
@@ -737,6 +722,15 @@ func applySettingsLayerToConfig(cfg *config.Config, settings config.Settings) {
 	if settings.LLMInputLogEnabled != nil {
 		cfg.LLMInputLogEnabled = *settings.LLMInputLogEnabled
 	}
+	if settings.TraceCaptureLevel != "" {
+		cfg.TraceCaptureLevel = settings.TraceCaptureLevel
+	}
+	if settings.TraceExporter != "" {
+		cfg.TraceExporter = settings.TraceExporter
+	}
+	if settings.TraceRetentionRuns != nil {
+		cfg.TraceRetentionRuns = appSettingsInt(settings.TraceRetentionRuns, config.DefaultTraceRetentionRuns)
+	}
 	if settings.ChapterFilenameFormat != "" {
 		cfg.ChapterFilenameFormat = settings.ChapterFilenameFormat
 	}
@@ -751,9 +745,6 @@ func applySettingsLayerToConfig(cfg *config.Config, settings config.Settings) {
 	}
 	if settings.ChapterGroupMax != nil {
 		cfg.ChapterGroupMax = appSettingsInt(settings.ChapterGroupMax, 8)
-	}
-	if settings.InteractiveHotChoices != nil {
-		cfg.InteractiveHotChoices = *settings.InteractiveHotChoices
 	}
 	if settings.VersionTimedEnabled != nil {
 		cfg.VersionTimedEnabled = *settings.VersionTimedEnabled
@@ -775,6 +766,7 @@ func syncRuntimeDiagnostics(cfg *config.Config) {
 		return
 	}
 	agent.SetModelInputLoggingEnabled(cfg.DevMode && cfg.LLMInputLogEnabled)
+	agent.SetTraceRuntimeConfig(cfg.TraceCaptureLevel, cfg.TraceExporter, cfg.TraceRetentionRuns)
 }
 
 func (s *WorkspaceRuntimeManager) versionService() *book.VersionService {

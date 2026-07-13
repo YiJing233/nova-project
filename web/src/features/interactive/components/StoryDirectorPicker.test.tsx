@@ -47,10 +47,8 @@ function storyDirector(id: string, name: string): StoryDirector {
     name,
     description: '',
     strategy: { enabled: true },
-    stat_system: {},
     trpg_system: {},
     opening_selector: { enabled: true },
-    tags: [],
     custom: false,
   }
 }

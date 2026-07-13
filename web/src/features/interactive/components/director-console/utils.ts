@@ -10,7 +10,7 @@ export function extractDirectorDisplayEvents(snapshot: Snapshot | null, status?:
   return events.filter(isDirectorDisplayEvent)
 }
 
-function isDirectorDisplayEvent(event: TurnDisplayEvent) {
+export function isDirectorDisplayEvent(event: TurnDisplayEvent) {
   if (event.agent_kind === 'interactive_director') return true
   const name = event.name || event.content || ''
   if (!['read_file', 'write_file', 'edit_file'].includes(name)) return false
@@ -98,21 +98,6 @@ export function ruleOutcomeClass(outcome: string) {
 export function stateEntries(state?: Record<string, unknown>) {
   if (!state) return []
   return Object.entries(state).filter(([, value]) => value !== undefined && value !== null)
-}
-
-export function stateValuePreview(entry: [string, unknown]) {
-  const [key, value] = entry
-  if (typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean') return `${key}: ${String(value)}`
-  return `${key}: ${safeJSONString(value, 160)}`
-}
-
-export function safeJSONString(value: unknown, limit = 1200) {
-  try {
-    const text = JSON.stringify(value, null, 2)
-    return text.length > limit ? `${text.slice(0, limit)}...` : text
-  } catch {
-    return String(value)
-  }
 }
 
 export function readNumber(value: unknown) {

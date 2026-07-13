@@ -5,16 +5,17 @@ import { useTranslation } from 'react-i18next'
 import { fetchSettings, updateWorkspaceSettings } from '@/features/settings/api'
 import type { ImagePreset, Teller } from '@/features/interactive/types'
 import { removeChatContextCompaction } from '@/lib/api'
-import type { ChapterIllustration, ChapterSummary, ChatMessage, ContextAnalysis, IDEContext, SessionSummary, TextSelection } from '@/lib/api'
+import type { ChapterIllustration, ChapterSummary, ContextAnalysis, IDEContext, SessionSummary, TextSelection } from '@/lib/api'
+import type { AgentUIMessage } from '@/lib/agent-ui'
+import { agentSubAgentSessionKey, agentViewContent, selectAgentTokenUsageRecords, type AgentMessageView, type AgentPartRef } from '@/lib/agent-message-view'
 import { useSkillCommands } from '@/hooks/useSkillCommands'
 import { BUILTIN_WRITING_SKILLS, DEFAULT_WRITING_SKILL, useWritingSkillOptions, type WritingSkillOption } from '@/hooks/useWritingSkillOptions'
 import { MessageList } from './MessageList'
 import { InputArea } from './InputArea'
 import { SessionManagementPanel } from './SessionManagementPanel'
 import { AgentTracePanel } from './AgentTracePanel'
-import { SubAgentSessionPanel } from './SubAgentSessionPanel'
+import { AgentSubAgentSessionPanel } from './AgentSubAgentSessionPanel'
 import { CONTEXT_ANALYSIS_SIMULATED_MESSAGE, ContextAnalysisDialog } from './ContextAnalysisDialog'
-import { subAgentSessionKey } from './subagent-session'
 import type { ReferencePickerItem } from './FileReferencePicker'
 import {
   DropdownMenuItem,
@@ -35,7 +36,7 @@ interface AgentPanelProps {
   selectedFile: string | null
   tellers: Teller[]
   imagePresets?: ImagePreset[]
-  messages: ChatMessage[]
+  messages: AgentUIMessage[]
   sessions: SessionSummary[]
   activeSessionId: string
   isStreaming: boolean
@@ -65,8 +66,8 @@ interface AgentPanelProps {
   onInsertIllustration?: (illustration: ChapterIllustration) => void
   onPlanModeChange: (value: boolean) => void
   onPlanModeToggle: () => void
-  onSubmitPlanQuestion: (message: ChatMessage, content: string, preview: string) => void
-  onApproveProposedPlan: (message: ChatMessage) => void
+  onSubmitPlanQuestion: (ref: AgentPartRef, content: string, preview: string) => void
+  onApproveProposedPlan: (ref: AgentPartRef) => void
   onExitPlanMode: () => void
   onClose: () => void
   onSubAgentDetailsChange?: (open: boolean) => void
@@ -123,6 +124,7 @@ export function AgentPanel({
   const [contextAnalysisError, setContextAnalysisError] = useState<string | null>(null)
   const [contextAnalysis, setContextAnalysis] = useState<ContextAnalysis | null>(null)
   const [activeSubAgentSessionKey, setActiveSubAgentSessionKey] = useState('')
+  const [selectedTraceRunId, setSelectedTraceRunId] = useState('')
   const [inputAreaHeight, setInputAreaHeight] = useState(0)
   const [ideTellerId, setIdeTellerId] = useState('classic')
   const [imagePresetId, setImagePresetId] = useState('game-cg')
@@ -130,7 +132,7 @@ export function AgentPanel({
   const skillCommands = useSkillCommands({ agentKey: 'ide', workspace, fallbackEnabled: true })
   const writingSkillOptions = useWritingSkillOptions(workspace)
   const tokenUsageMessages = useMemo(
-    () => messages.filter((message) => message.role === 'token_usage'),
+    () => selectAgentTokenUsageRecords(messages),
     [messages],
   )
   const messageListBottomPadding = inputAreaHeight > 0 ? inputAreaHeight + 20 : undefined
@@ -215,16 +217,22 @@ export function AgentPanel({
     void handleAnalyzeContext(CONTEXT_ANALYSIS_SIMULATED_MESSAGE)
   }
 
-  const openSubAgentSession = (message: ChatMessage) => {
-    const key = subAgentSessionKey(message)
+  const openSubAgentSession = (message: AgentMessageView) => {
+    const key = agentSubAgentSessionKey(message)
     if (key) setActiveSubAgentSessionKey(key)
   }
 
-  const continuePlanDiscussion = (message: ChatMessage) => {
+  const openTraceRun = (runID: string) => {
+    if (!runID) return
+    setSelectedTraceRunId(runID)
+    setView('traces')
+  }
+
+  const continuePlanDiscussion = (message: AgentMessageView) => {
     setView('chat')
     onPlanModeChange(true)
     setInputPrefill((current) => ({
-      prompt: formatPlanDiscussionMessage(message.content || ''),
+      prompt: formatPlanDiscussionMessage(agentViewContent(message)),
       nonce: (current?.nonce || 0) + 1,
     }))
   }
@@ -310,6 +318,7 @@ export function AgentPanel({
                 scrollResetKey={`${workspace || 'none'}:${activeSessionId || 'current'}`}
                 bottomPaddingClassName="pb-36"
                 bottomPaddingPx={messageListBottomPadding}
+                collapseTraceBeforeAssistant
                 onOpenSubAgentSession={openSubAgentSession}
                 onInsertIllustration={onInsertIllustration}
                 activeSubAgentSessionKey={activeSubAgentSessionKey}
@@ -317,6 +326,7 @@ export function AgentPanel({
                 onApprovePlan={onApproveProposedPlan}
                 onContinuePlan={continuePlanDiscussion}
                 onExitPlanMode={onExitPlanMode}
+                onOpenTrace={openTraceRun}
               />
               <InputArea
                 onSend={sendWithWritingSkill}
@@ -344,6 +354,7 @@ export function AgentPanel({
                 skills={skillCommands}
                 onContextAnalyze={openContextAnalysis}
                 tokenUsageMessages={tokenUsageMessages}
+                onOpenTrace={openTraceRun}
                 agentKey="ide"
                 workspace={workspace}
                 writingSkillControl={(
@@ -382,6 +393,7 @@ export function AgentPanel({
                         scrollResetKey={`${workspace || 'none'}:${activeSessionId || 'current'}`}
                         bottomPaddingClassName="pb-36"
                         bottomPaddingPx={messageListBottomPadding}
+                        collapseTraceBeforeAssistant
                         onOpenSubAgentSession={openSubAgentSession}
                         onInsertIllustration={onInsertIllustration}
                         activeSubAgentSessionKey={activeSubAgentSessionKey}
@@ -389,6 +401,7 @@ export function AgentPanel({
                         onApprovePlan={onApproveProposedPlan}
                         onContinuePlan={continuePlanDiscussion}
                         onExitPlanMode={onExitPlanMode}
+                        onOpenTrace={openTraceRun}
                       />
                       <InputArea
                         onSend={sendWithWritingSkill}
@@ -416,6 +429,7 @@ export function AgentPanel({
                         skills={skillCommands}
                         onContextAnalyze={openContextAnalysis}
                         tokenUsageMessages={tokenUsageMessages}
+                        onOpenTrace={openTraceRun}
                         agentKey="ide"
                         workspace={workspace}
                         writingSkillControl={(
@@ -433,7 +447,7 @@ export function AgentPanel({
                   </Panel>
                   <SubAgentDetailsResizeHandle label={t('chat.subagent.resizeSession')} />
                   <Panel id="subagent-details" defaultSize="48%" minSize="300px" maxSize="68%" className="min-w-[300px]">
-                    <SubAgentSessionPanel
+                    <AgentSubAgentSessionPanel
                       messages={messages}
                       sessionKey={activeSubAgentSessionKey}
                       onClose={() => setActiveSubAgentSessionKey('')}
@@ -441,7 +455,7 @@ export function AgentPanel({
                   </Panel>
                 </Group>
                 <div className="absolute inset-0 z-30 lg:hidden">
-                  <SubAgentSessionPanel
+                  <AgentSubAgentSessionPanel
                     messages={messages}
                     sessionKey={activeSubAgentSessionKey}
                     onClose={() => setActiveSubAgentSessionKey('')}
@@ -471,7 +485,7 @@ export function AgentPanel({
           onEnterChat={() => setView('chat')}
         />
       ) : (
-        <AgentTracePanel disabled={isStreaming} />
+        <AgentTracePanel disabled={isStreaming} selectedRunId={selectedTraceRunId} />
       )}
     </aside>
   )
@@ -588,7 +602,7 @@ function ImagePresetSelector({ workspace, value, presets, onValueChange }: { wor
 
   const normalizedPresets = useMemo(() => {
     if (presets.some((preset) => preset.id === value)) return presets
-    return [{ id: value || 'game-cg', name: value || 'game-cg', description: '', prompt: '', tags: [], custom: true, version: 1 }, ...presets]
+    return [{ id: value || 'game-cg', name: value || 'game-cg', description: '', prompt: '', custom: true, version: 1 }, ...presets]
   }, [presets, value])
   const selected = normalizedPresets.find((preset) => preset.id === value) || normalizedPresets.find((preset) => preset.id === 'game-cg') || normalizedPresets[0]
 

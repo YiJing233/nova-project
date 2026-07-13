@@ -48,11 +48,13 @@ export interface Settings {
   agent_idle_timeout_seconds?: number | null
   agent_tool_result_limit_kb?: number | null
   llm_input_log_enabled?: boolean | null
+  trace_capture_level?: string
+  trace_exporter?: string
+  trace_retention_runs?: number | null
   plan_mode_default?: boolean | null
   ide_story_teller_id?: string
   ide_image_preset_id?: string
   writing_skill_default?: string
-  interactive_hot_choices_enabled?: boolean | null
   interactive_stage_font_size?: number | null
   interactive_stage_line_height?: number | null
 }
@@ -86,7 +88,6 @@ export interface AgentModelSettings {
   image?: AgentModelOverride
   config_manager?: AgentModelOverride
   interactive_director?: AgentModelOverride
-  interactive_hot_choices?: AgentModelOverride
   version_summary?: AgentModelOverride
   tool_agent?: AgentModelOverride
   automation?: AgentModelOverride
@@ -107,7 +108,6 @@ export interface AgentToolSettings {
   image?: AgentToolOverride
   config_manager?: AgentToolOverride
   interactive_director?: AgentToolOverride
-  interactive_hot_choices?: AgentToolOverride
   version_summary?: AgentToolOverride
   tool_agent?: AgentToolOverride
   automation?: AgentToolOverride
@@ -121,7 +121,6 @@ export interface AgentSkillSettings {
   image?: AgentSkillOverride
   config_manager?: AgentSkillOverride
   interactive_director?: AgentSkillOverride
-  interactive_hot_choices?: AgentSkillOverride
   version_summary?: AgentSkillOverride
   tool_agent?: AgentSkillOverride
   automation?: AgentSkillOverride
@@ -130,14 +129,13 @@ export interface AgentSkillSettings {
 
 export type AgentSkillOverride = Record<string, boolean>
 
-export interface AgentContextSettings {
+interface AgentContextSettings {
   default?: AgentContextOverride
   ide?: AgentContextOverride
   interactive_story?: AgentContextOverride
   image?: AgentContextOverride
   config_manager?: AgentContextOverride
   interactive_director?: AgentContextOverride
-  interactive_hot_choices?: AgentContextOverride
   version_summary?: AgentContextOverride
   tool_agent?: AgentContextOverride
   automation?: AgentContextOverride
@@ -157,7 +155,7 @@ export interface AgentContextOverride {
   tool_result_preview_chars?: number | null
 }
 
-export interface AgentGeneralSubAgentSettings {
+interface AgentGeneralSubAgentSettings {
   default?: boolean | null
   ide?: boolean | null
   interactive_story?: boolean | null
@@ -190,14 +188,13 @@ export interface SubAgentConfig {
   tools?: AgentToolOverride
 }
 
-export interface AgentPromptSettings {
+interface AgentPromptSettings {
   default?: AgentPromptOverride
   ide?: AgentPromptOverride
   interactive_story?: AgentPromptOverride
   image?: AgentPromptOverride
   config_manager?: AgentPromptOverride
   interactive_director?: AgentPromptOverride
-  interactive_hot_choices?: AgentPromptOverride
   version_summary?: AgentPromptOverride
   tool_agent?: AgentPromptOverride
   automation?: AgentPromptOverride
@@ -218,18 +215,17 @@ export interface AgentPromptSource {
   field?: 'flow_prompt' | 'system_prompt'
 }
 
-export interface AgentPromptSourceList {
+interface AgentPromptSourceList {
   sources?: AgentPromptSource[]
 }
 
-export interface AgentPromptSourceSettings {
+interface AgentPromptSourceSettings {
   default?: AgentPromptSourceList
   ide?: AgentPromptSourceList
   interactive_story?: AgentPromptSourceList
   image?: AgentPromptSourceList
   config_manager?: AgentPromptSourceList
   interactive_director?: AgentPromptSourceList
-  interactive_hot_choices?: AgentPromptSourceList
   version_summary?: AgentPromptSourceList
   tool_agent?: AgentPromptSourceList
   automation?: AgentPromptSourceList
@@ -242,38 +238,37 @@ export interface AgentPromptBlocks {
   editable_system_prompt?: string
 }
 
-export interface AgentPromptBlockSettings {
+interface AgentPromptBlockSettings {
   default?: AgentPromptBlocks
   ide?: AgentPromptBlocks
   interactive_story?: AgentPromptBlocks
   image?: AgentPromptBlocks
   config_manager?: AgentPromptBlocks
   interactive_director?: AgentPromptBlocks
-  interactive_hot_choices?: AgentPromptBlocks
   version_summary?: AgentPromptBlocks
   tool_agent?: AgentPromptBlocks
   automation?: AgentPromptBlocks
   context_compaction?: AgentPromptBlocks
 }
 
-export interface SettingsPaths {
+interface SettingsPaths {
   denova_dir: string
   nova_dir: string
   user_config: string
   workspace_config: string
 }
 
-export interface SettingsAccess {
+interface SettingsAccess {
   local_url: string
   lan_url: string
 }
 
-export interface SettingsRuntime {
+interface SettingsRuntime {
   goos: string
   dev_mode?: boolean
 }
 
-export interface SettingsRevisions {
+interface SettingsRevisions {
   user?: string
   workspace?: string
 }
@@ -295,7 +290,7 @@ export interface LayeredSettings {
 
 export type SettingsLayer = 'user' | 'workspace'
 
-export interface UpdateAsset {
+interface UpdateAsset {
   name: string
   size: number
   download_url: string

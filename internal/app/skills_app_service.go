@@ -28,10 +28,6 @@ func (a *App) CreateSkillDocument(ctx context.Context, scope novaskills.Scope, n
 	return a.skills().Create(ctx, scope, name, description, agents)
 }
 
-func (a *App) SaveSkillDocument(ctx context.Context, scope novaskills.Scope, name, content string) (novaskills.Document, error) {
-	return a.skills().Save(ctx, scope, name, content)
-}
-
 func (a *App) SaveSkillFileDocument(ctx context.Context, scope novaskills.Scope, name, path, content string) (novaskills.FileDocument, error) {
 	return a.skills().SaveFile(ctx, scope, name, path, content)
 }
@@ -50,6 +46,14 @@ func (a *App) PreviewSkillZip(ctx context.Context, scope novaskills.Scope, data 
 
 func (a *App) InstallSkillZip(ctx context.Context, scope novaskills.Scope, data []byte, candidateIDs []string) (novaskills.InstallResult, error) {
 	return a.skills().InstallZip(ctx, scope, data, candidateIDs)
+}
+
+func (a *App) PreviewSkillRemoteArchive(ctx context.Context, scope novaskills.Scope, source novaskills.RemoteArchiveSource) (novaskills.InstallPreview, error) {
+	return a.skills().PreviewRemoteArchive(ctx, scope, source)
+}
+
+func (a *App) InstallSkillRemoteArchive(ctx context.Context, scope novaskills.Scope, source novaskills.RemoteArchiveSource, candidateIDs []string) (novaskills.InstallResult, error) {
+	return a.skills().InstallRemoteArchive(ctx, scope, source, candidateIDs)
 }
 
 func (a *App) PreviewSkillGitHub(ctx context.Context, scope novaskills.Scope, source novaskills.GitHubSource) (novaskills.InstallPreview, error) {
@@ -78,15 +82,6 @@ func (s *SkillsAppService) Create(ctx context.Context, scope novaskills.Scope, n
 		return novaskills.Document{}, err
 	}
 	log.Printf("[skills] Skill created scope=%s name=%s path=%s", scope, name, doc.Path)
-	return doc, nil
-}
-
-func (s *SkillsAppService) Save(ctx context.Context, scope novaskills.Scope, name, content string) (novaskills.Document, error) {
-	doc, err := novaskills.SaveDocument(ctx, s.directories(), scope, name, content)
-	if err != nil {
-		return novaskills.Document{}, err
-	}
-	log.Printf("[skills] Skill saved scope=%s name=%s path=%s", scope, name, doc.Path)
 	return doc, nil
 }
 
@@ -126,6 +121,19 @@ func (s *SkillsAppService) InstallZip(ctx context.Context, scope novaskills.Scop
 		return novaskills.InstallResult{}, err
 	}
 	log.Printf("[skills] Skills installed from zip scope=%s count=%d", scope, len(result.Installed))
+	return result, nil
+}
+
+func (s *SkillsAppService) PreviewRemoteArchive(ctx context.Context, scope novaskills.Scope, source novaskills.RemoteArchiveSource) (novaskills.InstallPreview, error) {
+	return novaskills.PreviewRemoteArchive(ctx, s.directories(), scope, source)
+}
+
+func (s *SkillsAppService) InstallRemoteArchive(ctx context.Context, scope novaskills.Scope, source novaskills.RemoteArchiveSource, candidateIDs []string) (novaskills.InstallResult, error) {
+	result, err := novaskills.InstallRemoteArchive(ctx, s.directories(), scope, source, candidateIDs)
+	if err != nil {
+		return novaskills.InstallResult{}, err
+	}
+	log.Printf("[skills] Skills installed from remote archive scope=%s count=%d", scope, len(result.Installed))
 	return result, nil
 }
 

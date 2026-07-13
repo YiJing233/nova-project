@@ -15,13 +15,6 @@ func TestInteractivePromptsSkipLegacyCharacterAndWorldFallback(t *testing.T) {
 			ReplyTargetChars: 800,
 			LongTermMemory:   "林川仍在黄泉酒馆。",
 		}),
-		"hot choices": InteractiveHotChoicesInstruction(InteractiveHotChoicesPromptInput{
-			Title:         "末日开端",
-			Origin:        "主角醒来发现世界已末日",
-			StoryTellerID: "classic",
-			BranchID:      "main",
-			TurnHistory:   "第 1 回合剧情：门后传来低沉的风声。",
-		}),
 		"director maintenance": InteractiveDirectorInstruction(InteractiveDirectorPromptInput{
 			Title:             "末日开端",
 			Origin:            "主角醒来发现世界已末日",
@@ -43,11 +36,20 @@ func TestInteractivePromptsSkipLegacyCharacterAndWorldFallback(t *testing.T) {
 	}
 }
 
+func TestInteractiveStateSchemaAdapterSystemInstructionCoversSemanticAdaptation(t *testing.T) {
+	system := BuildInteractiveStateSchemaAdapterSystemInstruction()
+	for _, want := range []string{"最小但充分", "好感", "境界", "TRPG", "生命", "合法成年", "不得只按题材关键词", "protagonist", "story_context", "template_ops", "只输出一个 JSON object"} {
+		if !strings.Contains(system, want) {
+			t.Fatalf("state schema adapter prompt missing %q:\n%s", want, system)
+		}
+	}
+}
+
 func TestInteractiveStoryPromptUsesDirectNarrativeOutputContract(t *testing.T) {
 	system := BuildInteractiveStorySystemInstruction(InteractiveStorySystemInstructionInput{
 		ReplyTargetChars: 600,
 	})
-	turn := InteractiveStoryTurnInstruction("我推开门", "", 0, "")
+	turn := InteractiveStoryTurnInstruction("我推开门", "", "")
 	for name, output := range map[string]string{
 		"system": system,
 		"turn":   turn,
@@ -63,7 +65,7 @@ func TestInteractiveStoryPromptUsesDirectNarrativeOutputContract(t *testing.T) {
 			t.Fatalf("system prompt should include DM-style check rule %q:\n%s", want, system)
 		}
 	}
-	for _, want := range []string{"very_easy/easy/normal/hard/very_hard", "rule 可省略", "dice_check", "1d20"} {
+	for _, want := range []string{"very_easy/easy/normal/hard/very_hard", "rule 可省略", "dice_check", "固定 d20", "difficulty_guidance", "state_effect_guidance", "state_bindings", "binding_id"} {
 		if !strings.Contains(system, want) {
 			t.Fatalf("system prompt should include prepare_interactive_turn enum protocol %q:\n%s", want, system)
 		}
@@ -73,7 +75,7 @@ func TestInteractiveStoryPromptUsesDirectNarrativeOutputContract(t *testing.T) {
 			t.Fatalf("turn prompt should include DM-style check rule %q:\n%s", want, turn)
 		}
 	}
-	for _, want := range []string{"very_easy/easy/normal/hard/very_hard", "不要使用 medium 或 moderate"} {
+	for _, want := range []string{"very_easy/easy/normal/hard/very_hard", "不要使用 medium 或 moderate", "difficulty_guidance", "state_effect_guidance", "固定 d20", "state_bindings"} {
 		if !strings.Contains(turn, want) {
 			t.Fatalf("turn prompt should include prepare_interactive_turn enum protocol %q:\n%s", want, turn)
 		}
@@ -84,6 +86,42 @@ func TestInteractiveStoryPromptUsesDirectNarrativeOutputContract(t *testing.T) {
 	for _, forbidden := range []string{"优先引用对应事件卡", "type_name/name"} {
 		if strings.Contains(system, forbidden) {
 			t.Fatalf("system prompt should not ask prose agent to trigger raw event cards %q:\n%s", forbidden, system)
+		}
+	}
+}
+
+func TestInteractiveDirectorPromptReadsCustomActorStateWithoutWritingIt(t *testing.T) {
+	system := BuildInteractiveDirectorSystemInstruction()
+	instruction := InteractiveDirectorInstruction(InteractiveDirectorPromptInput{
+		Title:             "百日终末",
+		Origin:            "世界将在一百天后毁灭",
+		StoryTellerID:     "classic",
+		BranchID:          "main",
+		StoryMemorySchema: "## important_character",
+		ActorStateSchema:  "templates: world_state, heroine_route",
+		TurnHistory:       "第 1 回合剧情：钟声提前响起。",
+		TurnAuditJSON:     `{"narrative":"钟声提前响起。"}`,
+	})
+	combined := system + "\n" + instruction
+	for _, want := range []string{
+		"world_state",
+		"heroine_route",
+		"只能读取已提交的 Actor State",
+		"不得写入它们",
+	} {
+		if !strings.Contains(combined, want) {
+			t.Fatalf("director prompt should describe customizable state tables %q:\n%s", want, combined)
+		}
+	}
+	for _, forbidden := range []string{
+		"主角用 protagonist",
+		"重要人物用 important_character",
+		"敌人/怪物/规则实体用 opponent",
+		"唯一合法分类",
+		"apply_actor_state_patch",
+	} {
+		if strings.Contains(combined, forbidden) {
+			t.Fatalf("director prompt should not hard-code fixed actor-state categories %q:\n%s", forbidden, combined)
 		}
 	}
 }
@@ -115,6 +153,7 @@ func TestInteractiveStoryRuntimeContextIncludesBoundedDirectorPlanVisibleSection
 	output := InteractiveStoryRuntimeContext(InteractiveStoryPromptInput{
 		ReplyTargetChars:            800,
 		DirectorPlanVisible:         "## 正文Agent可读\n\n### 阶段钩子与阅读欲望\n外门逆袭\n\n### 信息揭示与线索密度\n学院比拼压力",
+		ActorState:                  `{"source":{"path":"Snapshot.State.actors"},"actors":{"protagonist":{"traits":[{"name":"隐脉"}]}}}`,
 		StoryDirectorStrategyPrompt: "- 避免连续两回合使用同类型突发事件。",
 	})
 	for _, want := range []string{"后台导演规划可读区", "source: director.md visible section", "bounded", "外门逆袭", "学院比拼压力"} {
@@ -125,6 +164,11 @@ func TestInteractiveStoryRuntimeContextIncludesBoundedDirectorPlanVisibleSection
 	for _, want := range []string{"故事导演 Markdown 策略提示", "source: StoryDirector.strategy.prompt_markdown", "bounded", "结构化导演策略", "避免连续两回合"} {
 		if !strings.Contains(output, want) {
 			t.Fatalf("runtime context should include strategy prompt %q:\n%s", want, output)
+		}
+	}
+	for _, want := range []string{"当前 Actor 状态与词条", "source: Snapshot.State.actors", "bounded", "隐脉"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("runtime context should include Actor state %q:\n%s", want, output)
 		}
 	}
 }

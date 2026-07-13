@@ -1,10 +1,12 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { deleteLoreItem, generateLoreItemImage, getLoreItems, streamLoreImagesGenerate, updateLoreItem, type LoreItem } from '@/lib/api'
-import { createActorState, createImagePreset, createInteractiveTeller, createStoryDirector, createStoryMemoryStructure, deleteActorState, deleteImagePreset, deleteInteractiveTeller, deleteStoryDirector, deleteStoryMemoryStructurePreset, getActorStates, getEventPackages, getImagePresets, getInteractiveTellers, getOpeningSelectors, getRuleSystems, getStoryDirectors, getStoryMemoryStructures, getStyleReferences, updateActorState, updateEventPackage, updateImagePreset, updateInteractiveTeller, updateOpeningSelector, updateRuleSystem, updateStoryDirector, updateStoryMemoryStructure } from '../api'
-import type { EventPackageModule, ImagePreset, OpeningSelectorModule, RuleSystemModule, StoryDirector, StoryMemoryStructureModule, Teller } from '../types'
+import { createActorState, createImagePreset, createInteractiveTeller, createStoryDirector, createStoryMemoryStructure, deleteActorState, deleteImagePreset, deleteInteractiveTeller, deleteStoryDirector, deleteStoryMemoryStructurePreset, getActorStates, getEventPackages, getImagePresets, getInteractiveTellers, getRuleSystems, getStoryDirectors, getStoryMemoryStructures, getStyleReferences, updateActorState, updateEventPackage, updateImagePreset, updateInteractiveTeller, updateRuleSystem, updateStoryDirector, updateStoryMemoryStructure } from '../api'
+import type { EventPackageModule, ImagePreset, RuleSystemModule, StoryDirector, StoryMemoryStructureModule, Teller } from '../types'
+import { defaultRuleTemplates } from './preset-config/ruleTemplates'
+import { newRuleSystemDraft } from './setting-panel/presetResources'
 import { SettingPanel } from './SettingPanel'
 
 const { configManagerChatProps, monacoEditorActions } = vi.hoisted(() => ({
@@ -97,7 +99,6 @@ vi.mock('../api', () => ({
   createEventPackage: vi.fn(),
   createImagePreset: vi.fn(),
   createInteractiveTeller: vi.fn(),
-  createOpeningSelector: vi.fn(),
   createRuleSystem: vi.fn(),
   createStoryDirector: vi.fn(),
   createStoryMemoryStructure: vi.fn(),
@@ -105,7 +106,6 @@ vi.mock('../api', () => ({
   deleteEventPackage: vi.fn(),
   deleteImagePreset: vi.fn(),
   deleteInteractiveTeller: vi.fn(),
-  deleteOpeningSelector: vi.fn(),
   deleteRuleSystem: vi.fn(),
   deleteStoryDirector: vi.fn(),
   deleteStoryMemoryStructurePreset: vi.fn(),
@@ -113,7 +113,6 @@ vi.mock('../api', () => ({
   getEventPackages: vi.fn(),
   getImagePresets: vi.fn(),
   getInteractiveTellers: vi.fn(),
-  getOpeningSelectors: vi.fn(),
   getRuleSystems: vi.fn(),
   getStoryDirectors: vi.fn(),
   getStoryMemoryStructures: vi.fn(),
@@ -123,7 +122,6 @@ vi.mock('../api', () => ({
   updateImagePreset: vi.fn(),
   updateInteractiveTeller: vi.fn(),
   updateActorState: vi.fn(),
-  updateOpeningSelector: vi.fn(),
   updateRuleSystem: vi.fn(),
   updateStoryDirector: vi.fn(),
   updateStoryMemoryStructure: vi.fn(),
@@ -161,8 +159,6 @@ describe('SettingPanel', () => {
     vi.mocked(updateEventPackage).mockReset()
     vi.mocked(getRuleSystems).mockReset()
     vi.mocked(updateRuleSystem).mockReset()
-    vi.mocked(getOpeningSelectors).mockReset()
-    vi.mocked(updateOpeningSelector).mockReset()
     vi.mocked(getStyleReferences).mockReset()
     vi.mocked(updateImagePreset).mockReset()
     vi.mocked(deleteImagePreset).mockReset()
@@ -185,10 +181,12 @@ describe('SettingPanel', () => {
     vi.mocked(deleteImagePreset).mockResolvedValue(undefined)
     vi.mocked(getEventPackages).mockResolvedValue([eventPackage('default', '默认事件包')])
     vi.mocked(updateEventPackage).mockImplementation(async (id, input) => ({ ...eventPackage(id, input.name || id), ...input, id, custom: id !== 'default', builtin_overridden: id === 'default', updated_at: '2026-01-01T00:00:01Z' }) as EventPackageModule)
-    vi.mocked(getRuleSystems).mockResolvedValue([ruleSystem('default-rules', '默认数值规则')])
-    vi.mocked(updateRuleSystem).mockImplementation(async (id, input) => ({ ...ruleSystem(id, input.name || id), ...input, id, custom: id !== 'default-rules', builtin_overridden: id === 'default-rules', updated_at: '2026-01-01T00:00:01Z' }) as RuleSystemModule)
-    vi.mocked(getOpeningSelectors).mockResolvedValue([openingSelector('default-opening', '默认开局选择')])
-    vi.mocked(updateOpeningSelector).mockImplementation(async (id, input) => ({ ...openingSelector(id, input.name || id), ...input, id, custom: id !== 'default-opening', builtin_overridden: id === 'default-opening', updated_at: '2026-01-01T00:00:01Z' }) as OpeningSelectorModule)
+    vi.mocked(getRuleSystems).mockResolvedValue([
+      ruleSystem('default', '均衡 DM 检定'),
+      ruleSystem('dm-fail-forward', '推进型 DM：失败也前进'),
+      ruleSystem('dm-osr-player-skill', 'OSR 型 DM：玩家技巧优先'),
+    ])
+    vi.mocked(updateRuleSystem).mockImplementation(async (id, input) => ({ ...ruleSystem(id, input.name || id), ...input, id, custom: !isBuiltinRuleSystemID(id), builtin_overridden: isBuiltinRuleSystemID(id), updated_at: '2026-01-01T00:00:01Z' }) as RuleSystemModule)
     vi.mocked(getStyleReferences).mockResolvedValue([])
   })
 
@@ -229,8 +227,81 @@ describe('SettingPanel', () => {
         custom: false,
       }),
       '',
+      '/workspace',
     )
     expect(createInteractiveTeller).not.toHaveBeenCalled()
+  })
+
+  it('flushes a pending preset autosave before switching resource types', async () => {
+    const user = userEvent.setup()
+    render(<PresetPanelHarness />)
+
+    await user.click(screen.getByRole('button', { name: /经典叙事/ }))
+    fireEvent.change(screen.getByDisplayValue('经典叙事'), { target: { value: '切换前自动保存' } })
+    await user.click(screen.getByRole('button', { name: '图像方案' }))
+    await user.click(screen.getByRole('button', { name: /游戏 CG/ }))
+
+    await waitFor(() => expect(updateInteractiveTeller).toHaveBeenCalled())
+    expect(updateInteractiveTeller).toHaveBeenCalledWith(
+      'classic',
+      expect.objectContaining({
+        id: 'classic',
+        name: '切换前自动保存',
+      }),
+      '',
+      '/workspace',
+    )
+    expect(screen.getByRole('heading', { name: '游戏 CG' })).toBeInTheDocument()
+  })
+
+  it('round-trips a custom preset through autosave with its latest content and revision', async () => {
+    vi.useFakeTimers()
+    const customA = { ...teller('custom-a', '自定义 A'), updated_at: 'a-r1' }
+    const customB = { ...teller('custom-b', '自定义 B'), updated_at: 'b-r1' }
+    let resolveFirstSave!: (saved: Teller) => void
+    const firstSave = new Promise<Teller>((resolve) => { resolveFirstSave = resolve })
+    vi.mocked(updateInteractiveTeller)
+      .mockImplementationOnce(async () => firstSave)
+      .mockImplementation(async (id, input) => ({
+      ...teller(id, input.name || id),
+      ...input,
+      id,
+      custom: true,
+      updated_at: id === 'custom-a' ? 'a-r3' : 'b-r2',
+    }) as Teller)
+
+    try {
+      render(<CustomTellerRoundTripHarness initialTellers={[customA, customB]} />)
+
+      fireEvent.change(screen.getByDisplayValue('自定义 A'), { target: { value: 'A 首次保存' } })
+      await act(async () => { await vi.advanceTimersByTimeAsync(1300) })
+      expect(updateInteractiveTeller).toHaveBeenCalledTimes(1)
+
+      fireEvent.change(screen.getByDisplayValue('A 首次保存'), { target: { value: 'A 最新内容' } })
+      await act(async () => {
+        resolveFirstSave({ ...customA, name: 'A 首次保存', updated_at: 'a-r2' })
+        await firstSave
+      })
+      expect(screen.getByDisplayValue('A 最新内容')).toBeInTheDocument()
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /自定义 B/ }))
+        await Promise.resolve()
+      })
+      expect(screen.getByRole('heading', { name: '自定义 B' })).toBeInTheDocument()
+
+      await act(async () => {
+        fireEvent.click(screen.getByRole('button', { name: /A 最新内容/ }))
+        await Promise.resolve()
+      })
+      expect(screen.getByDisplayValue('A 最新内容')).toBeInTheDocument()
+
+      expect(updateInteractiveTeller).toHaveBeenCalledTimes(2)
+      expect(vi.mocked(updateInteractiveTeller).mock.calls[0][2]).toBe('a-r1')
+      expect(vi.mocked(updateInteractiveTeller).mock.calls[1][2]).toBe('a-r2')
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('restores an overridden built-in narrative style from the top-right action', async () => {
@@ -275,6 +346,7 @@ describe('SettingPanel', () => {
         custom: false,
       }),
       '',
+      '/workspace',
     )
     expect(createImagePreset).not.toHaveBeenCalled()
     expect(screen.getAllByText('内置覆盖').length).toBeGreaterThan(0)
@@ -312,12 +384,13 @@ describe('SettingPanel', () => {
     render(<PresetModeHarness />)
 
     expect(screen.queryByLabelText('方案预设模式筛选')).not.toBeInTheDocument()
+    expect(screen.getByTestId('preset-directory-scroll')).toHaveClass('h-0', 'overflow-hidden', 'overscroll-y-contain')
     expect(screen.queryByText('在目录中选择条目，右侧打开编辑。')).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: '配置管理 Agent' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '叙事风格' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '图像方案' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '故事导演' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /默认导演/ })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /默认导演/ })).not.toBeInTheDocument()
     expect(screen.getByRole('button', { name: /经典叙事/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '新建故事导演' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '新建叙事风格' })).toBeInTheDocument()
@@ -326,8 +399,11 @@ describe('SettingPanel', () => {
     expect(sectionHeader('故事导演').compareDocumentPosition(sectionHeader('图像方案')) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
 
     await user.click(screen.getByRole('button', { name: '展开全部目录' }))
+    expect(screen.getByRole('button', { name: /默认导演/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: /默认事件包/ })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /默认数值规则/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /均衡 DM 检定/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /推进型 DM：失败也前进/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /OSR 型 DM：玩家技巧优先/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '折叠全部目录' })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '折叠全部目录' }))
     expect(screen.queryByRole('button', { name: /默认导演/ })).not.toBeInTheDocument()
@@ -335,24 +411,27 @@ describe('SettingPanel', () => {
     await user.click(screen.getByRole('button', { name: '故事导演' }))
 
     await selectDefaultDirector(user)
-    const directorResourceTabs = screen.getByRole('tablist', { name: '导演资源' })
-    expect(directorResourceTabs).toBeInTheDocument()
-    expect(directorResourceTabs).toHaveAttribute('data-slot', 'tabs-list')
-    expect(directorResourceTabs).toHaveClass('grid', 'group-data-horizontal/tabs:h-auto')
-    expect(directorResourceTabs.className).toContain('grid-cols-[repeat(auto-fit,minmax(12rem,1fr))]')
-    expect(screen.getByRole('tab', { name: /事件引用/ })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /数值系统/ })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /TRPG 检定/ })).toBeInTheDocument()
-    expect(screen.getByRole('tab', { name: /开局选择/ })).toBeInTheDocument()
-    expect(screen.getAllByTestId('preset-config-visual-editor')).toHaveLength(1)
+    expect(screen.queryByRole('tablist', { name: '导演资源' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /事件引用/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /TRPG 检定/ })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: /开局选择/ })).not.toBeInTheDocument()
+    expect(screen.queryByTestId('preset-config-visual-editor')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '事件包' }))
+
+    expect(screen.getByRole('button', { name: /默认事件包/ })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '新建事件包' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /默认事件包/ }))
+    expect(screen.getByRole('heading', { name: '默认事件包' })).toBeInTheDocument()
+    expect(screen.getByTestId('preset-config-visual-editor')).toBeInTheDocument()
     expect(screen.queryByTestId('monaco-json-editor')).not.toBeInTheDocument()
-    await user.click(screen.getAllByRole('button', { name: 'JSON' })[0])
-    expect(window.localStorage.getItem('nova.settingPanel.presetConfigView.v1')).toContain('story-director.stat-system')
+    await user.click(screen.getByRole('button', { name: 'JSON' }))
+    expect(window.localStorage.getItem('nova.settingPanel.presetConfigView.v1')).toContain('event-package.events')
     const jsonEditors = screen.getAllByTestId('story-director-json-editor')
     expect(jsonEditors).toHaveLength(1)
     expect(jsonEditors[0]).toHaveClass('overflow-hidden')
     expect(screen.getByTestId('monaco-json-editor')).toHaveAttribute('data-word-wrap', 'on')
-    expect(screen.getByDisplayValue(/attributes/)).toBeInTheDocument()
+    expect(screen.getByDisplayValue(/events/)).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: '折叠全部' })).toHaveLength(1)
     expect(screen.queryByRole('button', { name: '展开全部' })).not.toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '折叠全部' }))
@@ -363,21 +442,13 @@ describe('SettingPanel', () => {
     expect(screen.getAllByRole('button', { name: '折叠全部' })).toHaveLength(1)
     expect(screen.queryByRole('button', { name: '展开全部' })).not.toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '事件包' }))
-
-    expect(screen.getByRole('button', { name: /默认事件包/ })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: '新建事件包' })).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: /默认事件包/ }))
-    expect(screen.getByRole('heading', { name: '默认事件包' })).toBeInTheDocument()
-    expect(screen.getByTestId('preset-config-visual-editor')).toBeInTheDocument()
-
     await user.click(screen.getByRole('button', { name: '写作模式' }))
 
     expect(screen.getByRole('button', { name: '叙事风格' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '图像方案' })).toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '故事导演' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '事件包' })).not.toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: '数值与TRPG系统' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'TRPG 检定' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: '开局选择器' })).not.toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: '默认事件包' })).not.toBeInTheDocument()
     expect(screen.getByRole('heading', { name: '经典叙事' })).toBeInTheDocument()
@@ -390,15 +461,16 @@ describe('SettingPanel', () => {
     await user.click(screen.getByRole('button', { name: '事件包' }))
     await user.click(await screen.findByRole('button', { name: /默认事件包/ }))
     await user.click(await screen.findByRole('button', { name: '新增事件卡' }))
-    expect(screen.getByTestId('event-package-card-editor').className).toContain('h-[clamp(360px,calc(100dvh-15rem),720px)]')
-    expect(screen.getByTestId('event-package-card-editor')).toHaveClass('min-h-0', 'overflow-hidden')
-    expect(screen.getByTestId('event-package-card-detail-scroll')).toHaveClass('overflow-y-auto')
-    expect(screen.getByTestId('event-package-card-detail-scroll').className).toContain('[scrollbar-gutter:stable]')
+    expect(screen.getByTestId('event-package-card-editor')).toHaveClass('grid')
+    expect(screen.getByTestId('preset-config-visual-editor')).toHaveClass('preset-config-visual-container')
+    expect(screen.getByTestId('event-package-card-editor')).toHaveClass('preset-visual-editor-shell', 'overflow-hidden')
+    expect(screen.getByTestId('event-package-card-detail-scroll')).toHaveClass('p-3')
+    expect(screen.getByTestId('event-package-card-detail-scroll')).not.toHaveClass('overflow-y-auto')
     await user.type(screen.getByLabelText('事件类型名'), '伏笔回收')
     await user.click(screen.getByRole('button', { name: '保存' }))
 
     await waitFor(() => expect(updateEventPackage).toHaveBeenCalled())
-    expect(updateEventPackage).toHaveBeenCalledWith('default', expect.objectContaining({ id: 'default', custom: false }), '')
+    expect(updateEventPackage).toHaveBeenCalledWith('default', expect.objectContaining({ id: 'default', custom: false }), '', '/workspace')
     expect(createStoryDirector).not.toHaveBeenCalled()
     const payload = vi.mocked(updateEventPackage).mock.calls.at(-1)?.[1] as Partial<EventPackageModule>
     expect(payload.events?.[0]?.type_name).toBe('伏笔回收')
@@ -423,6 +495,24 @@ describe('SettingPanel', () => {
     })
   })
 
+  it('selects a DM check style through the story director TRPG resource ref', async () => {
+    const user = userEvent.setup()
+    render(<PresetModeHarness />)
+
+    await selectDefaultDirector(user)
+    const ruleRow = screen.getAllByText('TRPG 检定')
+      .map((node) => node.closest('div') as HTMLElement | null)
+      .find((node): node is HTMLElement => Boolean(node && within(node).queryByRole('combobox'))) as HTMLElement
+    await user.click(within(ruleRow).getByRole('combobox'))
+    await user.click(screen.getByRole('option', { name: /推进型 DM：失败也前进/ }))
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => expect(updateStoryDirector).toHaveBeenCalled())
+    const payload = vi.mocked(updateStoryDirector).mock.calls.at(-1)?.[1] as Partial<StoryDirector>
+    expect(payload.module_refs).toMatchObject({ rule_system_id: 'dm-fail-forward' })
+    expect(payload.module_refs as Record<string, unknown>).not.toHaveProperty('dm_adjudication_style')
+  })
+
   it('uses localized enum controls for story director strategy values', async () => {
     const user = userEvent.setup()
     render(<PresetModeHarness />)
@@ -431,7 +521,7 @@ describe('SettingPanel', () => {
     expect(screen.getByText('平衡牵引')).toBeInTheDocument()
     expect(screen.getByText('在自由行动和长期主线之间保持平衡，适合作为通用默认。')).toBeInTheDocument()
     expect(screen.getByText('可逆失败')).toBeInTheDocument()
-    expect(screen.getByText('中等扰动')).toBeInTheDocument()
+		expect(screen.getByText('均衡')).toBeInTheDocument()
     expect(screen.queryByText('balanced')).not.toBeInTheDocument()
 
     const mainlineField = screen.getByText('主线强度').closest('label') as HTMLElement
@@ -446,9 +536,9 @@ describe('SettingPanel', () => {
     await user.click(within(pacingField).getByRole('combobox'))
     await user.click(screen.getByRole('option', { name: /波峰波谷/ }))
 
-    const randomField = screen.getByText('随机事件率').closest('label') as HTMLElement
-    await user.click(within(randomField).getByRole('combobox'))
-    await user.click(screen.getByRole('option', { name: /高扰动/ }))
+		const eventFrequencyField = screen.getByText('事件机会频率').closest('label') as HTMLElement
+		await user.click(within(eventFrequencyField).getByRole('combobox'))
+		await user.click(screen.getByRole('option', { name: /频繁/ }))
     await user.click(screen.getByRole('button', { name: '保存' }))
 
     await waitFor(() => expect(updateStoryDirector).toHaveBeenCalled())
@@ -457,7 +547,7 @@ describe('SettingPanel', () => {
       mainline_strength: 'strong_arc',
       failure_policy: 'fail_forward',
       pacing_curve: 'wave',
-      random_event_rate: 0.3,
+			event_frequency: 'frequent',
     })
   })
 
@@ -466,7 +556,13 @@ describe('SettingPanel', () => {
     render(<PresetModeHarness />)
 
     await selectDefaultDirector(user)
-    expect(screen.getByText('回合后规划')).toBeInTheDocument()
+    expect(screen.getByText('分支规划回合')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /高级设置/ })).not.toBeInTheDocument()
+    const statusSwitch = screen.getByRole('switch', { name: '停用状态' })
+    expect(statusSwitch).toBeChecked()
+    await user.click(statusSwitch)
+    expect(screen.getByRole('switch', { name: '启用状态' })).not.toBeChecked()
+
     const branchTurnsField = screen.getByText('分支规划回合').closest('label') as HTMLElement
     const branchTurnsInput = within(branchTurnsField).getByRole('spinbutton')
     expect(branchTurnsInput).toHaveValue(5)
@@ -476,11 +572,17 @@ describe('SettingPanel', () => {
     await user.click(within(modeField).getByRole('combobox'))
     await user.click(screen.getByRole('option', { name: /每回合/ }))
 
+    const visibilityField = screen.getByText('规则可见性').closest('label') as HTMLElement
+    await user.click(within(visibilityField).getByRole('combobox'))
+    await user.click(screen.getByRole('option', { name: /公开掷骰/ }))
+
     await user.click(screen.getByRole('button', { name: '保存' }))
     await waitFor(() => expect(updateStoryDirector).toHaveBeenCalled())
     const payload = vi.mocked(updateStoryDirector).mock.calls.at(-1)?.[1] as Partial<StoryDirector>
     expect(payload.strategy).toMatchObject({
+      enabled: false,
       director_agent_mode: 'every_turn',
+      rule_visibility_mode: 'public_roll',
       branch_planning_turns: 7,
     })
   })
@@ -567,17 +669,186 @@ describe('SettingPanel', () => {
     const user = userEvent.setup()
     render(<PresetModeHarness />)
 
-    await selectDefaultDirector(user)
-    await user.click(screen.getAllByRole('button', { name: 'JSON' })[0])
+    await user.click(screen.getByRole('button', { name: '事件包' }))
+    await user.click(await screen.findByRole('button', { name: /默认事件包/ }))
+    await user.click(screen.getByRole('button', { name: 'JSON' }))
     fireEvent.change(screen.getByTestId('monaco-json-editor'), { target: { value: '{' } })
 
     await waitFor(() => expect(screen.getByRole('button', { name: '保存' })).toBeDisabled())
     expect(screen.getByText('请先修复 JSON，再切回可视化视图。')).toBeInTheDocument()
 
-    await user.click(screen.getByRole('button', { name: '事件包' }))
-    expect(screen.getByRole('heading', { name: '默认导演' })).toBeInTheDocument()
-    expect(screen.queryByRole('heading', { name: '默认事件包' })).not.toBeInTheDocument()
-    expect(updateStoryDirector).not.toHaveBeenCalled()
+    await user.click(screen.getByRole('button', { name: 'TRPG 检定' }))
+    await user.click(await screen.findByRole('button', { name: /均衡 DM 检定/ }))
+    expect(screen.getByRole('heading', { name: '默认事件包' })).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: '均衡 DM 检定' })).not.toBeInTheDocument()
+    expect(updateEventPackage).not.toHaveBeenCalled()
+  })
+
+  it('edits memory structure metadata in the shared resource identity panel', async () => {
+    const user = userEvent.setup()
+    render(<PresetModeHarness />)
+
+    await user.click(screen.getByRole('button', { name: '展开全部目录' }))
+    await user.click(screen.getByRole('button', { name: /默认记忆结构/ }))
+
+    const metadata = screen.getByTestId('preset-metadata')
+    const nameInput = within(metadata).getByRole('textbox', { name: '名称' })
+    const descriptionInput = within(metadata).getByRole('textbox', { name: '描述' })
+    expect(nameInput).toHaveValue('默认记忆结构')
+    expect(descriptionInput).toHaveValue('默认记忆结构 description')
+    expect(screen.getByText('编辑内置资源会保存为同 ID 覆盖；右上角可恢复内置版本。')).toBeInTheDocument()
+    expect(screen.getByTestId('preset-config-visual-editor')).toHaveClass('preset-config-visual-container')
+    expect(screen.getByTestId('memory-structure-editor')).toHaveClass('preset-visual-editor-shell', 'overflow-hidden')
+
+    await user.clear(nameInput)
+    await user.type(nameInput, '长期记忆结构')
+    await user.clear(descriptionInput)
+    await user.type(descriptionInput, '记录长期承接信息')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => expect(updateStoryMemoryStructure).toHaveBeenCalled())
+    expect(updateStoryMemoryStructure).toHaveBeenCalledWith('default', expect.objectContaining({
+      name: '长期记忆结构',
+      description: '记录长期承接信息',
+    }), '', '/workspace')
+  })
+
+  it('edits TRPG checks through the focused DM-style visual workflow', async () => {
+    const user = userEvent.setup()
+    render(<PresetModeHarness />)
+
+    await user.click(screen.getByRole('button', { name: '展开全部目录' }))
+    await user.click(screen.getByRole('button', { name: /均衡 DM 检定/ }))
+
+    expect(screen.getByRole('heading', { name: '均衡 DM 检定' })).toBeInTheDocument()
+    expect(screen.getByDisplayValue('均衡 d20 检定')).toBeInTheDocument()
+    expect(screen.queryByText('规则 ID')).not.toBeInTheDocument()
+    expect(screen.queryByText(/安全表达式/)).not.toBeInTheDocument()
+    expect(screen.queryByText('成功 StateOps')).not.toBeInTheDocument()
+    expect(screen.queryByText('默认难度')).not.toBeInTheDocument()
+    expect(screen.queryByText('掷骰方式')).not.toBeInTheDocument()
+    expect(screen.queryByText('状态影响')).not.toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '必须检定例子' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '不要检定例子' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: '新增规则' })).not.toBeInTheDocument()
+
+    const ruleLabelInput = screen.getByRole('textbox', { name: '规则名称' })
+    fireEvent.change(ruleLabelInput, { target: { value: '自定义 DM 检定' } })
+
+    const mustCheckExamples = '守卫逼近时强行撬锁\n攻击警戒守卫'
+    const skipCheckExamples = '观察空房间\n和友善同伴闲聊'
+    fireEvent.change(screen.getByRole('textbox', { name: '必须检定例子' }), { target: { value: mustCheckExamples } })
+    fireEvent.change(screen.getByRole('textbox', { name: '不要检定例子' }), { target: { value: skipCheckExamples } })
+
+    await user.click(screen.getByRole('tab', { name: /如何裁定/ }))
+    expect(screen.getByRole('textbox', { name: '难度判断标准' })).toBeInTheDocument()
+    expect(screen.getByRole('textbox', { name: '状态影响指引' })).toBeInTheDocument()
+    expect(screen.getAllByRole('combobox')).toHaveLength(1)
+    expect(screen.getByDisplayValue('固定 d20')).toBeDisabled()
+
+    const modifierField = screen.getByText('修正值').closest('label') as HTMLElement
+    const modifierInput = within(modifierField).getByRole('textbox')
+    fireEvent.change(modifierInput, { target: { value: '7' } })
+
+    const failureField = screen.getByText('失败处理').closest('label') as HTMLElement
+    await user.click(within(failureField).getByRole('combobox'))
+    await user.click(screen.getByRole('option', { name: '明确失败' }))
+
+    const difficultyGuidance = '目标警戒越高难度越高，主角准备充分时降低一档。'
+    const stateEffectGuidance = '失败时警戒 +1，代价成功时体力 -1。'
+    fireEvent.change(screen.getByRole('textbox', { name: '难度判断标准' }), { target: { value: difficultyGuidance } })
+    fireEvent.change(screen.getByRole('textbox', { name: '状态影响指引' }), { target: { value: stateEffectGuidance } })
+
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(updateRuleSystem).toHaveBeenCalled())
+    const visualPayload = vi.mocked(updateRuleSystem).mock.calls.at(-1)?.[1] as Partial<RuleSystemModule>
+    expect(visualPayload.trpg_system?.rule_templates).toHaveLength(1)
+    expect(visualPayload.trpg_system?.rule_templates?.[0]).toMatchObject({
+      label: '自定义 DM 检定',
+      dice: '1d20',
+      modifier: 7,
+      failure_policy: 'hard_failure',
+      difficulty_guidance: difficultyGuidance,
+      state_effect_guidance: stateEffectGuidance,
+      must_check_examples: ['守卫逼近时强行撬锁', '攻击警戒守卫'],
+      skip_check_examples: ['观察空房间', '和友善同伴闲聊'],
+    })
+    expect(visualPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('impact')
+    expect(visualPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('category')
+    expect(visualPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('default_difficulty')
+    expect(visualPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('default_roll_mode')
+    expect(visualPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('success_state_ops')
+  })
+
+  it('normalizes legacy TRPG JSON into one supported DM check', async () => {
+    const user = userEvent.setup()
+    render(<PresetModeHarness />)
+
+    await user.click(screen.getByRole('button', { name: '展开全部目录' }))
+    await user.click(screen.getByRole('button', { name: /均衡 DM 检定/ }))
+
+    await user.click(screen.getByRole('button', { name: 'JSON' }))
+    fireEvent.change(screen.getByTestId('monaco-json-editor'), {
+      target: {
+        value: JSON.stringify({
+          rule_templates: [{
+            id: 'legacy',
+            label: '旧规则',
+            kind: 'dice',
+            mode: 'd100_under',
+            dice: '1d100',
+            modifier: 3,
+            difficulty: 55,
+            resource_cost_path: 'resources.hp',
+            success_state_ops: [],
+            category: 'social',
+            default_difficulty: 'hard',
+            default_roll_mode: 'advantage',
+            failure_policy: 'success_at_cost',
+            impact: 'relationship_change',
+            difficulty_guidance: '对方越抗拒越难。',
+            state_effect_guidance: '成功关系 +1，失败关系 -1。',
+            trigger: '谈判触发',
+            must_check_examples: ['逼迫敌对 NPC 让步'],
+            skip_check_examples: ['普通寒暄'],
+          }, {
+            id: 'legacy-extra',
+            label: '旧规则 2',
+            dice: '1d20',
+            failure_policy: 'hard_failure',
+          }],
+        }, null, 2),
+      },
+    })
+    await user.click(screen.getByRole('button', { name: '保存' }))
+    await waitFor(() => expect(updateRuleSystem).toHaveBeenCalledTimes(1))
+    const jsonPayload = vi.mocked(updateRuleSystem).mock.calls.at(-1)?.[1] as Partial<RuleSystemModule>
+    expect(jsonPayload.trpg_system?.rule_templates).toEqual([expect.objectContaining({
+      id: 'legacy',
+      label: '旧规则',
+      dice: '1d20',
+      modifier: 3,
+      failure_policy: 'success_at_cost',
+      difficulty_guidance: '对方越抗拒越难。',
+      state_effect_guidance: '成功关系 +1，失败关系 -1。',
+      trigger: '谈判触发',
+      must_check_examples: ['逼迫敌对 NPC 让步'],
+      skip_check_examples: ['普通寒暄'],
+    })])
+    expect(jsonPayload.trpg_system?.rule_templates).toHaveLength(1)
+    expect(jsonPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('impact')
+    expect(jsonPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('kind')
+    expect(jsonPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('category')
+    expect(jsonPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('default_difficulty')
+    expect(jsonPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('default_roll_mode')
+    expect(jsonPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('resource_cost_path')
+    expect(jsonPayload.trpg_system?.rule_templates?.[0]).not.toHaveProperty('success_state_ops')
+  })
+
+  it('starts custom TRPG check modules from built-in rule templates', () => {
+    const draft = newRuleSystemDraft()
+
+    expect(draft.trpg_system?.rule_templates).toEqual(defaultRuleTemplates())
   })
 
   it('generates a current image for one lore item from the editor', async () => {
@@ -616,6 +887,35 @@ describe('SettingPanel', () => {
 
     const previewDialog = screen.getByRole('dialog', { name: '林川' })
     expect(within(previewDialog).getByTestId('image-preview-viewport')).toBeInTheDocument()
+  })
+
+  it('saves lore item enabled status from a switch', async () => {
+    const user = userEvent.setup()
+    const item = loreItem('lin-chuan', '林川')
+    vi.mocked(getLoreItems).mockResolvedValue([item])
+    vi.mocked(updateLoreItem).mockImplementation(async (id, input) => ({
+      ...item,
+      ...input,
+      id,
+      updated_at: '2026-01-01T00:00:01Z',
+    }) as LoreItem)
+
+    render(<SettingPanel mode="lore" workspace="/workspace" imagePresets={[imagePreset('game-cg', '游戏 CG')]} />)
+
+    await user.click(await screen.findByRole('button', { name: /林川/ }))
+    const statusSwitch = screen.getByRole('switch', { name: '停用状态' })
+    expect(statusSwitch).toBeChecked()
+    await user.click(statusSwitch)
+    expect(screen.getByRole('switch', { name: '启用状态' })).not.toBeChecked()
+
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => expect(updateLoreItem).toHaveBeenCalled())
+    expect(updateLoreItem).toHaveBeenCalledWith(
+      'lin-chuan',
+      expect.objectContaining({ enabled: false }),
+      '2026-01-01T00:00:00Z',
+    )
   })
 
   it('confirms lore deletion with an in-app dialog', async () => {
@@ -748,16 +1048,28 @@ function PresetPanelHarness({ presetUsageMode = 'game' }: { presetUsageMode?: 'w
   )
 }
 
+function CustomTellerRoundTripHarness({ initialTellers }: { initialTellers: Teller[] }) {
+  const [tellers, setTellers] = useState(initialTellers)
+  return (
+    <SettingPanel
+      mode="teller"
+      workspace="/workspace"
+      tellers={tellers}
+      storyDirectors={[storyDirector('default', '默认导演')]}
+      imagePresets={[imagePreset('game-cg', '游戏 CG')]}
+      onTellersChange={setTellers}
+    />
+  )
+}
+
 function teller(id: string, name: string): Teller {
   return {
     version: 1,
     id,
     name,
     description: `${name} description`,
-    random_event_rate: 0.15,
     style_refs: [],
     style_rules: [],
-    tags: [],
     context_policy: { creator: 'always', lore: 'relevant', runtime_state: 'always' },
     slots: [{ id: 'identity', name: '系统提示', target: 'system', enabled: true, content: 'rules' }],
     custom: id !== 'classic',
@@ -772,7 +1084,6 @@ function imagePreset(id: string, name: string): ImagePreset {
     description: `${name} description`,
     prompt: '## 图像请求 Prompt（tool_request）\n\nvisual prompt',
     slots: [{ id: 'tool_request', name: '图像请求 Prompt', target: 'tool_request', enabled: true, content: 'visual prompt' }],
-    tags: [],
     custom: id !== 'game-cg',
   }
 }
@@ -786,10 +1097,9 @@ function storyDirector(id: string, name: string): StoryDirector {
     module_refs: {
       narrative_style_id: 'classic',
       event_package_ids: ['default'],
-      rule_system_id: 'default-rules',
+      rule_system_id: 'default',
       actor_state_id: 'default',
       memory_structure_id: 'default',
-      opening_selector_id: 'default-opening',
       image_preset_id: 'game-cg',
     },
     strategy: { enabled: true, mainline_strength: 'balanced' },
@@ -799,10 +1109,7 @@ function storyDirector(id: string, name: string): StoryDirector {
       enabled: true,
       events: [],
     }],
-    stat_system: { attributes: [] },
     trpg_system: { rule_templates: [] },
-    opening_selector: { enabled: true, trait_pools: [], initial_state_ops: [] },
-    tags: [],
     custom: id !== 'default',
   }
 }
@@ -814,7 +1121,6 @@ function eventPackage(id: string, name: string): EventPackageModule {
     name,
     description: `${name} description`,
     events: [],
-    tags: [],
     custom: id !== 'default',
   }
 }
@@ -825,23 +1131,15 @@ function ruleSystem(id: string, name: string): RuleSystemModule {
     id,
     name,
     description: `${name} description`,
-    stat_system: { attributes: [] },
-    trpg_system: { rule_templates: [] },
-    tags: [],
-    custom: id !== 'default-rules',
+    trpg_system: { rule_templates: defaultRuleTemplates() },
+    custom: !isBuiltinRuleSystemID(id),
   }
 }
 
-function openingSelector(id: string, name: string): OpeningSelectorModule {
-  return {
-    version: 1,
-    id,
-    name,
-    description: `${name} description`,
-    opening_selector: { enabled: true, trait_pools: [], initial_state_ops: [] },
-    tags: [],
-    custom: id !== 'default-opening',
-  }
+const BUILTIN_RULE_SYSTEM_IDS = new Set(['default', 'dm-fail-forward', 'dm-osr-player-skill'])
+
+function isBuiltinRuleSystemID(id: string) {
+  return BUILTIN_RULE_SYSTEM_IDS.has(id)
 }
 
 function memoryStructure(id: string, name: string): StoryMemoryStructureModule {
@@ -860,7 +1158,6 @@ function memoryStructure(id: string, name: string): StoryMemoryStructureModule {
       fields: [{ id: 'event', name: '事件', enabled: true, order: 10 }],
       order: 10,
     }],
-    tags: [],
     custom: id !== 'default',
   }
 }

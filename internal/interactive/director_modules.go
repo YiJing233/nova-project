@@ -15,19 +15,24 @@ import (
 )
 
 const (
-	storyDirectorModuleVersion = 1
-	DefaultEventPackageID      = "default"
-	DefaultEventSystemID       = "default"
-	DefaultRuleSystemID        = "default"
-	DefaultOpeningSelectorID   = "default"
+	storyDirectorModuleVersion     = 6
+	DefaultEventPackageID          = "default"
+	DefaultEventSystemID           = "default"
+	DefaultRuleSystemID            = "default"
+	RuleSystemFailForwardID        = "dm-fail-forward"
+	RuleSystemOSRPlayerSkillID     = "dm-osr-player-skill"
+	RuleSystemCinematicHeroicID    = "dm-cinematic-heroic"
+	RuleSystemGrittySurvivalID     = "dm-gritty-survival"
+	RuleSystemMysteryClueForwardID = "dm-mystery-clue-forward"
+	RuleSystemDramaStakesID        = "dm-drama-stakes"
+	DefaultOpeningSelectorID       = "default"
 )
 
 var (
 	ErrEventPackageRevisionConflict    = errors.New("事件包已被其他操作更新，请重新加载后再保存")
-	ErrEventSystemRevisionConflict     = errors.New("事件系统已被其他操作更新，请重新加载后再保存")
-	ErrRuleSystemRevisionConflict      = errors.New("数值规则系统已被其他操作更新，请重新加载后再保存")
+	ErrRuleSystemRevisionConflict      = errors.New("TRPG 检定已被其他操作更新，请重新加载后再保存")
 	ErrOpeningSelectorRevisionConflict = errors.New("开局选择器已被其他操作更新，请重新加载后再保存")
-	ErrActorStateRevisionConflict      = errors.New("Actor 状态系统已被其他操作更新，请重新加载后再保存")
+	ErrActorStateRevisionConflict      = errors.New("状态系统已被其他操作更新，请重新加载后再保存")
 )
 
 // StoryDirectorModuleRefs declares the reusable resources a story director
@@ -70,7 +75,6 @@ type StoryDirectorResolvedSnapshot struct {
 	ImagePresetID         string                        `json:"image_preset_id,omitempty"`
 	EventPackages         []TellerEventPackage          `json:"event_packages,omitempty"`
 	EventSystem           StoryDirectorEventSystem      `json:"-"`
-	StatSystem            StoryDirectorStatSystem       `json:"stat_system,omitempty"`
 	TRPGSystem            StoryDirectorTRPGSystem       `json:"trpg_system,omitempty"`
 	ActorState            StoryDirectorActorStateSystem `json:"actor_state,omitempty"`
 	StoryMemoryStructures []StoryMemoryStructure        `json:"story_memory_structures,omitempty"`
@@ -83,7 +87,6 @@ type EventPackageModule struct {
 	Name              string            `json:"name"`
 	Description       string            `json:"description"`
 	Events            []TellerEventCard `json:"events,omitempty"`
-	Tags              []string          `json:"tags"`
 	Path              string            `json:"path,omitempty"`
 	Custom            bool              `json:"custom"`
 	BuiltinOverridden bool              `json:"builtin_overridden,omitempty"`
@@ -114,9 +117,8 @@ type RuleSystemModule struct {
 	ID                string                  `json:"id"`
 	Name              string                  `json:"name"`
 	Description       string                  `json:"description"`
-	StatSystem        StoryDirectorStatSystem `json:"stat_system"`
+	ActorStateID      string                  `json:"actor_state_id,omitempty"`
 	TRPGSystem        StoryDirectorTRPGSystem `json:"trpg_system"`
-	Tags              []string                `json:"tags"`
 	Path              string                  `json:"path,omitempty"`
 	Custom            bool                    `json:"custom"`
 	BuiltinOverridden bool                    `json:"builtin_overridden,omitempty"`
@@ -132,7 +134,8 @@ type ActorStateModule struct {
 	Name              string                        `json:"name"`
 	Description       string                        `json:"description"`
 	ActorState        StoryDirectorActorStateSystem `json:"actor_state"`
-	Tags              []string                      `json:"tags"`
+	OpeningSelector   StoryDirectorOpeningSelector  `json:"opening_selector,omitempty"`
+	MigrationWarnings []string                      `json:"migration_warnings,omitempty"`
 	Path              string                        `json:"path,omitempty"`
 	Custom            bool                          `json:"custom"`
 	BuiltinOverridden bool                          `json:"builtin_overridden,omitempty"`
@@ -140,6 +143,8 @@ type ActorStateModule struct {
 	Error             string                        `json:"error,omitempty"`
 	CreatedAt         string                        `json:"created_at,omitempty"`
 	UpdatedAt         string                        `json:"updated_at,omitempty"`
+	NeedsMigration    bool                          `json:"-"`
+	SourceVersion     int                           `json:"-"`
 }
 
 type OpeningSelectorModule struct {
@@ -162,10 +167,6 @@ type EventPackageLibrary struct {
 	novaDir string
 }
 
-type EventSystemLibrary struct {
-	novaDir string
-}
-
 type RuleSystemLibrary struct {
 	novaDir string
 }
@@ -180,10 +181,6 @@ type OpeningSelectorLibrary struct {
 
 func NewEventPackageLibrary(novaDir string) *EventPackageLibrary {
 	return &EventPackageLibrary{novaDir: novaDir}
-}
-
-func NewEventSystemLibrary(novaDir string) *EventSystemLibrary {
-	return &EventSystemLibrary{novaDir: novaDir}
 }
 
 func NewRuleSystemLibrary(novaDir string) *RuleSystemLibrary {
@@ -365,144 +362,6 @@ func (l *EventPackageLibrary) migrateLegacyEventSystems() error {
 	return nil
 }
 
-func (l *EventSystemLibrary) List() ([]EventSystemModule, error) {
-	if err := l.ensureBuiltins(); err != nil {
-		return nil, err
-	}
-	files, err := filepath.Glob(filepath.Join(l.dir(), "*.json"))
-	if err != nil {
-		return nil, err
-	}
-	items := make([]EventSystemModule, 0, len(files))
-	for _, file := range files {
-		item, err := parseEventSystemFile(file)
-		if err != nil {
-			items = append(items, EventSystemModule{ID: strings.TrimSuffix(filepath.Base(file), ".json"), Path: file, Invalid: true, Error: err.Error(), Custom: !IsBuiltinEventSystemID(strings.TrimSuffix(filepath.Base(file), ".json"))})
-			continue
-		}
-		item.Path = file
-		item = applyEventSystemOwnership(item)
-		items = append(items, item)
-	}
-	sortEventSystems(items)
-	return items, nil
-}
-
-func (l *EventSystemLibrary) Get(id string) (EventSystemModule, error) {
-	if err := l.ensureBuiltins(); err != nil {
-		return EventSystemModule{}, err
-	}
-	id = normalizeDirectorModuleID(id)
-	if id == "" {
-		id = DefaultEventSystemID
-	}
-	if err := validateDirectorModuleID(id, "事件系统"); err != nil {
-		return EventSystemModule{}, err
-	}
-	item, err := parseEventSystemFile(filepath.Join(l.dir(), id+".json"))
-	if err != nil {
-		return EventSystemModule{}, err
-	}
-	return applyEventSystemOwnership(item), nil
-}
-
-func (l *EventSystemLibrary) Create(item EventSystemModule) (EventSystemModule, error) {
-	if err := l.ensureBuiltins(); err != nil {
-		return EventSystemModule{}, err
-	}
-	item = normalizeEventSystemModule(item)
-	if item.ID == "" {
-		item.ID = newDirectorModuleID("event-system")
-	}
-	item.BuiltinOverridden = false
-	if err := validateEventSystemModule(item); err != nil {
-		return EventSystemModule{}, err
-	}
-	path := filepath.Join(l.dir(), item.ID+".json")
-	if _, err := os.Stat(path); err == nil {
-		return EventSystemModule{}, fmt.Errorf("事件系统已存在: %s", item.ID)
-	} else if !os.IsNotExist(err) {
-		return EventSystemModule{}, err
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	item.CreatedAt = now
-	item.UpdatedAt = now
-	if err := writeEventSystemFile(path, item); err != nil {
-		return EventSystemModule{}, err
-	}
-	item.Path = path
-	return applyEventSystemOwnership(item), nil
-}
-
-func (l *EventSystemLibrary) Update(id string, item EventSystemModule, baseRevision string) (EventSystemModule, error) {
-	if err := l.ensureBuiltins(); err != nil {
-		return EventSystemModule{}, err
-	}
-	id = normalizeDirectorModuleID(id)
-	if err := validateDirectorModuleID(id, "事件系统"); err != nil {
-		return EventSystemModule{}, err
-	}
-	isBuiltin := IsBuiltinEventSystemID(id)
-	current, err := l.Get(id)
-	if err != nil {
-		return EventSystemModule{}, err
-	}
-	if strings.TrimSpace(baseRevision) != "" && strings.TrimSpace(current.UpdatedAt) != strings.TrimSpace(baseRevision) {
-		return EventSystemModule{}, ErrEventSystemRevisionConflict
-	}
-	item = normalizeEventSystemModule(item)
-	item.ID = id
-	item.CreatedAt = firstNonEmptyString(current.CreatedAt, item.CreatedAt)
-	item.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
-	item.BuiltinOverridden = isBuiltin
-	if err := validateEventSystemModule(item); err != nil {
-		return EventSystemModule{}, err
-	}
-	path := filepath.Join(l.dir(), id+".json")
-	if err := writeEventSystemFile(path, item); err != nil {
-		return EventSystemModule{}, err
-	}
-	item.Path = path
-	return applyEventSystemOwnership(item), nil
-}
-
-func (l *EventSystemLibrary) Delete(id string) error {
-	id = normalizeDirectorModuleID(id)
-	if err := validateDirectorModuleID(id, "事件系统"); err != nil {
-		return err
-	}
-	if IsBuiltinEventSystemID(id) {
-		item, ok := builtinEventSystemModuleByID(id)
-		if !ok {
-			return fmt.Errorf("内置事件系统不存在: %s", id)
-		}
-		return writeEventSystemFile(filepath.Join(l.dir(), id+".json"), item)
-	}
-	return os.Remove(filepath.Join(l.dir(), id+".json"))
-}
-
-func (l *EventSystemLibrary) dir() string {
-	return filepath.Join(l.novaDir, "story-director-modules", "event-systems")
-}
-
-func (l *EventSystemLibrary) ensureBuiltins() error {
-	if err := os.MkdirAll(l.dir(), 0o755); err != nil {
-		return err
-	}
-	for _, item := range builtinEventSystemModules() {
-		path := filepath.Join(l.dir(), item.ID+".json")
-		if current, err := parseEventSystemFile(path); err == nil && current.BuiltinOverridden {
-			continue
-		} else if err == nil && current.Version == item.Version {
-			continue
-		}
-		if err := writeEventSystemFile(path, item); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (l *RuleSystemLibrary) List() ([]RuleSystemModule, error) {
 	if err := l.ensureBuiltins(); err != nil {
 		return nil, err
@@ -534,7 +393,7 @@ func (l *RuleSystemLibrary) Get(id string) (RuleSystemModule, error) {
 	if id == "" {
 		id = DefaultRuleSystemID
 	}
-	if err := validateDirectorModuleID(id, "数值规则系统"); err != nil {
+	if err := validateDirectorModuleID(id, "TRPG 检定"); err != nil {
 		return RuleSystemModule{}, err
 	}
 	item, err := parseRuleSystemFile(filepath.Join(l.dir(), id+".json"))
@@ -558,7 +417,7 @@ func (l *RuleSystemLibrary) Create(item RuleSystemModule) (RuleSystemModule, err
 	}
 	path := filepath.Join(l.dir(), item.ID+".json")
 	if _, err := os.Stat(path); err == nil {
-		return RuleSystemModule{}, fmt.Errorf("数值规则系统已存在: %s", item.ID)
+		return RuleSystemModule{}, fmt.Errorf("TRPG 检定已存在: %s", item.ID)
 	} else if !os.IsNotExist(err) {
 		return RuleSystemModule{}, err
 	}
@@ -577,7 +436,7 @@ func (l *RuleSystemLibrary) Update(id string, item RuleSystemModule, baseRevisio
 		return RuleSystemModule{}, err
 	}
 	id = normalizeDirectorModuleID(id)
-	if err := validateDirectorModuleID(id, "数值规则系统"); err != nil {
+	if err := validateDirectorModuleID(id, "TRPG 检定"); err != nil {
 		return RuleSystemModule{}, err
 	}
 	isBuiltin := IsBuiltinRuleSystemID(id)
@@ -606,11 +465,11 @@ func (l *RuleSystemLibrary) Update(id string, item RuleSystemModule, baseRevisio
 
 func (l *RuleSystemLibrary) Delete(id string) error {
 	id = normalizeDirectorModuleID(id)
-	if err := validateDirectorModuleID(id, "数值规则系统"); err != nil {
+	if err := validateDirectorModuleID(id, "TRPG 检定"); err != nil {
 		return err
 	}
-	if IsBuiltinRuleSystemID(id) {
-		return writeRuleSystemFile(filepath.Join(l.dir(), id+".json"), DefaultRuleSystemModule())
+	if builtin, ok := builtinRuleSystemModuleByID(id); ok {
+		return writeRuleSystemFile(filepath.Join(l.dir(), id+".json"), builtin)
 	}
 	return os.Remove(filepath.Join(l.dir(), id+".json"))
 }
@@ -623,13 +482,18 @@ func (l *RuleSystemLibrary) ensureBuiltins() error {
 	if err := os.MkdirAll(l.dir(), 0o755); err != nil {
 		return err
 	}
-	path := filepath.Join(l.dir(), DefaultRuleSystemID+".json")
-	if current, err := parseRuleSystemFile(path); err == nil && current.BuiltinOverridden {
-		return nil
-	} else if err == nil && current.Version == storyDirectorModuleVersion {
-		return nil
+	for _, builtin := range builtinRuleSystemModules() {
+		path := filepath.Join(l.dir(), builtin.ID+".json")
+		if current, err := parseRuleSystemFile(path); err == nil && current.BuiltinOverridden {
+			continue
+		} else if err == nil && current.Version == storyDirectorModuleVersion && !ruleSystemDiffersFromBuiltin(current) {
+			continue
+		}
+		if err := writeRuleSystemFile(path, builtin); err != nil {
+			return err
+		}
 	}
-	return writeRuleSystemFile(path, DefaultRuleSystemModule())
+	return nil
 }
 
 func (l *OpeningSelectorLibrary) List() ([]OpeningSelectorModule, error) {
@@ -768,7 +632,6 @@ func DefaultStoryDirectorModuleRefs() StoryDirectorModuleRefs {
 		RuleSystemID:      DefaultRuleSystemID,
 		ActorStateID:      DefaultActorStateModuleID,
 		MemoryStructureID: DefaultStoryMemoryStructureModuleID,
-		OpeningSelectorID: DefaultOpeningSelectorID,
 		ImagePresetID:     imagepreset.DefaultID,
 	}
 }
@@ -789,8 +652,6 @@ func NormalizeStoryDirectorModuleRefs(refs StoryDirectorModuleRefs) StoryDirecto
 		ActorStateDisabled:      refs.ActorStateDisabled,
 		MemoryStructureID:       normalizeDirectorModuleID(refs.MemoryStructureID),
 		MemoryStructureDisabled: refs.MemoryStructureDisabled,
-		OpeningSelectorID:       normalizeDirectorModuleID(refs.OpeningSelectorID),
-		OpeningSelectorDisabled: refs.OpeningSelectorDisabled,
 		ImagePresetID:           imagepreset.NormalizeID(refs.ImagePresetID),
 		ImagePresetDisabled:     refs.ImagePresetDisabled,
 	}
@@ -803,14 +664,12 @@ func StoryDirectorModuleRefsEmpty(refs StoryDirectorModuleRefs) bool {
 		refs.RuleSystemID == "" &&
 		refs.ActorStateID == "" &&
 		refs.MemoryStructureID == "" &&
-		refs.OpeningSelectorID == "" &&
 		refs.ImagePresetID == "" &&
 		!refs.NarrativeStyleDisabled &&
 		!refs.EventPackagesDisabled &&
 		!refs.RuleSystemDisabled &&
 		!refs.ActorStateDisabled &&
 		!refs.MemoryStructureDisabled &&
-		!refs.OpeningSelectorDisabled &&
 		!refs.ImagePresetDisabled
 }
 
@@ -822,20 +681,8 @@ func StoryDirectorEventSystemEnabled(director StoryDirector) bool {
 	return !NormalizeStoryDirectorModuleRefs(director.ModuleRefs).EventPackagesDisabled
 }
 
-func StoryDirectorRuleSystemEnabled(director StoryDirector) bool {
-	return !NormalizeStoryDirectorModuleRefs(director.ModuleRefs).RuleSystemDisabled
-}
-
-func StoryDirectorActorStateEnabled(director StoryDirector) bool {
-	return !NormalizeStoryDirectorModuleRefs(director.ModuleRefs).ActorStateDisabled
-}
-
 func StoryDirectorMemoryStructureEnabled(director StoryDirector) bool {
 	return !NormalizeStoryDirectorModuleRefs(director.ModuleRefs).MemoryStructureDisabled
-}
-
-func StoryDirectorOpeningSelectorEnabled(director StoryDirector) bool {
-	return !NormalizeStoryDirectorModuleRefs(director.ModuleRefs).OpeningSelectorDisabled
 }
 
 func StoryDirectorImagePresetEnabled(director StoryDirector) bool {
@@ -856,6 +703,10 @@ func ResolveStoryDirectorModules(novaDir string, director StoryDirector) StoryDi
 		}
 	} else if refs.MemoryStructureID == "" && !refs.MemoryStructureDisabled {
 		refs.MemoryStructureID = DefaultStoryMemoryStructureModuleID
+		director.ModuleRefs = refs
+	}
+	if refs.ActorStateID == "" && !refs.ActorStateDisabled && actorStateEmpty(director.ActorState) && openingSelectorEmpty(director.OpeningSelector) {
+		refs.ActorStateID = DefaultActorStateModuleID
 		director.ModuleRefs = refs
 	}
 
@@ -881,14 +732,16 @@ func ResolveStoryDirectorModules(novaDir string, director StoryDirector) StoryDi
 		}
 	}
 	if refs.RuleSystemDisabled {
-		effective.StatSystem = StoryDirectorStatSystem{Attributes: []StoryDirectorAttribute{}}
 		effective.TRPGSystem = StoryDirectorTRPGSystem{RuleTemplates: []RuleCheck{}}
 	} else if refs.RuleSystemID != "" {
 		if module, err := NewRuleSystemLibrary(novaDir).Get(refs.RuleSystemID); err == nil {
-			effective.StatSystem = module.StatSystem
 			effective.TRPGSystem = module.TRPGSystem
-		} else if !ruleSystemEmpty(snapshot.StatSystem, snapshot.TRPGSystem) {
-			effective.StatSystem = snapshot.StatSystem
+			if module.ActorStateID != "" {
+				refs.ActorStateID = module.ActorStateID
+				refs.ActorStateDisabled = false
+				effective.ModuleRefs = refs
+			}
+		} else if !ruleSystemEmpty(snapshot.TRPGSystem) {
 			effective.TRPGSystem = snapshot.TRPGSystem
 			warnings = append(warnings, moduleWarning("rule_system", refs.RuleSystemID, err))
 		} else {
@@ -920,18 +773,7 @@ func ResolveStoryDirectorModules(novaDir string, director StoryDirector) StoryDi
 			warnings = append(warnings, moduleWarning("story_memory_structure", refs.MemoryStructureID, err))
 		}
 	}
-	if refs.OpeningSelectorDisabled {
-		effective.OpeningSelector = StoryDirectorOpeningSelector{Enabled: false, TraitPools: []OpeningTraitPool{}, InitialStateOps: []StateOp{}}
-	} else if refs.OpeningSelectorID != "" {
-		if module, err := NewOpeningSelectorLibrary(novaDir).Get(refs.OpeningSelectorID); err == nil {
-			effective.OpeningSelector = module.OpeningSelector
-		} else if !openingSelectorEmpty(snapshot.OpeningSelector) {
-			effective.OpeningSelector = snapshot.OpeningSelector
-			warnings = append(warnings, moduleWarning("opening_selector", refs.OpeningSelectorID, err))
-		} else {
-			warnings = append(warnings, moduleWarning("opening_selector", refs.OpeningSelectorID, err))
-		}
-	}
+	effective.OpeningSelector = StoryDirectorOpeningSelector{}
 	if !refs.NarrativeStyleDisabled && refs.NarrativeStyleID != "" {
 		if _, err := NewTellerLibrary(novaDir).Get(refs.NarrativeStyleID); err != nil {
 			warnings = append(warnings, moduleWarning("narrative_style", refs.NarrativeStyleID, err))
@@ -960,7 +802,6 @@ func snapshotFromEffectiveDirector(director StoryDirector, refs StoryDirectorMod
 		NarrativeStyleID:      refs.NarrativeStyleID,
 		ImagePresetID:         refs.ImagePresetID,
 		EventPackages:         director.EventPackages,
-		StatSystem:            director.StatSystem,
 		TRPGSystem:            director.TRPGSystem,
 		ActorState:            director.ActorState,
 		StoryMemoryStructures: storyMemoryStructures,
@@ -985,32 +826,142 @@ func DefaultEventPackageModule() EventPackageModule {
 		Name:        "默认事件包",
 		Description: "通用爽文与互动叙事事件卡，覆盖打脸、奇遇、冲突、恋爱、伏笔回收等基础事件。",
 		Events:      pkg.Events,
-		Tags:        []string{"内置", "事件"},
-	})
-}
-
-func DefaultEventSystemModule() EventSystemModule {
-	config := DefaultTellerOrchestrationConfig()
-	return normalizeEventSystemModule(EventSystemModule{
-		Version:     storyDirectorModuleVersion,
-		ID:          DefaultEventSystemID,
-		Name:        "默认事件系统",
-		Description: "通用爽文与互动叙事事件包，覆盖打脸、奇遇、冲突、恋爱、伏笔回收等基础事件。",
-		EventSystem: StoryDirectorEventSystem{EventPackages: config.EventPackages, CustomEvents: config.CustomEvents},
-		Tags:        []string{"内置", "事件"},
 	})
 }
 
 func DefaultRuleSystemModule() RuleSystemModule {
-	config := DefaultTellerOrchestrationConfig()
+	module, _ := builtinRuleSystemModuleByID(DefaultRuleSystemID)
+	return module
+}
+
+func builtinRuleSystemModules() []RuleSystemModule {
+	return []RuleSystemModule{
+		builtinRuleSystemModule(
+			DefaultRuleSystemID,
+			"均衡 DM 检定",
+			"通用均衡裁定风格：有风险和不确定性时掷骰，失败保留推进空间并给出明确代价。",
+			DefaultRuleCheckTemplates()[0],
+		),
+		builtinRuleSystemModule(
+			RuleSystemFailForwardID,
+			"推进型 DM：失败也前进",
+			"失败不会让故事停住；检定决定推进方式、代价、压力和新选择。",
+			RuleCheck{
+				ID:                  RuleSystemFailForwardID,
+				Label:               "推进型 DM：失败也前进",
+				Dice:                "1d20",
+				FailurePolicy:       "fail_forward",
+				DifficultyGuidance:  "默认 normal。计划充分、资源合适、处境有利时降一档；时间压力、敌对环境、信息不足或连续失败后升一档。",
+				StateEffectGuidance: "失败优先增加时间压力、敌意、警戒度、资源消耗、关系损伤或后续劣势，而不是直接否定行动。",
+				Trigger:             "当玩家行动有风险和不确定性，但故事不应该因为一次失败停住时使用。检定用于决定推进方式和代价，而不是决定剧情是否继续。",
+				MustCheckExamples:   []string{"玩家强行穿过守卫封锁线，失败也会进入新局面。", "玩家尝试说服关键 NPC，失败会改变条件而不是关闭剧情。", "玩家在危险现场搜索线索，失败仍能得到方向但会带来压力。"},
+				SkipCheckExamples:   []string{"行动没有明确风险或代价。", "失败只会让剧情卡住且没有有趣后果。", "玩家提出了足够合理且无阻碍的解决方案。"},
+				SuccessHint:         "成功时让玩家达成目标，并给出清楚的新信息、新位置或新机会。",
+				FailureHint:         "失败时仍推进局势，但附加代价、暴露、误导、延迟或更糟的选择。",
+			},
+		),
+		builtinRuleSystemModule(
+			RuleSystemOSRPlayerSkillID,
+			"OSR 型 DM：玩家技巧优先",
+			"优先奖励具体方案和谨慎探索；只有风险仍未解除时才掷骰，失败后果较硬。",
+			RuleCheck{
+				ID:                  RuleSystemOSRPlayerSkillID,
+				Label:               "OSR 型 DM：玩家技巧优先",
+				Dice:                "1d20",
+				FailurePolicy:       "blocked",
+				DifficultyGuidance:  "根据风险和信息差设定。方法粗糙或信息不足升一档；准备充分、工具合适、描述具体降一档。玩家方案直接解决问题时不要检定。",
+				StateEffectGuidance: "失败可以触发陷阱、消耗工具、浪费时间、暴露位置或封锁当前路径。代价应具体且和玩家选择相关。",
+				Trigger:             "当玩法重点是探索、谨慎决策、描述细节和规避风险时使用。玩家说清楚方法且方法合理时尽量不掷骰；只有方法不足、风险仍未解除时才检定。",
+				MustCheckExamples:   []string{"玩家只说“我检查陷阱”，但没有说明检查哪里或怎么检查。", "玩家在不了解机关原理的情况下强行拆除。", "玩家冒险尝试未经验证的计划。"},
+				SkipCheckExamples:   []string{"玩家明确描述检查铰链、地缝、线孔和压力板。", "玩家用长杆安全触发可疑地砖。", "玩家找到正确钥匙并确认门没有额外机关。"},
+				SuccessHint:         "成功时确认玩家方案有效，并奖励谨慎观察、工具使用或环境互动。",
+				FailureHint:         "失败时后果较硬，但要让玩家明白风险来自自己的选择。",
+			},
+		),
+		builtinRuleSystemModule(
+			RuleSystemCinematicHeroicID,
+			"电影英雄型 DM：高光优先",
+			"优先保护角色高光和类型片节奏；检定决定高光是否完美以及是否付出代价。",
+			RuleCheck{
+				ID:                  RuleSystemCinematicHeroicID,
+				Label:               "电影英雄型 DM：高光优先",
+				Dice:                "1d20",
+				Modifier:            -1,
+				FailurePolicy:       "success_at_cost",
+				DifficultyGuidance:  "默认 easy 或 normal。符合角色专长、场面高光、前文铺垫充分时降一档；挑战远超能力或连续冒险时升一档。",
+				StateEffectGuidance: "代价偏叙事化：装备受损、体力消耗、暴露身份、欠下人情、留下伤痕或引出更强敌人。避免轻易阻断高光。",
+				Trigger:             "当玩家行动符合角色高光、类型片节奏或英雄幻想时使用。检定重点不是惩罚失败，而是决定高光是否完美、是否付出代价。",
+				MustCheckExamples:   []string{"主角从爆炸边缘跃出并救下同伴。", "主角在众目睽睽下完成逆转式发言。", "主角以冒险方式突破强敌封锁。"},
+				SkipCheckExamples:   []string{"普通移动、普通对话或没有戏剧张力的动作。", "角色能力明显足够且失败不会产生戏剧价值。", "只是补充帅气描述，不改变局势。"},
+				SuccessHint:         "成功时放大角色魅力和场面反馈，让玩家感到行动确实改变局势。",
+				FailureHint:         "失败时也允许完成部分目标，但附带明显代价或新的危机。",
+			},
+		),
+		builtinRuleSystemModule(
+			RuleSystemGrittySurvivalID,
+			"硬核生存型 DM：资源与后果",
+			"强调危险、稀缺和长期状态；失败会明确消耗资源或恶化处境。",
+			RuleCheck{
+				ID:                  RuleSystemGrittySurvivalID,
+				Label:               "硬核生存型 DM：资源与后果",
+				Dice:                "1d20",
+				Modifier:            1,
+				FailurePolicy:       "hard_failure",
+				DifficultyGuidance:  "默认 normal。装备、防护、休息和补给充足时降一档；疲劳、伤病、恶劣天气、黑暗、饥饿、追兵或缺工具时升一档。",
+				StateEffectGuidance: "失败应落到资源和状态：体力、生命、补给、伤势、感染、疲劳、寒冷、士气或装备耐久。连续失败会累积后果。",
+				Trigger:             "当故事强调危险、稀缺、伤病、疲劳、补给和长期后果时使用。检定用于让风险真实落地，失败可以明显恶化处境。",
+				MustCheckExamples:   []string{"玩家在饥饿和受伤状态下继续赶路。", "玩家冒雨攀爬湿滑峭壁。", "玩家在缺少工具时处理感染伤口。"},
+				SkipCheckExamples:   []string{"角色在安全营地完成常规休整。", "资源充足且行动没有压力。", "失败不会消耗资源或改变处境。"},
+				SuccessHint:         "成功时渡过当前危险，但仍保留环境压力。",
+				FailureHint:         "失败时明确扣减资源或施加状态，不要只给轻描淡写的叙事惩罚。",
+			},
+		),
+		builtinRuleSystemModule(
+			RuleSystemMysteryClueForwardID,
+			"悬疑调查型 DM：线索不断线",
+			"核心线索不因失败消失；检定决定信息质量、误导、时间压力和调查代价。",
+			RuleCheck{
+				ID:                  RuleSystemMysteryClueForwardID,
+				Label:               "悬疑调查型 DM：线索不断线",
+				Dice:                "1d20",
+				FailurePolicy:       "fail_forward",
+				DifficultyGuidance:  "线索新鲜、现场完整、推理合理时降一档；线索被伪装、时间久远、证人撒谎、现场被污染时升一档。",
+				StateEffectGuidance: "失败不删除核心线索，而是增加误导、时间压力、敌人警觉、线索噪音或调查资源消耗。",
+				Trigger:             "当检定关系到线索、真相、调查方向或谜题推进时使用。核心线索不应因失败完全消失，检定决定信息质量、代价和误导程度。",
+				MustCheckExamples:   []string{"玩家在混乱现场寻找凶手留下的关键痕迹。", "玩家判断证词中的矛盾是否有意义。", "玩家试图从残缺记录里还原事件顺序。"},
+				SkipCheckExamples:   []string{"玩家查看明摆在桌上的信件。", "NPC 已经明确告诉玩家的信息。", "玩家提出的推理已经足以连接已知证据。"},
+				SuccessHint:         "成功时给出清晰、可行动、能推进判断的线索。",
+				FailureHint:         "失败时给出不完整或带偏差的信息，并制造新的调查压力。",
+			},
+		),
+		builtinRuleSystemModule(
+			RuleSystemDramaStakesID,
+			"戏剧张力型 DM：只为重大赌注掷骰",
+			"只在关系、信念、承诺、身份或剧情方向会被改变时掷骰。",
+			RuleCheck{
+				ID:                  RuleSystemDramaStakesID,
+				Label:               "戏剧张力型 DM：只为重大赌注掷骰",
+				Dice:                "1d20",
+				FailurePolicy:       "success_at_cost",
+				DifficultyGuidance:  "赌注越大、关系越紧张、对方立场越坚定，难度越高。已有信任、共同利益、真诚让步或强证据可降低难度。",
+				StateEffectGuidance: "结果应影响关系、信任、债务、名声、阵营态度、秘密暴露或人物承诺。代价可以是情感、人情或长期剧情负担。",
+				Trigger:             "当行动关系到人物关系、信念、承诺、身份暴露、道德选择或剧情转折时使用。只有结果会改变角色关系或故事方向时才检定。",
+				MustCheckExamples:   []string{"玩家向背叛过自己的盟友再次求助。", "玩家为了保护同伴公开暴露身份。", "玩家试图说服敌人放弃复仇。"},
+				SkipCheckExamples:   []string{"普通寒暄或交换已知信息。", "没有关系变化的礼貌请求。", "玩家只是表达情绪但不承担行动后果。"},
+				SuccessHint:         "成功时让关系或立场发生可见变化。",
+				FailureHint:         "失败时不一定完全拒绝，但会附加条件、伤害关系、暴露弱点或制造长期后果。",
+			},
+		),
+	}
+}
+
+func builtinRuleSystemModule(id, name, description string, check RuleCheck) RuleSystemModule {
 	return normalizeRuleSystemModule(RuleSystemModule{
 		Version:     storyDirectorModuleVersion,
-		ID:          DefaultRuleSystemID,
-		Name:        "默认数值与TRPG系统",
-		Description: "提供生命、体力、好感等基础属性和可扩展 TRPG 检定模板。",
-		StatSystem:  StoryDirectorStatSystem{Attributes: defaultStoryDirectorAttributes()},
-		TRPGSystem:  StoryDirectorTRPGSystem{RuleTemplates: config.RuleTemplates},
-		Tags:        []string{"内置", "规则"},
+		ID:          id,
+		Name:        name,
+		Description: description,
+		TRPGSystem:  StoryDirectorTRPGSystem{RuleTemplates: []RuleCheck{check}},
 	})
 }
 
@@ -1018,10 +969,9 @@ func DefaultActorStateModule() ActorStateModule {
 	return normalizeActorStateModule(ActorStateModule{
 		Version:     storyDirectorModuleVersion,
 		ID:          DefaultActorStateModuleID,
-		Name:        "默认 Actor 状态系统",
-		Description: "以主角等关键 Actor 为中心维护结构化状态，供规则检定、资源消耗和长期承接读取。",
+		Name:        "默认状态系统",
+		Description: "以主角等关键状态对象为起点维护结构化字段和可复用词条库，供规则检定、资源消耗和长期承接读取；可按作品需要扩展其他状态表模板。",
 		ActorState:  defaultActorStateSystem(),
-		Tags:        []string{"内置", "状态"},
 	})
 }
 
@@ -1042,27 +992,14 @@ func IsBuiltinEventPackageID(id string) bool {
 	return ok
 }
 
-func IsBuiltinEventSystemID(id string) bool {
-	switch normalizeDirectorModuleID(id) {
-	case DefaultEventSystemID,
-		GenreXuanhuanEventSystemID,
-		GenreXiuxianEventSystemID,
-		GenreApocalypseEventSystemID,
-		GenreWesternEventSystemID,
-		GenreUrbanEventSystemID,
-		GenreTRPGEventSystemID:
-		return true
-	default:
-		return false
-	}
-}
-
 func IsBuiltinRuleSystemID(id string) bool {
-	return normalizeDirectorModuleID(id) == DefaultRuleSystemID
+	_, ok := builtinRuleSystemModuleByID(id)
+	return ok
 }
 
 func IsBuiltinActorStateID(id string) bool {
-	return normalizeDirectorModuleID(id) == DefaultActorStateModuleID
+	_, ok := builtinActorStateModuleByID(id)
+	return ok
 }
 
 func IsBuiltinOpeningSelectorID(id string) bool {
@@ -1079,14 +1016,14 @@ func builtinEventPackageModuleByID(id string) (EventPackageModule, bool) {
 	return EventPackageModule{}, false
 }
 
-func builtinEventSystemModuleByID(id string) (EventSystemModule, bool) {
+func builtinRuleSystemModuleByID(id string) (RuleSystemModule, bool) {
 	id = normalizeDirectorModuleID(id)
-	for _, item := range builtinEventSystemModules() {
+	for _, item := range builtinRuleSystemModules() {
 		if item.ID == id {
 			return item, true
 		}
 	}
-	return EventSystemModule{}, false
+	return RuleSystemModule{}, false
 }
 
 func applyEventPackageOwnership(item EventPackageModule) EventPackageModule {
@@ -1120,37 +1057,6 @@ func eventPackageComparable(item EventPackageModule) EventPackageModule {
 	return item
 }
 
-func applyEventSystemOwnership(item EventSystemModule) EventSystemModule {
-	if !IsBuiltinEventSystemID(item.ID) {
-		item.Custom = true
-		item.BuiltinOverridden = false
-		return item
-	}
-	item.Custom = false
-	item.BuiltinOverridden = item.BuiltinOverridden || eventSystemDiffersFromBuiltin(item)
-	return item
-}
-
-func eventSystemDiffersFromBuiltin(item EventSystemModule) bool {
-	builtin, ok := builtinEventSystemModuleByID(item.ID)
-	if !ok {
-		return false
-	}
-	return !reflect.DeepEqual(eventSystemComparable(item), eventSystemComparable(builtin))
-}
-
-func eventSystemComparable(item EventSystemModule) EventSystemModule {
-	item = normalizeEventSystemModule(item)
-	item.Path = ""
-	item.Custom = false
-	item.BuiltinOverridden = false
-	item.Invalid = false
-	item.Error = ""
-	item.CreatedAt = ""
-	item.UpdatedAt = ""
-	return item
-}
-
 func applyRuleSystemOwnership(item RuleSystemModule) RuleSystemModule {
 	if !IsBuiltinRuleSystemID(item.ID) {
 		item.Custom = true
@@ -1163,7 +1069,11 @@ func applyRuleSystemOwnership(item RuleSystemModule) RuleSystemModule {
 }
 
 func ruleSystemDiffersFromBuiltin(item RuleSystemModule) bool {
-	return !reflect.DeepEqual(ruleSystemComparable(item), ruleSystemComparable(DefaultRuleSystemModule()))
+	builtin, ok := builtinRuleSystemModuleByID(item.ID)
+	if !ok {
+		return false
+	}
+	return !reflect.DeepEqual(ruleSystemComparable(item), ruleSystemComparable(builtin))
 }
 
 func ruleSystemComparable(item RuleSystemModule) RuleSystemModule {
@@ -1190,7 +1100,11 @@ func applyActorStateOwnership(item ActorStateModule) ActorStateModule {
 }
 
 func actorStateDiffersFromBuiltin(item ActorStateModule) bool {
-	return !reflect.DeepEqual(actorStateComparable(item), actorStateComparable(DefaultActorStateModule()))
+	builtin, ok := builtinActorStateModuleByID(item.ID)
+	if !ok {
+		return false
+	}
+	return !reflect.DeepEqual(actorStateComparable(item), actorStateComparable(builtin))
 }
 
 func actorStateComparable(item ActorStateModule) ActorStateModule {
@@ -1202,6 +1116,8 @@ func actorStateComparable(item ActorStateModule) ActorStateModule {
 	item.Error = ""
 	item.CreatedAt = ""
 	item.UpdatedAt = ""
+	item.NeedsMigration = false
+	item.SourceVersion = 0
 	return item
 }
 
@@ -1238,7 +1154,6 @@ func normalizeEventPackageModule(item EventPackageModule) EventPackageModule {
 	item.Name = trimBytes(firstNonEmptyString(item.Name, item.ID, "事件包"), 256)
 	item.Description = trimBytes(item.Description, 1024)
 	item.Events = normalizeTellerEventCards(item.Events, item.ID)
-	item.Tags = normalizeStringListLimit(item.Tags, maxTurnBriefListItems)
 	return item
 }
 
@@ -1256,21 +1171,30 @@ func normalizeEventSystemModule(item EventSystemModule) EventSystemModule {
 func normalizeRuleSystemModule(item RuleSystemModule) RuleSystemModule {
 	item.Version = storyDirectorModuleVersion
 	item.ID = normalizeDirectorModuleID(item.ID)
-	item.Name = trimBytes(firstNonEmptyString(item.Name, item.ID, "数值规则系统"), 256)
+	item.Name = trimBytes(firstNonEmptyString(item.Name, item.ID, "TRPG 检定"), 256)
 	item.Description = trimBytes(item.Description, 1024)
-	item.StatSystem.Attributes = normalizeStoryDirectorAttributes(item.StatSystem.Attributes)
+	item.ActorStateID = normalizeDirectorModuleID(item.ActorStateID)
 	item.TRPGSystem.RuleTemplates = normalizeRuleChecks(item.TRPGSystem.RuleTemplates)
-	item.Tags = normalizeStringListLimit(item.Tags, maxTurnBriefListItems)
+	if len(item.TRPGSystem.RuleTemplates) == 0 {
+		item.TRPGSystem.RuleTemplates = DefaultRuleCheckTemplates()
+	}
 	return item
 }
 
 func normalizeActorStateModule(item ActorStateModule) ActorStateModule {
 	item.Version = storyDirectorModuleVersion
 	item.ID = normalizeDirectorModuleID(item.ID)
-	item.Name = trimBytes(firstNonEmptyString(item.Name, item.ID, "Actor 状态系统"), 256)
+	item.Name = trimBytes(firstNonEmptyString(item.Name, item.ID, "状态系统"), 256)
 	item.Description = trimBytes(item.Description, 1024)
 	item.ActorState = normalizeActorStateSystem(item.ActorState)
-	item.Tags = normalizeStringListLimit(item.Tags, maxTurnBriefListItems)
+	item.OpeningSelector = normalizeStoryDirectorOpeningSelector(item.OpeningSelector)
+	if openingSelectorHasContent(item.OpeningSelector) {
+		var warnings []string
+		item.ActorState, warnings = migrateLegacyOpeningTraits(item.ActorState, item.OpeningSelector)
+		item.MigrationWarnings = normalizeStringListLimit(append(item.MigrationWarnings, warnings...), maxTurnBriefListItems)
+		item.OpeningSelector = StoryDirectorOpeningSelector{}
+		item.NeedsMigration = true
+	}
 	return item
 }
 
@@ -1302,11 +1226,6 @@ func normalizeStoryDirectorResolvedSnapshot(snapshot StoryDirectorResolvedSnapsh
 		snapshot.EventPackages = normalizeTellerEventPackagesNoDefault(snapshot.EventPackages)
 	}
 	snapshot.EventSystem = StoryDirectorEventSystem{}
-	if snapshot.ModuleRefs.RuleSystemDisabled {
-		snapshot.StatSystem.Attributes = normalizeStoryDirectorAttributesNoDefault(snapshot.StatSystem.Attributes)
-	} else {
-		snapshot.StatSystem.Attributes = normalizeStoryDirectorAttributes(snapshot.StatSystem.Attributes)
-	}
 	snapshot.TRPGSystem.RuleTemplates = normalizeRuleChecks(snapshot.TRPGSystem.RuleTemplates)
 	if snapshot.ModuleRefs.ActorStateDisabled {
 		snapshot.ActorState = normalizeActorStateSystem(StoryDirectorActorStateSystem{})
@@ -1356,11 +1275,14 @@ func validateEventSystemModule(item EventSystemModule) error {
 }
 
 func validateRuleSystemModule(item RuleSystemModule) error {
-	if err := validateDirectorModuleID(item.ID, "数值规则系统"); err != nil {
+	if err := validateDirectorModuleID(item.ID, "TRPG 检定"); err != nil {
 		return err
 	}
 	if strings.TrimSpace(item.Name) == "" {
-		return errors.New("数值规则系统名称不能为空")
+		return errors.New("TRPG 检定名称不能为空")
+	}
+	if ruleChecksHaveStateBindings(item.TRPGSystem.RuleTemplates) && item.ActorStateID == "" {
+		return errors.New("配置 state_bindings 的 TRPG 检定必须绑定状态系统 actor_state_id")
 	}
 	for _, check := range item.TRPGSystem.RuleTemplates {
 		if err := validateRuleCheck(check); err != nil {
@@ -1371,14 +1293,20 @@ func validateRuleSystemModule(item RuleSystemModule) error {
 }
 
 func validateActorStateModule(item ActorStateModule) error {
-	if err := validateDirectorModuleID(item.ID, "Actor 状态系统"); err != nil {
+	if err := validateDirectorModuleID(item.ID, "状态系统"); err != nil {
 		return err
 	}
 	if strings.TrimSpace(item.Name) == "" {
-		return errors.New("Actor 状态系统名称不能为空")
+		return errors.New("状态系统名称不能为空")
 	}
 	if len(item.ActorState.Templates) == 0 {
-		return errors.New("Actor 状态系统至少需要一个 actor 类型模板")
+		return errors.New("状态系统至少需要一个 actor 类型模板")
+	}
+	if err := validateActorStateSystem(item.ActorState); err != nil {
+		return err
+	}
+	if err := validateActorTraitSystem(item.ActorState); err != nil {
+		return err
 	}
 	return nil
 }
@@ -1390,12 +1318,16 @@ func validateOpeningSelectorModule(item OpeningSelectorModule) error {
 	if strings.TrimSpace(item.Name) == "" {
 		return errors.New("开局选择器名称不能为空")
 	}
-	for _, op := range item.OpeningSelector.InitialStateOps {
+	return validateOpeningSelectorConfig(item.OpeningSelector)
+}
+
+func validateOpeningSelectorConfig(selector StoryDirectorOpeningSelector) error {
+	for _, op := range selector.InitialStateOps {
 		if err := validateStateOp(op); err != nil {
 			return err
 		}
 	}
-	for _, pool := range item.OpeningSelector.TraitPools {
+	for _, pool := range selector.TraitPools {
 		for _, trait := range pool.Traits {
 			for _, op := range trait.Ops {
 				if err := validateStateOp(op); err != nil {
@@ -1448,7 +1380,7 @@ func parseRuleSystemFile(path string) (RuleSystemModule, error) {
 	}
 	var item RuleSystemModule
 	if err := json.Unmarshal(data, &item); err != nil {
-		return RuleSystemModule{}, fmt.Errorf("解析数值规则系统 JSON 失败: %w", err)
+		return RuleSystemModule{}, fmt.Errorf("解析 TRPG 检定 JSON 失败: %w", err)
 	}
 	item = normalizeRuleSystemModule(item)
 	if err := validateRuleSystemModule(item); err != nil {
@@ -1465,9 +1397,14 @@ func parseActorStateFile(path string) (ActorStateModule, error) {
 	}
 	var item ActorStateModule
 	if err := json.Unmarshal(data, &item); err != nil {
-		return ActorStateModule{}, fmt.Errorf("解析 Actor 状态系统 JSON 失败: %w", err)
+		return ActorStateModule{}, fmt.Errorf("解析状态系统 JSON 失败: %w", err)
 	}
+	sourceVersion := item.Version
+	hadLegacyOpening := openingSelectorHasContent(item.OpeningSelector)
 	item = normalizeActorStateModule(item)
+	item.ActorState = attachBuiltinActorStateLegacyPaths(item.ID, item.ActorState)
+	item.SourceVersion = sourceVersion
+	item.NeedsMigration = item.NeedsMigration || sourceVersion < storyDirectorModuleVersion || hadLegacyOpening
 	if err := validateActorStateModule(item); err != nil {
 		return ActorStateModule{}, err
 	}
@@ -1504,18 +1441,6 @@ func writeEventPackageFile(path string, item EventPackageModule) error {
 	return os.WriteFile(path, append(data, '\n'), 0o644)
 }
 
-func writeEventSystemFile(path string, item EventSystemModule) error {
-	item = normalizeEventSystemModule(item)
-	data, err := json.MarshalIndent(item, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, append(data, '\n'), 0o644)
-}
-
 func writeRuleSystemFile(path string, item RuleSystemModule) error {
 	item = normalizeRuleSystemModule(item)
 	data, err := json.MarshalIndent(item, "", "  ")
@@ -1530,7 +1455,9 @@ func writeRuleSystemFile(path string, item RuleSystemModule) error {
 
 func writeActorStateFile(path string, item ActorStateModule) error {
 	item = normalizeActorStateModule(item)
-	data, err := json.MarshalIndent(item, "", "  ")
+	item.NeedsMigration = false
+	item.SourceVersion = 0
+	data, err := marshalJSONWithoutFields(item, "opening_selector")
 	if err != nil {
 		return err
 	}
@@ -1538,6 +1465,21 @@ func writeActorStateFile(path string, item ActorStateModule) error {
 		return err
 	}
 	return os.WriteFile(path, append(data, '\n'), 0o644)
+}
+
+func marshalJSONWithoutFields(value any, fields ...string) ([]byte, error) {
+	data, err := json.Marshal(value)
+	if err != nil {
+		return nil, err
+	}
+	payload := map[string]any{}
+	if err := json.Unmarshal(data, &payload); err != nil {
+		return nil, err
+	}
+	for _, field := range fields {
+		delete(payload, field)
+	}
+	return json.MarshalIndent(payload, "", "  ")
 }
 
 func writeOpeningSelectorFile(path string, item OpeningSelectorModule) error {
@@ -1579,22 +1521,30 @@ func sortEventPackages(items []EventPackageModule) {
 	})
 }
 
-func sortEventSystems(items []EventSystemModule) {
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].Custom != items[j].Custom {
-			return !items[i].Custom
-		}
-		return items[i].ID < items[j].ID
-	})
-}
-
 func sortRuleSystems(items []RuleSystemModule) {
 	sort.Slice(items, func(i, j int) bool {
 		if items[i].Custom != items[j].Custom {
 			return !items[i].Custom
 		}
+		if !items[i].Custom {
+			leftRank := ruleSystemBuiltinSortRank(items[i].ID)
+			rightRank := ruleSystemBuiltinSortRank(items[j].ID)
+			if leftRank != rightRank {
+				return leftRank < rightRank
+			}
+		}
 		return items[i].ID < items[j].ID
 	})
+}
+
+func ruleSystemBuiltinSortRank(id string) int {
+	id = normalizeDirectorModuleID(id)
+	for index, item := range builtinRuleSystemModules() {
+		if item.ID == id {
+			return index
+		}
+	}
+	return len(builtinRuleSystemModules())
 }
 
 func sortActorStates(items []ActorStateModule) {
@@ -1602,8 +1552,25 @@ func sortActorStates(items []ActorStateModule) {
 		if items[i].Custom != items[j].Custom {
 			return !items[i].Custom
 		}
+		if !items[i].Custom {
+			leftRank := actorStateBuiltinSortRank(items[i].ID)
+			rightRank := actorStateBuiltinSortRank(items[j].ID)
+			if leftRank != rightRank {
+				return leftRank < rightRank
+			}
+		}
 		return items[i].ID < items[j].ID
 	})
+}
+
+func actorStateBuiltinSortRank(id string) int {
+	id = normalizeDirectorModuleID(id)
+	for index, item := range builtinActorStateModules() {
+		if item.ID == id {
+			return index
+		}
+	}
+	return len(builtinActorStateModules())
 }
 
 func sortOpeningSelectors(items []OpeningSelectorModule) {
@@ -1729,7 +1696,6 @@ func eventPackageModuleFromTellerPackage(pkg TellerEventPackage, source EventSys
 		Name:              firstNonEmptyString(pkg.Name, source.Name, pkg.ID),
 		Description:       firstNonEmptyString(source.Description, "由旧事件系统迁移生成。"),
 		Events:            pkg.Events,
-		Tags:              source.Tags,
 		BuiltinOverridden: source.BuiltinOverridden && IsBuiltinEventPackageID(pkg.ID),
 		CreatedAt:         source.CreatedAt,
 		UpdatedAt:         source.UpdatedAt,
@@ -1774,7 +1740,6 @@ func eventPackageModuleFromCustomEvents(source EventSystemModule) EventPackageMo
 		Name:        firstNonEmptyString(source.Name, source.ID) + " 迁移事件包",
 		Description: "由旧事件系统 custom_events 自动迁移生成。",
 		Events:      cards,
-		Tags:        append(normalizeStringListLimit(source.Tags, maxTurnBriefListItems), "迁移"),
 		CreatedAt:   source.CreatedAt,
 		UpdatedAt:   source.UpdatedAt,
 	})
@@ -1813,8 +1778,6 @@ func eventCardFromDirectorEvent(event DirectorEvent, fallbackID string) TellerEv
 		Enabled:             event.Enabled,
 		Category:            event.Category,
 		Tags:                event.CompatibleGenres,
-		Weight:              event.Weight,
-		CooldownTurns:       event.CooldownTurns,
 		Intensity:           event.Intensity,
 	}
 }
@@ -1822,7 +1785,7 @@ func eventCardFromDirectorEvent(event DirectorEvent, fallbackID string) TellerEv
 func storyDirectorHasEmbeddedModules(director StoryDirector) bool {
 	return len(director.EventPackages) > 0 ||
 		!eventSystemEmpty(director.EventSystem) ||
-		!ruleSystemEmpty(director.StatSystem, director.TRPGSystem) ||
+		!ruleSystemEmpty(director.TRPGSystem) ||
 		!actorStateEmpty(director.ActorState) ||
 		!openingSelectorEmpty(director.OpeningSelector)
 }
@@ -1831,10 +1794,14 @@ func eventSystemEmpty(system StoryDirectorEventSystem) bool {
 	return len(system.EventPackages) == 0 && len(system.CustomEvents) == 0
 }
 
-func ruleSystemEmpty(stat StoryDirectorStatSystem, trpg StoryDirectorTRPGSystem) bool {
-	return len(stat.Attributes) == 0 && len(trpg.RuleTemplates) == 0
+func ruleSystemEmpty(trpg StoryDirectorTRPGSystem) bool {
+	return len(trpg.RuleTemplates) == 0
 }
 
 func openingSelectorEmpty(selector StoryDirectorOpeningSelector) bool {
 	return !selector.Enabled && len(selector.TraitPools) == 0 && len(selector.InitialStateOps) == 0
+}
+
+func openingSelectorHasContent(selector StoryDirectorOpeningSelector) bool {
+	return len(selector.TraitPools) > 0 || len(selector.InitialStateOps) > 0
 }

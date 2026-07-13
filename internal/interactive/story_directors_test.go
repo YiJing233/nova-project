@@ -1,11 +1,27 @@
 package interactive
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
 	"unicode/utf8"
 )
+
+func TestStoryDirectorLegacyRandomRateMigratesAndIsNotPersisted(t *testing.T) {
+	rate := 0.10
+	director := normalizeStoryDirector(StoryDirector{ID: "legacy-rate", Name: "旧概率", Strategy: StoryDirectorStrategy{Enabled: true, LegacyRandomEventRate: &rate}})
+	if director.Strategy.EventFrequency != EventFrequencySparse || director.Strategy.LegacyRandomEventRate != nil {
+		t.Fatalf("legacy random rate should migrate to sparse frequency: %#v", director.Strategy)
+	}
+	data, err := json.Marshal(director)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "random_event_rate") {
+		t.Fatalf("normalized director should not persist legacy probability field: %s", data)
+	}
+}
 
 func TestStoryDirectorLibraryCRUDAndRevisionConflict(t *testing.T) {
 	library := NewStoryDirectorLibrary(t.TempDir())
@@ -20,8 +36,11 @@ func TestStoryDirectorLibraryCRUDAndRevisionConflict(t *testing.T) {
 	if directors[0].ModuleRefs.NarrativeStyleDisabled || directors[0].ModuleRefs.EventPackagesDisabled || directors[0].ModuleRefs.RuleSystemDisabled || directors[0].ModuleRefs.ActorStateDisabled || directors[0].ModuleRefs.OpeningSelectorDisabled || directors[0].ModuleRefs.ImagePresetDisabled {
 		t.Fatalf("default story director modules should start enabled: %#v", directors[0].ModuleRefs)
 	}
-	if directors[0].Strategy.DirectorAgentMode != DirectorAgentModeTriggered || directors[0].Strategy.BranchPlanningTurns != defaultBranchPlanningTurns {
+	if directors[0].Strategy.DirectorAgentMode != DirectorAgentModeTriggered || directors[0].Strategy.StateSchemaAdaptationMode != StateSchemaAdaptationModeAuto || directors[0].Strategy.BranchPlanningTurns != defaultBranchPlanningTurns {
 		t.Fatalf("default story director should use triggered background director schedule: %#v", directors[0].Strategy)
+	}
+	if normalized := NormalizeStoryDirectorStrategy(StoryDirectorStrategy{StateSchemaAdaptationMode: StateSchemaAdaptationModeOff}); normalized.StateSchemaAdaptationMode != StateSchemaAdaptationModeOff {
+		t.Fatalf("story director should preserve disabled state schema adaptation: %#v", normalized)
 	}
 
 	created, err := library.Create(StoryDirector{
@@ -30,63 +49,74 @@ func TestStoryDirectorLibraryCRUDAndRevisionConflict(t *testing.T) {
 		Description: "用于测试",
 		Strategy: StoryDirectorStrategy{
 			Enabled:             true,
-			RandomEventRate:     2,
+			EventFrequency:      EventFrequencyFrequent,
 			DirectorAgentMode:   "unknown",
 			BranchPlanningTurns: 99,
 		},
-		StatSystem: StoryDirectorStatSystem{Attributes: []StoryDirectorAttribute{
-			{ID: "mana", Path: "resources.mana", Name: "法力", Default: 3, Max: 9, Visibility: "hidden"},
-			{ID: "invalid", Path: ".bad", Name: "无效"},
-		}},
-		TRPGSystem: StoryDirectorTRPGSystem{RuleTemplates: []RuleCheck{{
-			ID:               "luck",
-			Label:            "幸运",
-			Kind:             "dice",
-			Mode:             "d100_under",
-			AttributePath:    "resources.mana",
-			Dice:             "1d100",
-			Difficulty:       55,
-			ResourceCostPath: "resources.mana",
-			ResourceCost:     1,
-		}}},
-		OpeningSelector: StoryDirectorOpeningSelector{
-			Enabled: true,
-			InitialStateOps: []StateOp{{
-				Op:    "set",
-				Path:  "flags.opening",
-				Value: true,
+		ActorState: StoryDirectorActorStateSystem{
+			Templates: []ActorStateTemplate{{
+				ID:   "protagonist",
+				Name: "主角",
+				TraitRules: []ActorTraitRule{{
+					PoolID: "origins", DrawCount: 1,
+				}},
+				Fields: []ActorStateField{
+					{ID: "mana", Path: "resources.mana", Name: "法力", Type: "number", Default: float64(3), Max: floatPtr(9), Visibility: "hidden"},
+					{ID: "invalid", Path: ".bad", Name: "无效", Type: "number"},
+				},
 			}},
+			TraitPools:    []ActorTraitPool{{ID: "origins", Name: "出身", Traits: []ActorTraitDefinition{{ID: "wanderer", Name: "旅人", Weight: 1, Visibility: "visible"}}}},
+			InitialActors: []ActorStateInitialActor{{ID: DefaultActorID, Name: "主角", TemplateID: "protagonist", Role: "protagonist"}},
 		},
+		TRPGSystem: StoryDirectorTRPGSystem{RuleTemplates: []RuleCheck{{
+			ID:                  "luck",
+			Label:               "幸运",
+			Dice:                "1d100",
+			Modifier:            10,
+			FailurePolicy:       "success_at_cost",
+			DifficultyGuidance:  "幸运耗尽时提高难度。",
+			StateEffectGuidance: "成功可增加机会，失败可消耗资源。",
+		}}},
 	})
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	if !created.Custom || created.Strategy.RandomEventRate != 1 || created.Strategy.DirectorAgentMode != DirectorAgentModeTriggered || created.Strategy.BranchPlanningTurns != 12 {
+	if !created.Custom || created.Strategy.EventFrequency != EventFrequencyFrequent || created.Strategy.DirectorAgentMode != DirectorAgentModeTriggered || created.Strategy.BranchPlanningTurns != 12 {
 		t.Fatalf("custom director should be marked and strategy should be normalized: %#v", created)
 	}
 	if created.ModuleRefs.EventPackagesDisabled || created.ModuleRefs.RuleSystemDisabled || created.ModuleRefs.OpeningSelectorDisabled {
 		t.Fatalf("legacy-style directors without disabled refs should keep modules enabled: %#v", created.ModuleRefs)
 	}
-	if len(created.StatSystem.Attributes) != 1 || created.StatSystem.Attributes[0].Visibility != "hidden" {
-		t.Fatalf("attributes should be validated and preserve visibility: %#v", created.StatSystem.Attributes)
+	if len(created.ActorState.Templates) != 1 || len(created.ActorState.Templates[0].Fields) != 2 || created.ActorState.Templates[0].Fields[0].Name != "法力" || created.ActorState.Templates[0].Fields[0].Visibility != "hidden" {
+		t.Fatalf("state field names should be preserved as IDs without path syntax filtering: %#v", created.ActorState)
 	}
-	if len(created.TRPGSystem.RuleTemplates) != 1 || created.TRPGSystem.RuleTemplates[0].AttributePath != "actors.protagonist.state.resources.mana" || created.TRPGSystem.RuleTemplates[0].ResourceCostPath != "actors.protagonist.state.resources.mana" {
-		t.Fatalf("legacy rule paths should migrate to protagonist actor state: %#v", created.TRPGSystem.RuleTemplates)
+	if len(created.TRPGSystem.RuleTemplates) != 1 || created.TRPGSystem.RuleTemplates[0].Dice != "1d20" || created.TRPGSystem.RuleTemplates[0].Modifier != 10 {
+		t.Fatalf("rule templates should normalize to the simplified schema: %#v", created.TRPGSystem.RuleTemplates)
 	}
-	ops := StoryDirectorInitialStateOps(created)
-	if !containsStateOp(ops, "actors.protagonist.state.resources.mana", float64(3)) || !containsStateOp(ops, "actors.protagonist.state.resources.mana_max", float64(9)) || !containsStateOp(ops, "flags.opening", true) {
-		t.Fatalf("initial state ops should include attribute defaults and opening ops: %#v", ops)
+	if created.TRPGSystem.RuleTemplates[0].DifficultyGuidance != "幸运耗尽时提高难度。" || created.TRPGSystem.RuleTemplates[0].StateEffectGuidance != "成功可增加机会，失败可消耗资源。" {
+		t.Fatalf("rule templates should preserve natural-language guidance: %#v", created.TRPGSystem.RuleTemplates[0])
+	}
+	ruleData, err := json.Marshal(created.TRPGSystem.RuleTemplates[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(ruleData), "impact") || strings.Contains(string(ruleData), "category") || strings.Contains(string(ruleData), "default_difficulty") || strings.Contains(string(ruleData), "default_roll_mode") {
+		t.Fatalf("rule template JSON should not keep removed fields: %s", string(ruleData))
+	}
+	ops, actorOps, err := BuildActorStateInitialChanges(created.ActorState, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsActorStateOp(actorOps, "protagonist", "法力", float64(3)) || !containsStateOpPath(ops, "actors.protagonist.traits") {
+		t.Fatalf("initial state changes should use the name-based field ID and trait snapshots: ops=%#v actor_ops=%#v", ops, actorOps)
 	}
 
 	updated, err := library.Update(created.ID, StoryDirector{
 		Name:          "Agent 更新",
 		Strategy:      StoryDirectorStrategy{Enabled: true},
-		StatSystem:    StoryDirectorStatSystem{Attributes: []StoryDirectorAttribute{}},
 		TRPGSystem:    created.TRPGSystem,
+		ActorState:    created.ActorState,
 		EventPackages: created.EventPackages,
-		OpeningSelector: StoryDirectorOpeningSelector{
-			Enabled: true,
-		},
 	}, created.UpdatedAt)
 	if err != nil {
 		t.Fatalf("Update failed: %v", err)
@@ -153,9 +183,20 @@ func TestStoryDirectorStrategyPromptMarkdownNormalizeAndSummaries(t *testing.T) 
 		ID:   "prompt-director",
 		Name: "提示导演",
 		Strategy: StoryDirectorStrategy{
-			Enabled:        true,
-			PromptMarkdown: longPrompt,
+			Enabled:            true,
+			RuleVisibilityMode: "bad-value",
+			PromptMarkdown:     longPrompt,
 		},
+		TRPGSystem: StoryDirectorTRPGSystem{RuleTemplates: []RuleCheck{{
+			ID:                  "guidance-rule",
+			Label:               "指引规则",
+			Dice:                "1d20",
+			FailurePolicy:       "fail_forward",
+			DifficultyGuidance:  "按状态数值判断难度。",
+			StateEffectGuidance: "按检定结果调整状态数值。",
+			MustCheckExamples:   []string{"在守卫逼近时撬锁。"},
+			SkipCheckExamples:   []string{"观察空房间。"},
+		}}},
 	})
 	if director.Strategy.PromptMarkdown == "" {
 		t.Fatalf("prompt markdown should be preserved")
@@ -172,8 +213,14 @@ func TestStoryDirectorStrategyPromptMarkdownNormalizeAndSummaries(t *testing.T) 
 	if got := StoryDirectorStrategyPromptMarkdown(director); got != director.Strategy.PromptMarkdown {
 		t.Fatalf("strategy prompt helper mismatch: %q vs %q", got, director.Strategy.PromptMarkdown)
 	}
+	if director.Strategy.RuleVisibilityMode != RuleVisibilityModeAuditOnly {
+		t.Fatalf("invalid rule visibility should fall back to audit_only: %#v", director.Strategy)
+	}
 	if DefaultStoryDirector().Strategy.PromptMarkdown != "" {
 		t.Fatalf("default story director should not set a custom prompt")
+	}
+	if DefaultStoryDirector().Strategy.RuleVisibilityMode != RuleVisibilityModeAuditOnly {
+		t.Fatalf("default story director should keep rule audit sidebar only: %#v", DefaultStoryDirector().Strategy)
 	}
 	oversized := normalizeStoryDirector(StoryDirector{
 		ID:   "oversized-prompt-director",
@@ -195,8 +242,11 @@ func TestStoryDirectorStrategyPromptMarkdownNormalizeAndSummaries(t *testing.T) 
 		if !strings.Contains(summary, `"strategy"`) || !strings.Contains(summary, `"mainline_strength"`) {
 			t.Fatalf("%s summary should retain structured strategy fields:\n%s", name, summary)
 		}
-		if !strings.Contains(summary, `"director_agent_mode"`) || !strings.Contains(summary, `"branch_planning_turns"`) {
+		if !strings.Contains(summary, `"director_agent_mode"`) || !strings.Contains(summary, `"branch_planning_turns"`) || !strings.Contains(summary, `"rule_visibility_mode"`) || !strings.Contains(summary, `"state_schema_adaptation_mode"`) {
 			t.Fatalf("%s summary should retain background director schedule:\n%s", name, summary)
+		}
+		if !strings.Contains(summary, `"difficulty_guidance"`) || !strings.Contains(summary, `"state_effect_guidance"`) || !strings.Contains(summary, `"must_check_examples"`) || !strings.Contains(summary, `"skip_check_examples"`) || strings.Contains(summary, `"impact"`) {
+			t.Fatalf("%s summary should expose natural-language rule guidance without legacy impact:\n%s", name, summary)
 		}
 	}
 }
@@ -213,11 +263,11 @@ func TestStoryDirectorLibraryMigratesLegacyCustomTellerOrchestration(t *testing.
 		t.Fatalf("create preexisting director failed: %v", err)
 	}
 	if _, err := tellers.Create(Teller{
-		ID:              "legacy-style",
-		Name:            "旧风格",
-		RandomEventRate: 0.42,
-		Orchestration:   legacyOrchestrationForTest(),
-		Slots:           []TellerPromptSlot{testTellerSlot()},
+		ID:                    "legacy-style",
+		Name:                  "旧风格",
+		LegacyRandomEventRate: floatPtr(0.42),
+		Orchestration:         legacyOrchestrationForTest(),
+		Slots:                 []TellerPromptSlot{testTellerSlot()},
 	}); err != nil {
 		t.Fatalf("create legacy teller failed: %v", err)
 	}
@@ -237,10 +287,10 @@ func TestStoryDirectorLibraryMigratesLegacyCustomTellerOrchestration(t *testing.
 	if err != nil {
 		t.Fatalf("legacy teller orchestration should migrate: %v", err)
 	}
-	if migrated.Name != "旧风格 故事导演" || migrated.Strategy.RandomEventRate != 0.42 {
+	if migrated.Name != "旧风格 故事导演" || migrated.Strategy.EventFrequency != EventFrequencyFrequent {
 		t.Fatalf("unexpected migrated metadata: %#v", migrated)
 	}
-	if len(migrated.ModuleRefs.EventPackageIDs) == 0 || migrated.ModuleRefs.RuleSystemID == "" || migrated.ModuleRefs.OpeningSelectorID == "" {
+	if len(migrated.ModuleRefs.EventPackageIDs) == 0 || migrated.ModuleRefs.RuleSystemID == "" || migrated.ModuleRefs.ActorStateID == "" {
 		t.Fatalf("legacy embedded orchestration should be split into module refs: %#v", migrated.ModuleRefs)
 	}
 	eventModule, err := NewEventPackageLibrary(novaDir).Get(migrated.ModuleRefs.EventPackageIDs[0])
@@ -256,11 +306,21 @@ func TestStoryDirectorLibraryMigratesLegacyCustomTellerOrchestration(t *testing.
 	if len(migrated.EventPackages) != 1 || len(migrated.EventPackages[0].Events) != 1 {
 		t.Fatalf("event packages should be copied: %#v", migrated.EventPackages)
 	}
-	if len(migrated.TRPGSystem.RuleTemplates) != 1 || migrated.TRPGSystem.RuleTemplates[0].Mode != "d20_dc" {
+	if len(migrated.TRPGSystem.RuleTemplates) != 1 || migrated.TRPGSystem.RuleTemplates[0].Dice != "1d20" || migrated.TRPGSystem.RuleTemplates[0].Modifier != 0 {
 		t.Fatalf("rule templates should be copied: %#v", migrated.TRPGSystem.RuleTemplates)
 	}
-	if len(migrated.OpeningSelector.TraitPools) != 1 || !containsStateOp(migrated.OpeningSelector.InitialStateOps, "actors.protagonist.state.resources.hp", float64(12)) {
-		t.Fatalf("opening selector should be copied: %#v", migrated.OpeningSelector)
+	if len(migrated.ActorState.TraitPools) != 1 || migrated.ActorState.TraitPools[0].ID != "talent" {
+		t.Fatalf("legacy traits should migrate into the actor state library: %#v", migrated.ActorState)
+	}
+	if migrated.ModuleRefs.OpeningSelectorID != "" {
+		t.Fatalf("opening selector should migrate into actor state module instead of a standalone ref: %#v", migrated.ModuleRefs)
+	}
+	actorStateModule, err := NewActorStateLibrary(novaDir).Get(migrated.ModuleRefs.ActorStateID)
+	if err != nil {
+		t.Fatalf("migrated actor state module should be readable: %v", err)
+	}
+	if len(actorStateModule.ActorState.TraitPools) != 1 || actorStateModule.ActorState.TraitPools[0].ID != "talent" || len(actorStateModule.MigrationWarnings) == 0 {
+		t.Fatalf("migrated actor state should own trait pools and warn about discarded ops: %#v", actorStateModule)
 	}
 
 	preexisting, err := directors.Get("preexisting")
@@ -287,16 +347,15 @@ func legacyOrchestrationForTest() *TellerOrchestrationConfig {
 				TypeName:            "反转",
 				DescriptionMarkdown: "误会后反转。",
 				Enabled:             true,
-				Weight:              2,
 			}},
 		}},
 		RuleTemplates: []RuleCheck{{
-			ID:         "stealth",
-			Label:      "潜行",
-			Kind:       "dice",
-			Mode:       "d20_dc",
-			Dice:       "1d20",
-			Difficulty: 15,
+			ID:                  "stealth",
+			Label:               "潜行",
+			Dice:                "1d20",
+			FailurePolicy:       "blocked",
+			DifficultyGuidance:  "守卫警觉时提高难度。",
+			StateEffectGuidance: "失败可消耗体力并增加警戒。",
 		}},
 		Opening: TellerOpeningConfig{
 			Enabled: true,
@@ -328,6 +387,24 @@ func testTellerSlot() TellerPromptSlot {
 func containsStateOp(ops []StateOp, path string, value any) bool {
 	for _, op := range ops {
 		if op.Path == path && op.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
+func containsStateOpPath(ops []StateOp, path string) bool {
+	for _, op := range ops {
+		if op.Path == path {
+			return true
+		}
+	}
+	return false
+}
+
+func containsActorStateOp(ops []ActorStateOp, actorID, fieldID string, value any) bool {
+	for _, op := range ops {
+		if op.ActorID == actorID && op.FieldID == fieldID && op.Value == value {
 			return true
 		}
 	}

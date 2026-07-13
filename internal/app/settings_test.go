@@ -98,8 +98,7 @@ func TestAppUpdateWorkspaceSettingsPersists(t *testing.T) {
 		cfg:       &config.Config{Workspace: ws, NovaDir: novaDir},
 		workspace: ws,
 	}
-	hotChoices := false
-	in := config.Settings{OpenAIModel: "ws-model", InteractiveHotChoices: &hotChoices}
+	in := config.Settings{OpenAIModel: "ws-model"}
 	if _, err := a.UpdateWorkspaceSettings(in); err != nil {
 		t.Fatal(err)
 	}
@@ -109,9 +108,6 @@ func TestAppUpdateWorkspaceSettingsPersists(t *testing.T) {
 	}
 	if out.OpenAIModel != "ws-model" {
 		t.Fatalf("workspace model not persisted: %s", out.OpenAIModel)
-	}
-	if out.InteractiveHotChoices == nil || *out.InteractiveHotChoices {
-		t.Fatalf("interactive hot choices not persisted: %v", out.InteractiveHotChoices)
 	}
 }
 
@@ -124,7 +120,13 @@ func TestAppUpdateWorkspaceSettingsFiltersLLMInputLogSetting(t *testing.T) {
 		workspace: ws,
 	}
 	enabled := true
-	if _, err := a.UpdateWorkspaceSettings(config.Settings{LLMInputLogEnabled: &enabled}); err != nil {
+	retention := 1
+	if _, err := a.UpdateWorkspaceSettings(config.Settings{
+		LLMInputLogEnabled: &enabled,
+		TraceCaptureLevel:  "debug",
+		TraceExporter:      "otlp",
+		TraceRetentionRuns: &retention,
+	}); err != nil {
 		t.Fatal(err)
 	}
 	out, err := config.ReadSettingsFile(config.WorkspaceConfigPath(ws))
@@ -133,6 +135,9 @@ func TestAppUpdateWorkspaceSettingsFiltersLLMInputLogSetting(t *testing.T) {
 	}
 	if out.LLMInputLogEnabled != nil {
 		t.Fatalf("workspace llm input log setting should not be persisted: %#v", out.LLMInputLogEnabled)
+	}
+	if out.TraceCaptureLevel != "" || out.TraceExporter != "" || out.TraceRetentionRuns != nil {
+		t.Fatalf("workspace trace debug settings should not be persisted: %#v", out)
 	}
 }
 

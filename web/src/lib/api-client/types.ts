@@ -63,6 +63,16 @@ export interface ChatMessage {
   created_at?: string
   turn_versions?: { turn_id: string; ts: string; current?: boolean }[]
   turn_version_index?: number
+  user_references?: UserMessageReference[]
+}
+
+export interface UserMessageReference {
+  kind: 'file' | 'lore' | 'style' | 'selection' | 'review_comment'
+  id?: string
+  label: string
+  detail?: string
+  start_line?: number
+  end_line?: number
 }
 
 export interface PublicRuleRoll {
@@ -85,9 +95,8 @@ export interface PublicRuleRoll {
 }
 
 export interface PublicRuleStateChange {
-	actor_id?: string
-	field_id?: string
-	path?: string
+  actor_id: string
+  field_id: string
   change: number
   reason?: string
 }
@@ -183,6 +192,10 @@ export interface AgentRunTraceSummary {
   tool_errors?: number
   tool_truncated?: number
   invalid_tool_args?: number
+  tool_domain_accepted?: number
+  tool_domain_rejected?: number
+  tool_domain_pending?: number
+  tool_domain_diagnostics?: number
   llm_calls?: number
   prompt_tokens?: number
   cached_prompt_tokens?: number
@@ -223,6 +236,8 @@ export interface ContextAnalysisPart {
   note?: string
   bytes: number
   chars: number
+  /** Diagnostic source breakdown; content remains the exact model-visible message. */
+  parts?: ContextAnalysisPart[]
 }
 
 export interface ContextAnalysisCompaction {
@@ -291,6 +306,13 @@ export interface BookRecord {
   last_opened_at: string
 }
 
+export type BookSortMode = 'recent' | 'manual'
+
+export interface BookshelfResult {
+  books: BookRecord[]
+  sort_mode: BookSortMode
+}
+
 export interface BookCoverResult {
   schema: 'book_cover.v1' | string
   cover_path: string
@@ -351,6 +373,18 @@ export interface WorkspaceSearchResult {
   match_text: string
 }
 
+export interface WorkspaceReplaceFileResult {
+  path: string
+  replacements: number
+}
+
+export interface WorkspaceReplaceResult {
+  workspace: string
+  files: WorkspaceReplaceFileResult[]
+  total_replacements: number
+  skipped: string[]
+}
+
 export interface CharacterCardImportResult {
   name: string
   target_path: string
@@ -366,6 +400,10 @@ export interface CharacterCardImportResult {
   workspace?: string
   book_meta?: BookMeta
   message: string
+  resident_lore_bytes: number
+  classification_mode: LoreClassificationMode
+  classification_counts: Partial<Record<LoreItem['type'], number>>
+  uncertain_type_count: number
 }
 
 export interface CharacterCardPreview {
@@ -376,12 +414,28 @@ export interface CharacterCardPreview {
   user_placeholder_found: boolean
   will_import_cover: boolean
   compatibility: CharacterCardCompatibilityReport
+  enabled_entry_count: number
+  disabled_entry_count: number
+  resident_entry_count: number
+  resident_entry_bytes: number
+  resident_lore_bytes: number
+  auto_entry_count: number
+  removed_runtime_entry_count: number
+  sanitized_mixed_entry_count: number
+  opening_truncated_count: number
+  resident_lore_warning: boolean
+  resident_lore_warning_threshold_kb: number
+  classification_mode: LoreClassificationMode
+  classification_counts: Partial<Record<LoreItem['type'], number>>
+  uncertain_type_count: number
 }
 
 interface CharacterCardCompatibilityReport {
-  imported_fields: string[]
-  downgraded_fields: string[]
-  unsupported_fields: string[]
+  capabilities: string[]
+  sanitized_runtime: string[]
+  discarded_extensions: string[]
+  warnings: string[]
+  ignored_loading_rules: boolean
 }
 
 interface NovelImportChapter {
@@ -517,6 +571,7 @@ export interface LoreItem {
   id: string
   enabled: boolean
   type: 'character' | 'world' | 'location' | 'faction' | 'rule' | 'item' | 'other'
+  type_source: 'heuristic' | 'semantic' | 'manual' | 'legacy'
   name: string
   importance: 'major' | 'important' | 'minor'
   load_mode: 'resident' | 'auto' | 'manual'
@@ -527,6 +582,49 @@ export interface LoreItem {
   created_at: string
   updated_at: string
   image?: LoreItemImage
+  provenance?: {
+    kind: string
+    source_name: string
+    source_record_id: string
+    source_hash: string
+  }
+}
+
+export type LoreClassificationMode = 'heuristic' | 'semantic'
+
+export interface LoreClassificationPreviewRequest {
+  item_ids?: string[]
+  mode?: LoreClassificationMode
+}
+
+export interface LoreClassificationPreviewItem {
+  id: string
+  name: string
+  current_type: LoreItem['type']
+  current_type_source: LoreItem['type_source']
+  suggested_type: LoreItem['type']
+  confidence: 'high' | 'medium' | 'low'
+  reason?: string
+  suggestion_source: 'heuristic' | 'semantic'
+}
+
+export interface LoreClassificationPreview {
+  revision: string
+  mode: LoreClassificationMode
+  items: LoreClassificationPreviewItem[]
+  counts: Partial<Record<LoreItem['type'], number>>
+  warning?: string
+}
+
+export interface LoreClassificationApplyRequest {
+  revision: string
+  changes: Array<{ id: string; type: LoreItem['type'] }>
+}
+
+export interface LoreTypeApplyResult {
+  revision: string
+  items: LoreItem[]
+  updated: LoreItem[]
 }
 
 interface LoreItemImage {
@@ -603,6 +701,7 @@ export interface SkillSnapshot {
 
 export interface SkillDocument extends SkillSummary {
   content: string
+  revision: string
   files?: SkillFile[]
 }
 
@@ -610,6 +709,7 @@ export interface SkillFileDocument {
   skill: SkillSummary
   file: SkillFile
   content: string
+  revision: string
 }
 
 export interface SkillInstallCandidate {
@@ -629,7 +729,7 @@ export interface SkillInstallResult {
   installed: SkillSummary[]
 }
 
-export type LoreItemInput = Omit<LoreItem, 'created_at' | 'updated_at'>
+export type LoreItemInput = Omit<LoreItem, 'created_at' | 'updated_at' | 'provenance'>
 
 type AutomationScope = 'user' | 'workspace'
 type AutomationTemplate = 'memory_consolidation' | 'review' | 'continue_writing' | 'custom_prompt'
@@ -643,6 +743,12 @@ type AutomationActionPolicy = 'confirm' | 'auto_run' | 'notify_only'
 export type AutomationNotifyPolicy = 'inbox' | 'silent'
 type AutomationInboxStatus = 'pending' | 'dismissed' | 'confirmed' | 'auto_run'
 type AutomationInboxPurpose = 'trigger' | 'write_confirmation'
+
+export interface AutomationExecutionTarget {
+  kind: 'user' | 'workspace'
+  workspace_id?: string
+  workspace?: string
+}
 
 interface AutomationSchedule {
   kind: AutomationScheduleKind
@@ -693,7 +799,10 @@ export interface AutomationRunRecord {
 
 export interface AutomationTask {
   id?: string
+  catalog_id?: string
+  revision?: string
   scope: AutomationScope
+  target?: AutomationExecutionTarget
   enabled: boolean
   name: string
   template: AutomationTemplate
@@ -712,6 +821,45 @@ export interface AutomationTask {
   recent_runs: AutomationRunRecord[]
   created_at?: string
   updated_at?: string
+}
+
+/** User-editable task definition. Runtime trigger/run state is intentionally excluded. */
+export type AutomationTaskUpdate = Pick<AutomationTask,
+  | 'enabled'
+  | 'name'
+  | 'template'
+  | 'prompt'
+  | 'model_profile_id'
+  | 'schedule'
+  | 'triggers'
+  | 'default_action_policy'
+  | 'write_mode'
+  | 'write_scope'
+  | 'output_policy'
+  | 'output_path'
+>
+
+export type AutomationTaskTemplateDefaults = Pick<AutomationTask,
+  | 'enabled'
+  | 'name'
+  | 'template'
+  | 'prompt'
+  | 'model_profile_id'
+  | 'schedule'
+  | 'triggers'
+  | 'default_action_policy'
+  | 'write_mode'
+  | 'write_scope'
+  | 'output_policy'
+  | 'output_path'
+>
+
+export interface AutomationTaskTemplate {
+  id: string
+  version: number
+  description: string
+  target_kinds: AutomationExecutionTarget['kind'][]
+  defaults: AutomationTaskTemplateDefaults
 }
 
 export interface AutomationActiveRun {

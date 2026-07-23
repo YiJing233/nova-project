@@ -1,25 +1,24 @@
 package interactive
 
-import (
-	"bytes"
-	"encoding/json"
-	"fmt"
-)
-
 type CreateStoryRequest struct {
-	Title                string                            `json:"title"`
-	Origin               string                            `json:"origin"`
-	StoryTellerID        string                            `json:"story_teller_id"`
-	StoryDirectorID      string                            `json:"story_director_id,omitempty"`
-	ReplyTargetChars     int                               `json:"reply_target_chars"`
-	Opening              StoryOpeningConfig                `json:"opening,omitempty"`
-	ImageSettings        StoryImageSettings                `json:"image_settings,omitempty"`
-	InitialTraitRolls    []InitialActorTraitRoll           `json:"initial_trait_rolls,omitempty"`
-	ActorState           *StoryDirectorActorStateSystem    `json:"-"`
-	TRPGSystem           *StoryDirectorTRPGSystem          `json:"-"`
-	ActorStateAdaptation *ActorStateSchemaAdaptationRecord `json:"-"`
-	InitialStateOps      []StateOp                         `json:"-"`
-	DirectorPlanSeed     *DirectorPlanSeed                 `json:"-"`
+	Title                     string                            `json:"title"`
+	Origin                    string                            `json:"origin"`
+	StoryTellerID             string                            `json:"story_teller_id"`
+	StoryDirectorID           string                            `json:"story_director_id,omitempty"`
+	DirectorRunPolicy         *StoryDirectorRunPolicy           `json:"director_run_policy,omitempty"`
+	ModuleRefs                *StoryDirectorModuleRefs          `json:"module_refs,omitempty"`
+	ReplyTargetChars          int                               `json:"reply_target_chars"`
+	ChoiceCount               int                               `json:"choice_count"`
+	Opening                   StoryOpeningConfig                `json:"opening,omitempty"`
+	ImageSettings             StoryImageSettings                `json:"image_settings,omitempty"`
+	InitialTraitRolls         []InitialActorTraitRoll           `json:"initial_trait_rolls,omitempty"`
+	StateSchemaPolicy         *StoryStateSchemaPolicy           `json:"state_schema_policy,omitempty"`
+	ActorState                *StoryDirectorActorStateSystem    `json:"-"`
+	TRPGSystem                *StoryDirectorTRPGSystem          `json:"-"`
+	ActorStateAdaptation      *ActorStateSchemaAdaptationRecord `json:"-"`
+	InitialStateOps           []StateOp                         `json:"-"`
+	DirectorPlanSeed          *DirectorPlanSeed                 `json:"-"`
+	StateSchemaInitialization *StateSchemaInitializationStatus  `json:"-"`
 }
 
 type AppendTurnRequest struct {
@@ -32,21 +31,21 @@ type AppendTurnRequest struct {
 }
 
 type AppendTurnWithStateRequest struct {
-	BranchID             string                `json:"branch_id"`
-	ExpectedParentID     *string               `json:"expected_parent_id,omitempty"`
-	User                 string                `json:"user"`
-	Narrative            string                `json:"narrative"`
-	Thinking             string                `json:"thinking,omitempty"`
-	RunID                string                `json:"run_id,omitempty"`
-	AgentKind            string                `json:"agent_kind,omitempty"`
-	DisplayEvents        []DisplayEvent        `json:"display_events,omitempty"`
-	ModelContextMessages []ModelContextMessage `json:"model_context_messages,omitempty"`
-	Ops                  []StateOp             `json:"ops,omitempty"`
-	ActorOps             []ActorStateOp        `json:"actor_ops,omitempty"`
-	TurnBrief            *TurnBrief            `json:"turn_brief,omitempty"`
-	RuleResolution       *RuleResolution       `json:"rule_resolution,omitempty"`
-	TurnResult           *TurnResult           `json:"turn_result,omitempty"`
-	TerminalOutcome      *TerminalOutcome      `json:"terminal_outcome,omitempty"`
+	BranchID             string                    `json:"branch_id"`
+	ExpectedParentID     *string                   `json:"expected_parent_id,omitempty"`
+	User                 string                    `json:"user"`
+	Narrative            string                    `json:"narrative"`
+	Thinking             string                    `json:"thinking,omitempty"`
+	RunID                string                    `json:"run_id,omitempty"`
+	AgentKind            string                    `json:"agent_kind,omitempty"`
+	DisplayEvents        []DisplayEvent            `json:"display_events,omitempty"`
+	ModelContextMessages []ModelContextMessage     `json:"model_context_messages,omitempty"`
+	Ops                  []StateOp                 `json:"ops,omitempty"`
+	ActorOps             []ActorStateOp            `json:"actor_ops,omitempty"`
+	RuleResolution       *RuleResolution           `json:"rule_resolution,omitempty"`
+	TurnResult           *TurnResult               `json:"turn_result,omitempty"`
+	TerminalOutcome      *TerminalOutcome          `json:"terminal_outcome,omitempty"`
+	StateSchemaProposal  *ActorStateSchemaProposal `json:"-"`
 }
 
 type RuleResolutionRerollRequest struct {
@@ -63,6 +62,23 @@ type SwitchTurnVersionRequest struct {
 	BranchID      string `json:"branch_id"`
 	TurnID        string `json:"turn_id"`
 	VersionTurnID string `json:"version_turn_id"`
+}
+
+// UpdateTurnNarrativeRequest updates only the creator-visible narrative of an
+// existing turn. ExpectedNarrative provides compare-and-swap protection for
+// editors opened from an older snapshot.
+type UpdateTurnNarrativeRequest struct {
+	BranchID          string  `json:"branch_id"`
+	TurnID            string  `json:"-"`
+	Narrative         string  `json:"narrative"`
+	ExpectedNarrative *string `json:"expected_narrative,omitempty"`
+}
+
+// UpdateTurnNarrativeResult reports the durable turn and whether a checkpoint
+// was invalidated so future model context is rebuilt from the edited prose.
+type UpdateTurnNarrativeResult struct {
+	Turn                         TurnEvent `json:"turn"`
+	ContextCompactionInvalidated bool      `json:"context_compaction_invalidated"`
 }
 
 type InteractiveImageGenerateRequest struct {
@@ -86,12 +102,20 @@ type MarkStateFailedRequest struct {
 }
 
 type UpdateStoryRequest struct {
-	Title            string              `json:"title"`
-	StoryTellerID    string              `json:"story_teller_id"`
-	StoryDirectorID  string              `json:"story_director_id,omitempty"`
-	ReplyTargetChars *int                `json:"reply_target_chars,omitempty"`
-	Opening          *StoryOpeningConfig `json:"opening,omitempty"`
-	ImageSettings    *StoryImageSettings `json:"image_settings,omitempty"`
+	Title                     string                           `json:"title"`
+	Origin                    *string                          `json:"origin,omitempty"`
+	StoryTellerID             string                           `json:"story_teller_id"`
+	StoryDirectorID           string                           `json:"story_director_id,omitempty"`
+	DirectorRunPolicy         *StoryDirectorRunPolicy          `json:"director_run_policy,omitempty"`
+	ModuleRefs                *StoryDirectorModuleRefs         `json:"module_refs,omitempty"`
+	ReplyTargetChars          *int                             `json:"reply_target_chars,omitempty"`
+	ChoiceCount               *int                             `json:"choice_count,omitempty"`
+	Opening                   *StoryOpeningConfig              `json:"opening,omitempty"`
+	ImageSettings             *StoryImageSettings              `json:"image_settings,omitempty"`
+	StateSchemaPolicy         *StoryStateSchemaPolicy          `json:"state_schema_policy,omitempty"`
+	ActorState                *StoryDirectorActorStateSystem   `json:"-"`
+	TRPGSystem                *StoryDirectorTRPGSystem         `json:"-"`
+	StateSchemaInitialization *StateSchemaInitializationStatus `json:"-"`
 }
 
 type CreateBranchRequest struct {
@@ -105,18 +129,22 @@ type Index struct {
 }
 
 type StorySummary struct {
-	ID               string             `json:"id"`
-	Title            string             `json:"title"`
-	Origin           string             `json:"origin"`
-	StoryTellerID    string             `json:"story_teller_id"`
-	StoryDirectorID  string             `json:"story_director_id"`
-	ReplyTargetChars int                `json:"reply_target_chars"`
-	Opening          StoryOpeningConfig `json:"opening"`
-	ImageSettings    StoryImageSettings `json:"image_settings"`
-	CreatedAt        string             `json:"created_at"`
-	UpdatedAt        string             `json:"updated_at"`
-	Branches         int                `json:"branches"`
-	Events           int                `json:"events"`
+	ID                string                   `json:"id"`
+	Title             string                   `json:"title"`
+	Origin            string                   `json:"origin"`
+	StoryTellerID     string                   `json:"story_teller_id"`
+	StoryDirectorID   string                   `json:"story_director_id"`
+	DirectorRunPolicy *StoryDirectorRunPolicy  `json:"director_run_policy,omitempty"`
+	ModuleRefs        *StoryDirectorModuleRefs `json:"module_refs,omitempty"`
+	ReplyTargetChars  int                      `json:"reply_target_chars"`
+	ChoiceCount       int                      `json:"choice_count"`
+	Opening           StoryOpeningConfig       `json:"opening"`
+	ImageSettings     StoryImageSettings       `json:"image_settings"`
+	StateSchemaPolicy *StoryStateSchemaPolicy  `json:"state_schema_policy,omitempty"`
+	CreatedAt         string                   `json:"created_at"`
+	UpdatedAt         string                   `json:"updated_at"`
+	Branches          int                      `json:"branches"`
+	Events            int                      `json:"events"`
 }
 
 type StoryOpeningConfig struct {
@@ -151,21 +179,27 @@ type BranchSummary struct {
 }
 
 type StoryMeta struct {
-	V                int                       `json:"v"`
-	Type             string                    `json:"type"`
-	StoryID          string                    `json:"story_id"`
-	Title            string                    `json:"title"`
-	Origin           string                    `json:"origin"`
-	StoryTellerID    string                    `json:"story_teller_id"`
-	StoryDirectorID  string                    `json:"story_director_id,omitempty"`
-	ReplyTargetChars int                       `json:"reply_target_chars"`
-	Opening          StoryOpeningConfig        `json:"opening"`
-	ImageSettings    StoryImageSettings        `json:"image_settings"`
-	ActorStateSchema *ActorStateSchemaSnapshot `json:"actor_state_schema,omitempty"`
-	CurrentBranch    string                    `json:"current_branch"`
-	Branches         map[string]BranchMeta     `json:"branches"`
-	CreatedAt        string                    `json:"created_at"`
-	UpdatedAt        string                    `json:"updated_at"`
+	V                         int                              `json:"v"`
+	Type                      string                           `json:"type"`
+	StoryID                   string                           `json:"story_id"`
+	Title                     string                           `json:"title"`
+	Origin                    string                           `json:"origin"`
+	StoryTellerID             string                           `json:"story_teller_id"`
+	StoryDirectorID           string                           `json:"story_director_id,omitempty"`
+	DirectorRunPolicy         *StoryDirectorRunPolicy          `json:"director_run_policy,omitempty"`
+	ModuleRefs                *StoryDirectorModuleRefs         `json:"module_refs,omitempty"`
+	ReplyTargetChars          int                              `json:"reply_target_chars"`
+	ChoiceCount               int                              `json:"choice_count"`
+	Opening                   StoryOpeningConfig               `json:"opening"`
+	ImageSettings             StoryImageSettings               `json:"image_settings"`
+	StateSchemaPolicy         *StoryStateSchemaPolicy          `json:"state_schema_policy,omitempty"`
+	InitialTraitRolls         []InitialActorTraitRoll          `json:"initial_trait_rolls,omitempty"`
+	ActorStateSchema          *ActorStateSchemaSnapshot        `json:"actor_state_schema,omitempty"`
+	StateSchemaInitialization *StateSchemaInitializationStatus `json:"state_schema_initialization,omitempty"`
+	CurrentBranch             string                           `json:"current_branch"`
+	Branches                  map[string]BranchMeta            `json:"branches"`
+	CreatedAt                 string                           `json:"created_at"`
+	UpdatedAt                 string                           `json:"updated_at"`
 }
 
 type TurnEvent struct {
@@ -184,15 +218,11 @@ type TurnEvent struct {
 	ModelContextMessages []ModelContextMessage `json:"model_context_messages,omitempty"`
 	StateDelta           *StateDelta           `json:"state_delta,omitempty"`
 	HotState             *HotState             `json:"hot_state,omitempty"`
-	TurnBrief            *TurnBrief            `json:"turn_brief,omitempty"`
 	RuleResolution       *RuleResolution       `json:"rule_resolution,omitempty"`
 	TurnResult           *TurnResult           `json:"turn_result,omitempty"`
 	TerminalOutcome      *TerminalOutcome      `json:"terminal_outcome,omitempty"`
 	StateStatus          string                `json:"state_status,omitempty"`
 	StateError           string                `json:"state_error,omitempty"`
-	MemoryEntryID        string                `json:"memory_entry_id,omitempty"`
-	MemoryStatus         string                `json:"memory_status,omitempty"`
-	MemoryError          string                `json:"memory_error,omitempty"`
 	Alts                 []TurnAlt             `json:"alts,omitempty"`
 	AltIdx               int                   `json:"alt_idx,omitempty"`
 	Versions             []TurnVersion         `json:"versions,omitempty"`
@@ -202,8 +232,16 @@ type TurnEvent struct {
 
 const TokenUsageEventType = "token_usage"
 
+// DisplayEventRoleNarrative marks the position where the turn narrative was
+// streamed relative to thinking/tool events. It carries no content; the UI
+// renders turn.narrative at this anchor so submission tool cards stay after
+// the prose instead of being folded into the thinking trace group.
+const DisplayEventRoleNarrative = "narrative"
+
 // DisplayEvent 表示互动回合中只用于前端展示的事件，例如思考过程和工具调用卡片。
 // 它不进入下一轮 Agent 上下文；Args/Result 仅用于追溯当时的工具调用过程。
+// Role 为 narrative 的事件是正文位置锚点：正文本身不进入 DisplayEvents，
+// 锚点只标记正文在事件流中的相对位置，供前端按真实顺序穿插渲染。
 type DisplayEvent struct {
 	ID                string   `json:"id,omitempty"`
 	Role              string   `json:"role"`
@@ -387,18 +425,19 @@ type StateOp struct {
 }
 
 type Snapshot struct {
-	StoryID                  string                         `json:"story_id"`
-	BranchID                 string                         `json:"branch_id"`
-	Turns                    []TurnEvent                    `json:"turns"`
-	CurrentTurn              *TurnEvent                     `json:"current_turn,omitempty"`
-	TokenUsageEvents         []TokenUsageEvent              `json:"token_usage_events,omitempty"`
-	ContextCompaction        *ContextCompactionEvent        `json:"context_compaction,omitempty"`
-	ContextCompactionRemoval *ContextCompactionRemovalEvent `json:"context_compaction_removal,omitempty"`
-	DirectorPlan             *DirectorPlan                  `json:"-"`
-	DirectorPlanStatus       *DirectorPlanStatus            `json:"director_plan_status,omitempty"`
-	State                    map[string]any                 `json:"state"`
-	ActorStateSchema         *ActorStateSchemaSnapshot      `json:"actor_state_schema,omitempty"`
-	Graph                    StoryGraph                     `json:"graph"`
+	StoryID                   string                           `json:"story_id"`
+	BranchID                  string                           `json:"branch_id"`
+	Turns                     []TurnEvent                      `json:"turns"`
+	CurrentTurn               *TurnEvent                       `json:"current_turn,omitempty"`
+	TokenUsageEvents          []TokenUsageEvent                `json:"token_usage_events,omitempty"`
+	ContextCompaction         *ContextCompactionEvent          `json:"context_compaction,omitempty"`
+	ContextCompactionRemoval  *ContextCompactionRemovalEvent   `json:"context_compaction_removal,omitempty"`
+	DirectorPlan              *DirectorPlan                    `json:"-"`
+	DirectorPlanStatus        *DirectorPlanStatus              `json:"director_plan_status,omitempty"`
+	State                     map[string]any                   `json:"state"`
+	ActorStateSchema          *ActorStateSchemaSnapshot        `json:"actor_state_schema,omitempty"`
+	StateSchemaInitialization *StateSchemaInitializationStatus `json:"state_schema_initialization,omitempty"`
+	Graph                     StoryGraph                       `json:"graph"`
 }
 
 type StoryGraph struct {
@@ -422,224 +461,4 @@ type PlotNode struct {
 type StoryContext struct {
 	Meta     StoryMeta `json:"meta"`
 	Snapshot Snapshot  `json:"snapshot"`
-}
-
-type InteractiveMemoryEntry struct {
-	ID         string   `json:"id"`
-	BranchID   string   `json:"branch_id"`
-	TurnID     string   `json:"turn_id,omitempty"`
-	Title      string   `json:"title"`
-	Summary    string   `json:"summary"`
-	Content    string   `json:"content"`
-	People     []string `json:"people,omitempty"`
-	Places     []string `json:"places,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	Importance int      `json:"importance"`
-	Archived   bool     `json:"archived"`
-	Manual     bool     `json:"manual"`
-	CreatedAt  string   `json:"created_at"`
-	UpdatedAt  string   `json:"updated_at"`
-}
-
-type InteractiveMemoryRecall struct {
-	BranchID  string   `json:"branch_id"`
-	TurnID    string   `json:"turn_id,omitempty"`
-	Query     string   `json:"query,omitempty"`
-	MemoryIDs []string `json:"memory_ids"`
-	CreatedAt string   `json:"created_at"`
-}
-
-type InteractiveMemoryState struct {
-	StoryID      string                   `json:"story_id"`
-	BranchID     string                   `json:"branch_id"`
-	Entries      []InteractiveMemoryEntry `json:"entries"`
-	RecentRecall *InteractiveMemoryRecall `json:"recent_recall,omitempty"`
-	SyncStatus   string                   `json:"sync_status,omitempty"`
-	SyncError    string                   `json:"sync_error,omitempty"`
-}
-
-type InteractiveMemoryCreateRequest struct {
-	BranchID   string   `json:"branch_id"`
-	TurnID     string   `json:"turn_id,omitempty"`
-	Title      string   `json:"title"`
-	Summary    string   `json:"summary"`
-	Content    string   `json:"content"`
-	People     []string `json:"people,omitempty"`
-	Places     []string `json:"places,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	Importance int      `json:"importance"`
-}
-
-type InteractiveMemoryUpdateRequest struct {
-	Title      *string  `json:"title,omitempty"`
-	Summary    *string  `json:"summary,omitempty"`
-	Content    *string  `json:"content,omitempty"`
-	People     []string `json:"people,omitempty"`
-	Places     []string `json:"places,omitempty"`
-	Tags       []string `json:"tags,omitempty"`
-	Importance *int     `json:"importance,omitempty"`
-}
-
-type InteractiveMemoryArchiveRequest struct {
-	Archived *bool `json:"archived,omitempty"`
-}
-
-type StoryMemorySettings struct {
-	Enabled           bool `json:"enabled"`
-	AutoIntervalTurns int  `json:"auto_interval_turns"`
-}
-
-type StoryMemoryField struct {
-	ID                    string `json:"id"`
-	Name                  string `json:"name"`
-	Description           string `json:"description,omitempty"`
-	GenerationInstruction string `json:"generation_instruction,omitempty"`
-	Enabled               *bool  `json:"enabled,omitempty"`
-	Required              bool   `json:"required,omitempty"`
-	Order                 int    `json:"order"`
-}
-
-type StoryMemoryStructure struct {
-	ID                    string             `json:"id"`
-	Name                  string             `json:"name"`
-	Description           string             `json:"description,omitempty"`
-	GenerationInstruction string             `json:"generation_instruction,omitempty"`
-	Mode                  string             `json:"mode"`
-	KeyFieldID            string             `json:"key_field_id,omitempty"`
-	Fields                []StoryMemoryField `json:"fields"`
-	Enabled               *bool              `json:"enabled,omitempty"`
-	Order                 int                `json:"order"`
-	BuiltIn               bool               `json:"built_in,omitempty"`
-	ReadOnly              bool               `json:"read_only,omitempty"`
-	Derived               bool               `json:"derived,omitempty"`
-	CreatedAt             string             `json:"created_at,omitempty"`
-	UpdatedAt             string             `json:"updated_at,omitempty"`
-}
-
-type StoryMemoryRecord struct {
-	ID            string            `json:"id"`
-	StructureID   string            `json:"structure_id"`
-	BranchID      string            `json:"branch_id"`
-	TurnID        string            `json:"turn_id,omitempty"`
-	AnchorTurnID  string            `json:"anchor_turn_id,omitempty"`
-	Key           string            `json:"key,omitempty"`
-	Values        map[string]string `json:"values"`
-	Archived      bool              `json:"archived,omitempty"`
-	Manual        bool              `json:"manual,omitempty"`
-	Source        string            `json:"source,omitempty"`
-	InheritedFrom string            `json:"inherited_from,omitempty"`
-	CreatedAt     string            `json:"created_at"`
-	UpdatedAt     string            `json:"updated_at"`
-}
-
-type StoryMemoryState struct {
-	StoryID                 string                   `json:"story_id"`
-	BranchID                string                   `json:"branch_id"`
-	Settings                StoryMemorySettings      `json:"settings"`
-	Structures              []StoryMemoryStructure   `json:"structures"`
-	MemoryStructureID       string                   `json:"memory_structure_id,omitempty"`
-	MemoryStructureName     string                   `json:"memory_structure_name,omitempty"`
-	MemoryStructureDisabled bool                     `json:"memory_structure_disabled,omitempty"`
-	Records                 []StoryMemoryRecord      `json:"records"`
-	RecentRecall            *InteractiveMemoryRecall `json:"recent_recall,omitempty"`
-	SyncStatus              string                   `json:"sync_status,omitempty"`
-	SyncError               string                   `json:"sync_error,omitempty"`
-	NextAutoInTurns         int                      `json:"next_auto_in_turns,omitempty"`
-}
-
-type StoryMemorySettingsUpdateRequest struct {
-	Enabled           *bool `json:"enabled,omitempty"`
-	AutoIntervalTurns *int  `json:"auto_interval_turns,omitempty"`
-}
-
-type StoryMemoryStructureRequest struct {
-	ID                    string             `json:"id,omitempty"`
-	Name                  string             `json:"name"`
-	Description           string             `json:"description,omitempty"`
-	GenerationInstruction string             `json:"generation_instruction,omitempty"`
-	Mode                  string             `json:"mode"`
-	KeyFieldID            string             `json:"key_field_id,omitempty"`
-	Fields                []StoryMemoryField `json:"fields"`
-	Enabled               *bool              `json:"enabled,omitempty"`
-	Order                 int                `json:"order"`
-	ReadOnly              bool               `json:"read_only,omitempty"`
-	Derived               bool               `json:"derived,omitempty"`
-}
-
-type StoryMemoryRecordRequest struct {
-	ID          string            `json:"id,omitempty"`
-	BranchID    string            `json:"branch_id,omitempty"`
-	StructureID string            `json:"structure_id"`
-	TurnID      string            `json:"turn_id,omitempty"`
-	Key         string            `json:"key,omitempty"`
-	Values      map[string]string `json:"values"`
-	Manual      bool              `json:"manual,omitempty"`
-}
-
-type StoryMemoryRecordArchiveRequest struct {
-	Archived *bool `json:"archived,omitempty"`
-}
-
-type StoryMemoryPatch struct {
-	Op          string            `json:"op"`
-	StructureID string            `json:"structure_id,omitempty"`
-	RecordID    string            `json:"record_id,omitempty"`
-	Key         string            `json:"key,omitempty"`
-	Values      map[string]string `json:"values,omitempty"`
-	Archived    *bool             `json:"archived,omitempty"`
-}
-
-func (p *StoryMemoryPatch) UnmarshalJSON(data []byte) error {
-	var raw struct {
-		Op          string         `json:"op"`
-		StructureID string         `json:"structure_id,omitempty"`
-		RecordID    string         `json:"record_id,omitempty"`
-		Key         string         `json:"key,omitempty"`
-		Values      map[string]any `json:"values,omitempty"`
-		Archived    *bool          `json:"archived,omitempty"`
-	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.UseNumber()
-	if err := decoder.Decode(&raw); err != nil {
-		return err
-	}
-	*p = StoryMemoryPatch{
-		Op:          raw.Op,
-		StructureID: raw.StructureID,
-		RecordID:    raw.RecordID,
-		Key:         raw.Key,
-		Archived:    raw.Archived,
-	}
-	if raw.Values != nil {
-		p.Values = normalizeStoryMemoryPatchValues(raw.Values)
-	}
-	return nil
-}
-
-func normalizeStoryMemoryPatchValues(values map[string]any) map[string]string {
-	out := make(map[string]string, len(values))
-	for key, value := range values {
-		switch typed := value.(type) {
-		case nil:
-			out[key] = ""
-		case string:
-			out[key] = typed
-		case json.Number:
-			out[key] = typed.String()
-		case bool:
-			out[key] = fmt.Sprintf("%t", typed)
-		default:
-			if data, err := json.Marshal(typed); err == nil {
-				out[key] = string(data)
-			} else {
-				out[key] = fmt.Sprint(typed)
-			}
-		}
-	}
-	return out
-}
-
-type StoryMemoryGenerateRequest struct {
-	BranchID string `json:"branch_id,omitempty"`
-	Source   string `json:"source,omitempty"`
 }

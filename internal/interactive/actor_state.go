@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/unicode/norm"
@@ -25,11 +26,14 @@ type StoryDirectorActorStateSystem struct {
 }
 
 type ActorStateTemplate struct {
-	ID          string            `json:"id"`
-	Name        string            `json:"name"`
-	Description string            `json:"description,omitempty"`
-	Fields      []ActorStateField `json:"fields,omitempty"`
+	ID          string            `json:"id" jsonschema_description:"稳定的 ASCII Template ID。"`
+	Name        string            `json:"name" jsonschema_description:"用户可见模板名称。"`
+	Description string            `json:"description,omitempty" jsonschema_description:"模板职责的简短说明。"`
+	Fields      []ActorStateField `json:"fields,omitempty" jsonschema:"maxItems=64" jsonschema_description:"模板字段；只添加确有长期追踪价值的字段。"`
 	TraitRules  []ActorTraitRule  `json:"trait_rules,omitempty"`
+	// DisplayGroups is retained only for decoding older Beta presets. The stage
+	// ignores it and stores user layout by story + template outside the schema.
+	DisplayGroups []string `json:"display_groups,omitempty"`
 }
 
 // ActorTraitRule declares which reusable trait pool is available to actors
@@ -49,11 +53,10 @@ type ActorTraitPool struct {
 }
 
 type ActorTraitDefinition struct {
-	ID         string  `json:"id"`
-	Name       string  `json:"name"`
-	Summary    string  `json:"summary,omitempty"`
-	Weight     float64 `json:"weight,omitempty"`
-	Visibility string  `json:"visibility,omitempty"`
+	ID      string  `json:"id"`
+	Name    string  `json:"name"`
+	Summary string  `json:"summary,omitempty"`
+	Weight  float64 `json:"weight,omitempty"`
 }
 
 // ActorTraitInstance is a snapshot of a definition at assignment time. Stories
@@ -64,7 +67,6 @@ type ActorTraitInstance struct {
 	TraitID      string `json:"trait_id"`
 	Name         string `json:"name"`
 	Summary      string `json:"summary,omitempty"`
-	Visibility   string `json:"visibility,omitempty"`
 	SourceKind   string `json:"source_kind,omitempty"`
 	SourceID     string `json:"source_id,omitempty"`
 	SourceTurnID string `json:"source_turn_id,omitempty"`
@@ -78,59 +80,29 @@ type ActorTraitChange struct {
 }
 
 type ActorStateField struct {
-	// ID and Path are read-only migration aliases for v5 state modules. New
-	// modules persist only Name; a story freezes the normalized Name as its
-	// field identity when the story is created.
+	// ID, Path, and LegacyPath are runtime-only aliases. Presets use Path to map
+	// released pre-schema story state into the frozen field identity; reusable
+	// modules persist Name only.
 	ID                string   `json:"-"`
 	Path              string   `json:"-"`
 	LegacyPath        string   `json:"-"`
-	Name              string   `json:"name"`
-	Type              string   `json:"type"`
+	Name              string   `json:"name" jsonschema_description:"稳定 Field ID 与用户可见名称；同一模板内唯一。"`
+	Type              string   `json:"type" jsonschema:"enum=number,enum=string,enum=bool,enum=enum,enum=object,enum=list" jsonschema_description:"字段值类型，只能使用列出的六种类型。"`
 	Default           any      `json:"default,omitempty"`
 	Min               *float64 `json:"min,omitempty"`
 	Max               *float64 `json:"max,omitempty"`
-	Options           []string `json:"options,omitempty"`
-	Visibility        string   `json:"visibility,omitempty"`
-	Description       string   `json:"description,omitempty"`
-	UpdateInstruction string   `json:"update_instruction,omitempty"`
-	Order             int      `json:"order,omitempty"`
-}
-
-func (f *ActorStateField) UnmarshalJSON(data []byte) error {
-	type storedActorStateField struct {
-		ID                string   `json:"id,omitempty"`
-		Path              string   `json:"path,omitempty"`
-		Name              string   `json:"name"`
-		Type              string   `json:"type"`
-		Default           any      `json:"default,omitempty"`
-		Min               *float64 `json:"min,omitempty"`
-		Max               *float64 `json:"max,omitempty"`
-		Options           []string `json:"options,omitempty"`
-		Visibility        string   `json:"visibility,omitempty"`
-		Description       string   `json:"description,omitempty"`
-		UpdateInstruction string   `json:"update_instruction,omitempty"`
-		Order             int      `json:"order,omitempty"`
-	}
-	var stored storedActorStateField
-	if err := json.Unmarshal(data, &stored); err != nil {
-		return err
-	}
-	*f = ActorStateField{
-		ID:                stored.ID,
-		Path:              stored.Path,
-		LegacyPath:        stored.Path,
-		Name:              stored.Name,
-		Type:              stored.Type,
-		Default:           stored.Default,
-		Min:               stored.Min,
-		Max:               stored.Max,
-		Options:           stored.Options,
-		Visibility:        stored.Visibility,
-		Description:       stored.Description,
-		UpdateInstruction: stored.UpdateInstruction,
-		Order:             stored.Order,
-	}
-	return nil
+	Options           []string `json:"options,omitempty" jsonschema:"maxItems=24" jsonschema_description:"type=enum 时的有限合法值。"`
+	Description       string   `json:"description,omitempty" jsonschema_description:"字段承接的信息及语义。"`
+	UpdateInstruction string   `json:"update_instruction,omitempty" jsonschema_description:"何时更新以及写入完整值还是增量。"`
+	// Order is retained only for decoding older Beta presets. Field array order
+	// is the fallback; final layout belongs to the user's stage preference.
+	Order int `json:"order,omitempty"`
+	// Group and Display are optional presentation hints for the stage state
+	// ledger. Group clusters fields under one named ledger section; Display
+	// pins the field renderer (stat/inline/block/list). Both fall back to
+	// shape-based heuristics when empty and never affect state updates.
+	Group   string `json:"group,omitempty"`
+	Display string `json:"display,omitempty" jsonschema:"enum=stat,enum=inline,enum=block,enum=list" jsonschema_description:"可选展示提示；省略时由值形状推断。"`
 }
 
 const ActorStateSchemaVersion = 3
@@ -138,12 +110,22 @@ const ActorStateSchemaVersion = 3
 // ActorStateSchemaSnapshot is the story-local state contract. It is frozen at
 // story creation so edits to reusable state modules affect only new stories.
 type ActorStateSchemaSnapshot struct {
-	Version              int                               `json:"version"`
-	System               StoryDirectorActorStateSystem     `json:"system"`
-	TRPGSystem           StoryDirectorTRPGSystem           `json:"trpg_system,omitempty"`
-	Adaptation           *ActorStateSchemaAdaptationRecord `json:"adaptation,omitempty"`
-	LegacyFieldPaths     map[string]map[string]string      `json:"legacy_field_paths,omitempty"`
-	LegacyActorTemplates map[string]string                 `json:"legacy_actor_templates,omitempty"`
+	Version              int                                   `json:"version"`
+	Revision             int                                   `json:"revision"`
+	System               StoryDirectorActorStateSystem         `json:"system"`
+	TRPGSystem           StoryDirectorTRPGSystem               `json:"trpg_system,omitempty"`
+	Adaptation           *ActorStateSchemaAdaptationRecord     `json:"adaptation,omitempty"`
+	LegacyFieldPaths     map[string]map[string]string          `json:"legacy_field_paths,omitempty"`
+	LegacyActorTemplates map[string]string                     `json:"legacy_actor_templates,omitempty"`
+	FieldMigrations      map[string][]ActorStateFieldMigration `json:"field_migrations,omitempty"`
+}
+
+// ActorStateFieldMigration keeps historical state replayable after a story-
+// local field rename or type change.
+type ActorStateFieldMigration struct {
+	From  string          `json:"from"`
+	To    string          `json:"to"`
+	Field ActorStateField `json:"field"`
 }
 
 // ActorStateOp is the v2 field-level reducer input. FieldID is an exact key,
@@ -192,6 +174,19 @@ func normalizeActorStateFieldName(value string) string {
 	return strings.TrimSpace(norm.NFKC.String(value))
 }
 
+// validateActorStateFieldName keeps field identity distinct from the JSON
+// Pointer segments used by turn state updates.
+func validateActorStateFieldName(value string) error {
+	fieldID := normalizeActorStateFieldName(value)
+	if fieldID == "" {
+		return fmt.Errorf("状态字段名称不能为空 / State field name cannot be empty")
+	}
+	if strings.Contains(fieldID, "/") {
+		return fmt.Errorf("状态字段名称不能包含路径分隔符“/” / State field name cannot contain the path separator “/”: %s", fieldID)
+	}
+	return nil
+}
+
 func actorStateFieldID(field ActorStateField) string {
 	return normalizeActorStateFieldName(firstNonEmptyString(field.Name, field.ID, field.Path))
 }
@@ -211,8 +206,8 @@ func ValidateActorStatePatchesAgainstState(system StoryDirectorActorStateSystem,
 	if len(patches) == 0 {
 		return ActorStatePatchResult{}, fmt.Errorf("Actor 状态更新不能为空")
 	}
-	if len(patches) > maxTurnBriefListItems {
-		patches = patches[:maxTurnBriefListItems]
+	if len(patches) > maxInteractiveListItems {
+		patches = patches[:maxInteractiveListItems]
 	}
 	result := ActorStatePatchResult{AppliedActors: []string{}, CreatedActors: []string{}, AssignedTraits: map[string][]ActorTraitInstance{}, Ops: []StateOp{}}
 	workingState := cloneActorStateRoot(currentState)
@@ -261,8 +256,8 @@ func normalizeActorStateTemplates(templates []ActorStateTemplate) []ActorStateTe
 	if templates == nil {
 		return []ActorStateTemplate{}
 	}
-	if len(templates) > maxTurnBriefListItems {
-		templates = templates[:maxTurnBriefListItems]
+	if len(templates) > maxInteractiveListItems {
+		templates = templates[:maxInteractiveListItems]
 	}
 	out := make([]ActorStateTemplate, 0, len(templates))
 	seen := map[string]bool{}
@@ -273,9 +268,10 @@ func normalizeActorStateTemplates(templates []ActorStateTemplate) []ActorStateTe
 		}
 		seen[template.ID] = true
 		template.Name = trimBytes(firstNonEmptyString(template.Name, template.ID), 128)
-		template.Description = trimBytes(template.Description, maxTurnBriefTextBytes)
+		template.Description = trimBytes(template.Description, maxInteractiveTextBytes)
 		template.Fields = normalizeActorStateFields(template.Fields)
 		template.TraitRules = normalizeActorTraitRules(template.TraitRules)
+		template.DisplayGroups = nil
 		out = append(out, template)
 	}
 	return out
@@ -289,7 +285,7 @@ func normalizeActorStateFields(fields []ActorStateField) []ActorStateField {
 		fields = fields[:maxActorStateFields]
 	}
 	out := make([]ActorStateField, 0, len(fields))
-	for i, field := range fields {
+	for _, field := range fields {
 		field.LegacyPath = strings.TrimSpace(firstNonEmptyString(field.LegacyPath, field.Path))
 		field.Path = field.LegacyPath
 		field.Name = normalizeActorStateFieldName(firstNonEmptyString(field.Name, field.ID, field.LegacyPath))
@@ -298,21 +294,14 @@ func normalizeActorStateFields(fields []ActorStateField) []ActorStateField {
 		}
 		field.ID = field.Name
 		field.Type = normalizeActorStateFieldType(field.Type)
-		field.Visibility = normalizeStoryDirectorVisibility(field.Visibility)
-		field.Description = trimBytes(field.Description, maxTurnBriefTextBytes)
-		field.UpdateInstruction = trimBytes(field.UpdateInstruction, maxTurnBriefTextBytes)
-		field.Options = normalizeStringListLimit(field.Options, maxTurnBriefListItems)
-		if field.Order == 0 {
-			field.Order = (i + 1) * 10
-		}
+		field.Description = trimBytes(field.Description, maxInteractiveTextBytes)
+		field.UpdateInstruction = trimBytes(field.UpdateInstruction, maxInteractiveTextBytes)
+		field.Options = normalizeStringListLimit(field.Options, maxInteractiveListItems)
+		field.Group = trimBytes(field.Group, 64)
+		field.Display = normalizeActorStateFieldDisplay(field.Display)
+		field.Order = 0
 		out = append(out, field)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Order != out[j].Order {
-			return out[i].Order < out[j].Order
-		}
-		return out[i].Name < out[j].Name
-	})
 	return out
 }
 
@@ -324,13 +313,13 @@ func normalizeActorStateInitialActors(actors []ActorStateInitialActor, templates
 	for _, template := range templates {
 		templateIDs[template.ID] = true
 	}
-	if len(actors) > maxTurnBriefListItems {
-		actors = actors[:maxTurnBriefListItems]
+	if len(actors) > maxInteractiveListItems {
+		actors = actors[:maxInteractiveListItems]
 	}
 	out := make([]ActorStateInitialActor, 0, len(actors))
 	seen := map[string]bool{}
 	for _, actor := range actors {
-		actor.ID = normalizeActorStateID(actor.ID)
+		actor.ID = normalizeStatePanelActorID(actor.ID)
 		if actor.ID == "" || seen[actor.ID] {
 			continue
 		}
@@ -341,7 +330,7 @@ func normalizeActorStateInitialActors(actors []ActorStateInitialActor, templates
 		seen[actor.ID] = true
 		actor.Name = trimBytes(firstNonEmptyString(actor.Name, actor.ID), 128)
 		actor.Role = trimBytes(firstNonEmptyString(actor.Role, actor.TemplateID), 128)
-		actor.Description = trimBytes(actor.Description, maxTurnBriefTextBytes)
+		actor.Description = trimBytes(actor.Description, maxInteractiveTextBytes)
 		template := actorStateTemplateByID(StoryDirectorActorStateSystem{Templates: templates}, actor.TemplateID)
 		actor.State = normalizeActorStateMapForTemplate(actor.State, template)
 		out = append(out, actor)
@@ -355,6 +344,17 @@ func normalizeActorStateFieldType(value string) string {
 		return strings.TrimSpace(value)
 	default:
 		return "string"
+	}
+}
+
+// normalizeActorStateFieldDisplay keeps only the renderer hints the stage
+// state ledger understands; anything else falls back to heuristics.
+func normalizeActorStateFieldDisplay(value string) string {
+	switch strings.TrimSpace(value) {
+	case "stat", "inline", "block", "list":
+		return strings.TrimSpace(value)
+	default:
+		return ""
 	}
 }
 
@@ -413,7 +413,7 @@ func actorStateFieldByID(template ActorStateTemplate, fieldID string) (ActorStat
 }
 
 func actorStateFieldValue(state map[string]any, actorID, fieldID string) any {
-	actor, _ := getPath(state, actorStateRoot+"."+normalizeActorStateID(actorID)).(map[string]any)
+	actor, _ := getPath(state, actorStateRoot+"."+normalizeStatePanelActorID(actorID)).(map[string]any)
 	if actor == nil {
 		return nil
 	}
@@ -459,11 +459,30 @@ func applyLegacyActorStateAliases(state map[string]any, snapshot *ActorStateSche
 				continue
 			}
 			if value := getPathExact(fields, legacyPath); value != nil {
+				if migration, ok := actorStateFieldMigrationFor(snapshot, templateID, legacyPath, fieldID); ok {
+					if converted, convertedOK := coerceActorStateFieldValue(value, migration.Field); convertedOK {
+						value = converted
+					} else {
+						value = migration.Field.Default
+					}
+				}
 				fields[fieldID] = value
 			}
 		}
 		actors[actorID] = actor
 	}
+}
+
+func actorStateFieldMigrationFor(snapshot *ActorStateSchemaSnapshot, templateID, from, to string) (ActorStateFieldMigration, bool) {
+	if snapshot == nil {
+		return ActorStateFieldMigration{}, false
+	}
+	for _, migration := range snapshot.FieldMigrations[templateID] {
+		if normalizeActorStateFieldName(migration.From) == normalizeActorStateFieldName(from) && normalizeActorStateFieldName(migration.To) == normalizeActorStateFieldName(to) {
+			return migration, true
+		}
+	}
+	return ActorStateFieldMigration{}, false
 }
 
 // enrichLegacyActorStateSchema preserves state that no longer has a matching
@@ -540,10 +559,9 @@ func enrichLegacyActorStateSchema(snapshot *ActorStateSchemaSnapshot, state map[
 			}
 			order := (len(template.Fields) + 1) * 10
 			template.Fields = append(template.Fields, ActorStateField{
-				Name:       legacyPath,
-				Type:       legacyActorStateFieldType(value),
-				Visibility: "visible",
-				Order:      order,
+				Name:  legacyPath,
+				Type:  legacyActorStateFieldType(value),
+				Order: order,
 			})
 			aliases[legacyPath] = legacyPath
 		}
@@ -613,7 +631,7 @@ func FreezeActorStateSchemaWithRules(system StoryDirectorActorStateSystem, trpg 
 	if len(legacy) == 0 {
 		legacy = nil
 	}
-	return &ActorStateSchemaSnapshot{Version: ActorStateSchemaVersion, System: system, TRPGSystem: normalizeFrozenTRPGSystem(trpg), LegacyFieldPaths: legacy}
+	return &ActorStateSchemaSnapshot{Version: ActorStateSchemaVersion, Revision: 1, System: system, TRPGSystem: normalizeFrozenTRPGSystem(trpg), LegacyFieldPaths: legacy}
 }
 
 func actorStateSystemFromSnapshot(snapshot *ActorStateSchemaSnapshot, fallback StoryDirectorActorStateSystem) StoryDirectorActorStateSystem {
@@ -631,6 +649,9 @@ func normalizeActorStateSchemaSnapshot(snapshot *ActorStateSchemaSnapshot) *Acto
 	if next.Version <= 0 {
 		next.Version = ActorStateSchemaVersion
 	}
+	if next.Revision <= 0 {
+		next.Revision = 1
+	}
 	next.System = normalizeActorStateSystem(next.System)
 	next.TRPGSystem = normalizeFrozenTRPGSystem(next.TRPGSystem)
 	for templateIndex := range next.System.Templates {
@@ -640,6 +661,16 @@ func normalizeActorStateSchemaSnapshot(snapshot *ActorStateSchemaSnapshot) *Acto
 			field.Path = ""
 			field.LegacyPath = ""
 		}
+	}
+	for templateID, migrations := range next.FieldMigrations {
+		for index := range migrations {
+			migrations[index].From = normalizeActorStateFieldName(migrations[index].From)
+			migrations[index].To = normalizeActorStateFieldName(migrations[index].To)
+			if normalized := normalizeActorStateFields([]ActorStateField{migrations[index].Field}); len(normalized) == 1 {
+				migrations[index].Field = normalized[0]
+			}
+		}
+		next.FieldMigrations[templateID] = migrations
 	}
 	return &next
 }
@@ -655,8 +686,8 @@ func validateActorStateSystem(system StoryDirectorActorStateSystem) error {
 		seen := map[string]string{}
 		for _, field := range template.Fields {
 			fieldID := actorStateFieldID(field)
-			if fieldID == "" {
-				return fmt.Errorf("Actor 状态模板 %s 存在空状态名称", template.ID)
+			if err := validateActorStateFieldName(fieldID); err != nil {
+				return fmt.Errorf("Actor 状态模板 %s: %w", template.ID, err)
 			}
 			key := actorStateFieldNameKey(fieldID)
 			if previous, ok := seen[key]; ok {
@@ -673,27 +704,11 @@ func actorStateEmpty(system StoryDirectorActorStateSystem) bool {
 }
 
 func defaultActorStateSystem() StoryDirectorActorStateSystem {
-	return normalizeActorStateSystem(StoryDirectorActorStateSystem{
-		Templates: []ActorStateTemplate{
-			actorStateTemplate(DefaultActorID, "默认主角状态表", "记录主角当前可行动、可检定、可结算的通用互动状态；用户可按作品需要新增世界、故事倒计时、特定角色、势力、基地、副本等自定义状态表。", commonProtagonistStateFields()),
-			defaultStoryContextTemplate(),
-			actorStateTemplate(ActorStateImportantCharacterTemplateID, "默认重要角色状态表", "记录反复登场且会影响互动承接的重要角色状态；特定角色线可以另建独立状态表。", commonImportantCharacterStateFields()),
-			actorStateTemplate(ActorStateOpponentTemplateID, "默认敌人/怪物状态表", "记录敌人、怪物、反派、Boss 或异常实体的当前对抗状态；危机、势力或副本也可另建状态表。", commonOpponentStateFields()),
-		},
-		InitialActors: defaultActorStateInitialActors(),
-	})
-}
-
-func actorStateInitialOps(system StoryDirectorActorStateSystem) []StateOp {
-	ops, err := BuildActorStateInitialOps(system, nil)
-	if err != nil {
-		return nil
-	}
-	return ops
+	return actorStateSystemForPreset(defaultActorStatePresetSpec())
 }
 
 func actorStateActorPath(actorID, field string) string {
-	return actorStateRoot + "." + normalizeActorStateID(actorID) + "." + strings.TrimSpace(field)
+	return actorStateRoot + "." + normalizeStatePanelActorID(actorID) + "." + strings.TrimSpace(field)
 }
 
 func actorStateFieldPath(actorID, fieldPath string) string {
@@ -709,6 +724,18 @@ func normalizeActorStateID(id string) string {
 		}
 	}
 	return sb.String()
+}
+
+func normalizeStatePanelActorID(id string) string {
+	id = strings.TrimSpace(norm.NFKC.String(id))
+	var sb strings.Builder
+	for _, r := range id {
+		if unicode.IsControl(r) || r == '.' {
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	return strings.TrimSpace(sb.String())
 }
 
 func canonicalStatePath(path string) string {
@@ -748,7 +775,7 @@ func actorStateTemplateByID(system StoryDirectorActorStateSystem, id string) Act
 
 func validateActorStatePatch(system StoryDirectorActorStateSystem, currentState map[string]any, patch ActorStatePatch) (ActorStatePatch, []StateOp, []ActorStateOp, bool, []ActorTraitInstance, error) {
 	system = normalizeActorStateSystem(system)
-	patch.ActorID = normalizeActorStateID(patch.ActorID)
+	patch.ActorID = normalizeStatePanelActorID(patch.ActorID)
 	if patch.ActorID == "" {
 		return patch, nil, nil, false, nil, fmt.Errorf("Actor 状态更新缺少 actor_id")
 	}
@@ -786,7 +813,7 @@ func validateActorStatePatch(system StoryDirectorActorStateSystem, currentState 
 	if len(patch.State) == 0 && len(patch.TraitChanges) == 0 && !created && !bindLegacyTemplate {
 		return patch, nil, nil, false, nil, fmt.Errorf("Actor 状态更新缺少 state 或 trait_changes")
 	}
-	reason := trimBytes(patch.Reason, maxTurnBriefTextBytes)
+	reason := trimBytes(patch.Reason, maxInteractiveTextBytes)
 	sourceTurnID := trimBytes(patch.SourceTurnID, 128)
 	ops := []StateOp{}
 	actorOps := []ActorStateOp{}
@@ -809,7 +836,7 @@ func validateActorStatePatch(system StoryDirectorActorStateSystem, currentState 
 			ops = append(ops, StateOp{Op: "set", Path: actorStateActorPath(patch.ActorID, "role"), Value: trimBytes(patch.Role, 128), Reason: reason, SourceTurnID: sourceTurnID})
 		}
 		if strings.TrimSpace(patch.Description) != "" {
-			ops = append(ops, StateOp{Op: "set", Path: actorStateActorPath(patch.ActorID, "description"), Value: trimBytes(patch.Description, maxTurnBriefTextBytes), Reason: reason, SourceTurnID: sourceTurnID})
+			ops = append(ops, StateOp{Op: "set", Path: actorStateActorPath(patch.ActorID, "description"), Value: trimBytes(patch.Description, maxInteractiveTextBytes), Reason: reason, SourceTurnID: sourceTurnID})
 		}
 	}
 	if !created {

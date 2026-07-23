@@ -77,44 +77,6 @@ func TestInteractiveStoriesAndTellersAPI(t *testing.T) {
 	if _, err := application.AppendInteractiveTurn(created.ID, "", "我推开酒馆的门", "门后传来低沉的风声。"); err != nil {
 		t.Fatal(err)
 	}
-	memoryCreateResp := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories/"+created.ID+"/memory", map[string]any{
-		"branch_id":  "main",
-		"title":      "酒馆风声",
-		"summary":    "门后传来低沉风声。",
-		"people":     []string{"主角"},
-		"places":     []string{"酒馆"},
-		"tags":       []string{"线索"},
-		"importance": 4,
-	})
-	if memoryCreateResp.Code != http.StatusOK {
-		t.Fatalf("create memory status = %d body=%s", memoryCreateResp.Code, memoryCreateResp.Body.String())
-	}
-	var memoryEntry struct {
-		ID     string `json:"id"`
-		Title  string `json:"title"`
-		Manual bool   `json:"manual"`
-	}
-	decodeResponse(t, memoryCreateResp.Body.Bytes(), &memoryEntry)
-	if memoryEntry.ID == "" || memoryEntry.Title != "酒馆风声" || !memoryEntry.Manual {
-		t.Fatalf("memory entry mismatch: %#v", memoryEntry)
-	}
-	memoryListResp := performJSONRequest(t, server, http.MethodGet, "/api/interactive/stories/"+created.ID+"/memory?branch=main", nil)
-	if memoryListResp.Code != http.StatusOK {
-		t.Fatalf("list memory status = %d body=%s", memoryListResp.Code, memoryListResp.Body.String())
-	}
-	var memoryList struct {
-		Entries []struct {
-			ID string `json:"id"`
-		} `json:"entries"`
-	}
-	decodeResponse(t, memoryListResp.Body.Bytes(), &memoryList)
-	if len(memoryList.Entries) != 1 || memoryList.Entries[0].ID != memoryEntry.ID {
-		t.Fatalf("memory list mismatch: %#v", memoryList)
-	}
-	archiveResp := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories/"+created.ID+"/memory/"+memoryEntry.ID+"/archive", map[string]bool{"archived": true})
-	if archiveResp.Code != http.StatusOK {
-		t.Fatalf("archive memory status = %d body=%s", archiveResp.Code, archiveResp.Body.String())
-	}
 	snapshotResp = performJSONRequest(t, server, http.MethodGet, "/api/interactive/stories/"+created.ID+"/snapshot", nil)
 	decodeResponse(t, snapshotResp.Body.Bytes(), &snapshot)
 	if len(snapshot.Turns) != 1 {
@@ -181,6 +143,41 @@ func TestInteractiveStoriesAndTellersAPI(t *testing.T) {
 	}
 }
 
+func TestInteractiveStorySelectionAPIUpdatesWorkspaceCurrentStory(t *testing.T) {
+	application := newTestApplication(t)
+	server := NewServer(application, "0")
+	createStory := func(title string) string {
+		response := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories", map[string]string{
+			"title":           title,
+			"story_teller_id": "classic",
+		})
+		if response.Code != http.StatusOK {
+			t.Fatalf("create story status = %d body=%s", response.Code, response.Body.String())
+		}
+		var story struct {
+			ID string `json:"id"`
+		}
+		decodeResponse(t, response.Body.Bytes(), &story)
+		return story.ID
+	}
+
+	firstID := createStory("第一条故事线")
+	_ = createStory("第二条故事线")
+	selectResp := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories/"+firstID+"/select", nil)
+	if selectResp.Code != http.StatusOK {
+		t.Fatalf("select story status = %d body=%s", selectResp.Code, selectResp.Body.String())
+	}
+
+	listResp := performJSONRequest(t, server, http.MethodGet, "/api/interactive/stories", nil)
+	var index struct {
+		CurrentStoryID string `json:"current_story_id"`
+	}
+	decodeResponse(t, listResp.Body.Bytes(), &index)
+	if index.CurrentStoryID != firstID {
+		t.Fatalf("current story = %q, want %q", index.CurrentStoryID, firstID)
+	}
+}
+
 func TestInteractiveDirectorAPI(t *testing.T) {
 	application := newTestApplication(t)
 	server := NewServer(application, "0")
@@ -204,7 +201,7 @@ func TestInteractiveDirectorAPI(t *testing.T) {
 	}
 	var status interactive.DirectorPlanStatus
 	decodeResponse(t, statusResp.Body.Bytes(), &status)
-	if status.Status != interactive.DirectorPlanStatusWaitingOpening || status.Blocking || status.StartReady || status.CompletedDocs != 0 || status.PlannedDocs != 1 {
+	if status.Status != interactive.DirectorPlanStatusWaitingOpening || status.Blocking || status.StartReady || status.CompletedDocs != 0 || status.PlannedDocs != 3 {
 		t.Fatalf("initial director status mismatch: %#v", status)
 	}
 
@@ -214,7 +211,9 @@ func TestInteractiveDirectorAPI(t *testing.T) {
 	}
 	type directorResponse struct {
 		Docs struct {
-			Plan string `json:"plan"`
+			Plan        string `json:"plan"`
+			AgentBrief  string `json:"agent_brief"`
+			LoreContext string `json:"lore_context"`
 		} `json:"docs"`
 		Metadata struct {
 			Revision string `json:"revision"`
@@ -225,7 +224,7 @@ func TestInteractiveDirectorAPI(t *testing.T) {
 	}
 	var director directorResponse
 	decodeResponse(t, getResp.Body.Bytes(), &director)
-	if director.Metadata.LastRun.Status != interactive.DirectorPlanStatusWaitingOpening || !strings.Contains(director.Docs.Plan, "正文Agent可读") {
+	if director.Metadata.LastRun.Status != interactive.DirectorPlanStatusWaitingOpening || !strings.Contains(director.Docs.Plan, "阶段目标与隐藏钩子") || !strings.Contains(director.Docs.AgentBrief, "当前目标与可见钩子") {
 		t.Fatalf("default director plan mismatch: %#v", director)
 	}
 
@@ -250,7 +249,7 @@ func TestInteractiveDirectorAPI(t *testing.T) {
 	}
 	director = directorResponse{}
 	decodeResponse(t, rebuildResp.Body.Bytes(), &director)
-	if !strings.Contains(director.Docs.Plan, "正文Agent可读") || director.Metadata.LastRun.Status != "ready" {
+	if !strings.Contains(director.Docs.Plan, "阶段目标与隐藏钩子") || !strings.Contains(director.Docs.AgentBrief, "当前目标与可见钩子") || director.Metadata.LastRun.Status != "ready" {
 		t.Fatalf("rebuilt director plan mismatch: %#v", director)
 	}
 
@@ -270,7 +269,7 @@ func TestInteractiveDirectorAPI(t *testing.T) {
 	}
 }
 
-func TestInteractiveStoryCreateRollsBackWhenStateSchemaInitializationFails(t *testing.T) {
+func TestInteractiveStoryStateSchemaRunRouteIsRemoved(t *testing.T) {
 	application := newTestApplication(t)
 	calls := 0
 	restoreDirector := application.SetInteractiveDirectorGeneratorForTest(func(context.Context, *config.Config, *book.State, agent.InteractiveStoryToolContext, string) (string, error) {
@@ -285,52 +284,36 @@ func TestInteractiveStoryCreateRollsBackWhenStateSchemaInitializationFails(t *te
 		"origin":          "主角准备出发",
 		"story_teller_id": "classic",
 	})
-	if createResp.Code != http.StatusBadRequest {
-		t.Fatalf("create story should fail when state schema initialization fails status=%d body=%s", createResp.Code, createResp.Body.String())
+	if createResp.Code != http.StatusOK {
+		t.Fatalf("create story should not wait for state schema initialization status=%d body=%s", createResp.Code, createResp.Body.String())
 	}
-	if calls != 1 {
-		t.Fatalf("state schema initializer should run once during story creation, calls=%d", calls)
+	if calls != 0 {
+		t.Fatalf("state schema initializer must not run during story creation, calls=%d", calls)
 	}
-
-	listResp := performJSONRequest(t, server, http.MethodGet, "/api/interactive/stories", nil)
-	if listResp.Code != http.StatusOK {
-		t.Fatalf("list stories status = %d body=%s", listResp.Code, listResp.Body.String())
+	var created interactive.StorySummary
+	decodeResponse(t, createResp.Body.Bytes(), &created)
+	if _, err := application.AppendInteractiveTurn(created.ID, "main", "出发", "主角走入晨雾。"); err != nil {
+		t.Fatal(err)
 	}
-	var list struct {
-		Stories []struct {
-			ID string `json:"id"`
-		} `json:"stories"`
+	runResp := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories/"+created.ID+"/state-schema/run", nil)
+	if runResp.Code != http.StatusNotFound {
+		t.Fatalf("removed Director state schema route status=%d body=%s", runResp.Code, runResp.Body.String())
 	}
-	decodeResponse(t, listResp.Body.Bytes(), &list)
-	if len(list.Stories) != 0 {
-		t.Fatalf("failed schema initialization must not persist a partial story: %#v", list)
+	snapshot, err := application.InteractiveSnapshot(created.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.CurrentTurn == nil || snapshot.CurrentTurn.Narrative != "主角走入晨雾。" || snapshot.ActorStateSchema == nil || snapshot.ActorStateSchema.Revision != 1 {
+		t.Fatalf("removed Director route must leave story and schema untouched: %#v", snapshot)
 	}
 }
 
-func TestInteractiveStoryCreateAdaptsAndFreezesStoryStateSchema(t *testing.T) {
+func TestInteractiveStoryStateSchemaReviewRoutesAreRemoved(t *testing.T) {
 	application := newTestApplication(t)
-	var instruction string
-	restoreDirector := application.SetInteractiveDirectorGeneratorForTest(func(_ context.Context, _ *config.Config, _ *book.State, toolContext agent.InteractiveStoryToolContext, input string) (string, error) {
-		if toolContext.MaintenanceTask != "state_schema_initialization" {
-			return "测试后台导演完成。", nil
-		}
-		instruction = input
-		return `{
-			"summary":"为修仙群像与关系玩法补充长期可计算状态",
-			"template_ops":[
-				{"op":"fields","template_id":"protagonist","field_ops":[
-					{"op":"add","field":{"name":"境界","type":"string","default":"炼气一层","visibility":"visible","description":"主角当前修行境界","order":110}},
-					{"op":"add","field":{"name":"修为进度","type":"number","default":0,"min":0,"max":100,"visibility":"visible","description":"突破前的修为积累","order":120}},
-					{"op":"add","field":{"name":"法宝","type":"list","default":[],"visibility":"visible","order":130}},
-					{"op":"add","field":{"name":"功法","type":"list","default":[],"visibility":"visible","order":140}}
-				]},
-				{"op":"fields","template_id":"important_character","field_ops":[
-					{"op":"add","field":{"name":"好感度","type":"number","default":0,"min":-100,"max":100,"visibility":"spoiler","order":110}},
-					{"op":"add","field":{"name":"关系阶段","type":"enum","default":"陌生","options":["陌生","熟悉","暧昧","恋人"],"visibility":"spoiler","order":120}}
-				]}
-			],
-			"initial_actor_ops":[]
-		}`, nil
+	directorCalls := 0
+	restoreDirector := application.SetInteractiveDirectorGeneratorForTest(func(context.Context, *config.Config, *book.State, agent.InteractiveStoryToolContext, string) (string, error) {
+		directorCalls++
+		return "测试后台导演完成。", nil
 	})
 	t.Cleanup(restoreDirector)
 	server := NewServer(application, "0")
@@ -343,57 +326,41 @@ func TestInteractiveStoryCreateAdaptsAndFreezesStoryStateSchema(t *testing.T) {
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("create adapted story status=%d body=%s", createResp.Code, createResp.Body.String())
 	}
-	if !strings.Contains(instruction, "青云问情录") || !strings.Contains(instruction, "state_preset") || !strings.Contains(instruction, "max_prompt_bytes") {
-		t.Fatalf("initializer instruction must contain bounded sourced context: %s", instruction)
+	if directorCalls != 0 {
+		t.Fatalf("story creation must not invoke Director, calls=%d", directorCalls)
 	}
 	var created interactive.StorySummary
 	decodeResponse(t, createResp.Body.Bytes(), &created)
-	snapshotResp := performJSONRequest(t, server, http.MethodGet, "/api/interactive/stories/"+created.ID+"/snapshot", nil)
-	if snapshotResp.Code != http.StatusOK {
-		t.Fatalf("snapshot status=%d body=%s", snapshotResp.Code, snapshotResp.Body.String())
+	initialResp := performJSONRequest(t, server, http.MethodGet, "/api/interactive/stories/"+created.ID+"/snapshot", nil)
+	var initial interactive.Snapshot
+	decodeResponse(t, initialResp.Body.Bytes(), &initial)
+	if initial.ActorStateSchema == nil || initial.ActorStateSchema.Revision != 1 || initial.ActorStateSchema.Adaptation != nil || initial.StateSchemaInitialization == nil || initial.StateSchemaInitialization.Status != interactive.StateSchemaInitializationWaitingOpening {
+		t.Fatalf("new story must expose revision 1 while waiting for opening: %#v", initial)
 	}
-	var snapshot interactive.Snapshot
-	decodeResponse(t, snapshotResp.Body.Bytes(), &snapshot)
-	if snapshot.ActorStateSchema == nil || snapshot.ActorStateSchema.Version != interactive.ActorStateSchemaVersion || snapshot.ActorStateSchema.Adaptation == nil {
-		t.Fatalf("adapted schema audit missing: %#v", snapshot.ActorStateSchema)
+	if _, err := application.AppendInteractiveTurn(created.ID, "main", "踏入宗门", "山门在云海间开启，沈凝站在执事身后观察新弟子。"); err != nil {
+		t.Fatal(err)
 	}
-	if snapshot.ActorStateSchema.Adaptation.FieldOps != 6 || snapshot.ActorStateSchema.Adaptation.Source != "director_agent" {
-		t.Fatalf("adaptation audit mismatch: %#v", snapshot.ActorStateSchema.Adaptation)
+	runResp := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories/"+created.ID+"/state-schema/run", nil)
+	if runResp.Code != http.StatusNotFound {
+		t.Fatalf("removed Director state schema run route status=%d body=%s", runResp.Code, runResp.Body.String())
 	}
-	templateFields := map[string]map[string]bool{}
-	for _, template := range snapshot.ActorStateSchema.System.Templates {
-		templateFields[template.ID] = map[string]bool{}
-		for _, field := range template.Fields {
-			templateFields[template.ID][field.Name] = true
-		}
+	reviewResp := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories/"+created.ID+"/state-schema/review", nil)
+	if reviewResp.Code != http.StatusNotFound {
+		t.Fatalf("removed Director state schema review route status=%d body=%s", reviewResp.Code, reviewResp.Body.String())
 	}
-	for _, fieldID := range []string{"境界", "修为进度", "法宝", "功法"} {
-		if !templateFields["protagonist"][fieldID] {
-			t.Fatalf("protagonist schema missing %s: %#v", fieldID, templateFields["protagonist"])
-		}
-	}
-	for _, fieldID := range []string{"好感度", "关系阶段"} {
-		if !templateFields["important_character"][fieldID] {
-			t.Fatalf("important character schema missing %s: %#v", fieldID, templateFields["important_character"])
-		}
-	}
-	actors, _ := snapshot.State["actors"].(map[string]any)
-	protagonist, _ := actors["protagonist"].(map[string]any)
-	state, _ := protagonist["state"].(map[string]any)
-	if state["境界"] != "炼气一层" || state["修为进度"] != float64(0) {
-		t.Fatalf("adapted defaults must materialize with initial actor state: %#v", state)
+	if directorCalls != 0 {
+		t.Fatalf("removed routes must not invoke Director, calls=%d", directorCalls)
 	}
 }
 
-func TestInteractiveStoryCreateCanDisableStateSchemaAdaptation(t *testing.T) {
+func TestInteractiveStoryCreateCanUseFixedStateSchemaPolicy(t *testing.T) {
 	application := newTestApplication(t)
 	director, err := application.CreateStoryDirector(interactive.StoryDirector{
 		ID:         "preset-only-director",
 		Name:       "直接使用预设",
 		ModuleRefs: interactive.DefaultStoryDirectorModuleRefs(),
 		Strategy: interactive.StoryDirectorStrategy{
-			Enabled:                   true,
-			StateSchemaAdaptationMode: interactive.StateSchemaAdaptationModeOff,
+			Enabled: true,
 		},
 	})
 	if err != nil {
@@ -407,17 +374,20 @@ func TestInteractiveStoryCreateCanDisableStateSchemaAdaptation(t *testing.T) {
 	t.Cleanup(restoreDirector)
 	server := NewServer(application, "0")
 
-	createResp := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories", map[string]string{
+	createResp := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories", map[string]any{
 		"title":             "原始预设故事",
 		"origin":            "直接使用状态预设。",
 		"story_teller_id":   "classic",
 		"story_director_id": director.ID,
+		"state_schema_policy": map[string]string{
+			"mode": interactive.StoryStateSchemaModeFixedTemplate,
+		},
 	})
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("create preset-only story status=%d body=%s", createResp.Code, createResp.Body.String())
 	}
 	if calls != 0 {
-		t.Fatalf("disabled state schema adaptation must not call Director, calls=%d", calls)
+		t.Fatalf("fixed state schema policy must not call Director, calls=%d", calls)
 	}
 }
 
@@ -432,8 +402,8 @@ func TestInteractiveActorTraitRollAndInitialStateAPI(t *testing.T) {
 			}},
 			TraitPools: []interactive.ActorTraitPool{{
 				ID: "origin", Name: "出身", Traits: []interactive.ActorTraitDefinition{
-					{ID: "wanderer", Name: "旅人", Weight: 1, Visibility: "visible"},
-					{ID: "scholar", Name: "学者", Weight: 1, Visibility: "visible"},
+					{ID: "wanderer", Name: "旅人", Weight: 1},
+					{ID: "scholar", Name: "学者", Weight: 1},
 				},
 			}},
 			InitialActors: []interactive.ActorStateInitialActor{{ID: "protagonist", Name: "主角", TemplateID: "protagonist", Role: "protagonist"}},
@@ -447,7 +417,7 @@ func TestInteractiveActorTraitRollAndInitialStateAPI(t *testing.T) {
 		Name: "词条 API 导演",
 		ModuleRefs: interactive.StoryDirectorModuleRefs{
 			NarrativeStyleID: "classic", ActorStateID: actorState.ID,
-			EventPackagesDisabled: true, RuleSystemDisabled: true, MemoryStructureDisabled: true, ImagePresetDisabled: true,
+			EventPackagesDisabled: true, RuleSystemDisabled: true, ImagePresetDisabled: true,
 		},
 		Strategy: interactive.StoryDirectorStrategy{Enabled: false},
 	})
@@ -485,6 +455,9 @@ func TestInteractiveActorTraitRollAndInitialStateAPI(t *testing.T) {
 		"title":             "带主角词条",
 		"story_teller_id":   "classic",
 		"story_director_id": director.ID,
+		"state_schema_policy": map[string]any{
+			"mode": interactive.StoryStateSchemaModeFixedTemplate,
+		},
 		"initial_trait_rolls": []map[string]any{{
 			"actor_id": "protagonist", "seed": 42,
 			"selections": []map[string]any{{"pool_id": "origin", "trait_ids": []string{"scholar"}}},
@@ -526,6 +499,7 @@ func TestInteractiveActorTraitRollAndInitialStateAPI(t *testing.T) {
 
 	autoCreateResp := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories", map[string]any{
 		"title": "后端自动抽取", "story_teller_id": "classic", "story_director_id": director.ID,
+		"state_schema_policy": map[string]any{"mode": interactive.StoryStateSchemaModeFixedTemplate},
 	})
 	if autoCreateResp.Code != http.StatusOK {
 		t.Fatalf("automatic trait creation status=%d body=%s", autoCreateResp.Code, autoCreateResp.Body.String())
@@ -585,16 +559,16 @@ func TestInteractiveDisabledStoryDirectorModulesAPI(t *testing.T) {
 		ID:   "detached",
 		Name: "关闭模块导演",
 		ModuleRefs: interactive.StoryDirectorModuleRefs{
-			NarrativeStyleID:        "non-classic-style",
-			NarrativeStyleDisabled:  true,
-			EventSystemID:           "default",
-			EventSystemDisabled:     true,
-			RuleSystemID:            "default",
-			RuleSystemDisabled:      true,
-			OpeningSelectorID:       "default",
-			OpeningSelectorDisabled: true,
-			ImagePresetID:           "non-default-image",
-			ImagePresetDisabled:     true,
+			NarrativeStyleID:       "non-classic-style",
+			NarrativeStyleDisabled: true,
+			EventPackageIDs:        []string{"default"},
+			EventPackagesDisabled:  true,
+			RuleSystemID:           "default",
+			RuleSystemDisabled:     true,
+			ActorStateID:           "default",
+			ActorStateDisabled:     true,
+			ImagePresetID:          "non-default-image",
+			ImagePresetDisabled:    true,
 		},
 		Strategy: interactive.StoryDirectorStrategy{Enabled: true},
 	}); err != nil {
@@ -605,6 +579,9 @@ func TestInteractiveDisabledStoryDirectorModulesAPI(t *testing.T) {
 	createResp := performJSONRequest(t, server, http.MethodPost, "/api/interactive/stories", map[string]any{
 		"title":             "关闭模块故事",
 		"story_director_id": "detached",
+		"state_schema_policy": map[string]any{
+			"mode": interactive.StoryStateSchemaModeFixedTemplate,
+		},
 	})
 	if createResp.Code != http.StatusOK {
 		t.Fatalf("create detached story status = %d body=%s", createResp.Code, createResp.Body.String())
@@ -634,11 +611,12 @@ func TestInteractiveDisabledStoryDirectorModulesAPI(t *testing.T) {
 	}
 	var rebuilt struct {
 		Docs struct {
-			Plan string `json:"plan"`
+			Plan       string `json:"plan"`
+			AgentBrief string `json:"agent_brief"`
 		} `json:"docs"`
 	}
 	decodeResponse(t, rebuildResp.Body.Bytes(), &rebuilt)
-	if !strings.Contains(rebuilt.Docs.Plan, "正文Agent可读") {
+	if !strings.Contains(rebuilt.Docs.Plan, "阶段目标与隐藏钩子") || !strings.Contains(rebuilt.Docs.AgentBrief, "当前目标与可见钩子") {
 		t.Fatalf("rebuilt detached director should return plan docs: %#v", rebuilt)
 	}
 }
@@ -651,93 +629,6 @@ func TestPresetUpdateRejectsStaleWorkspaceIdentity(t *testing.T) {
 	})
 	if resp.Code != http.StatusConflict {
 		t.Fatalf("stale workspace update status=%d body=%s", resp.Code, resp.Body.String())
-	}
-}
-
-func TestStoryMemoryStructuresPresetAPI(t *testing.T) {
-	application := newTestApplication(t)
-	server := NewServer(application, "0")
-
-	listResp := performJSONRequest(t, server, http.MethodGet, "/api/story-memory-structures", nil)
-	if listResp.Code != http.StatusOK {
-		t.Fatalf("list story memory structures status = %d body=%s", listResp.Code, listResp.Body.String())
-	}
-	var list struct {
-		Items []interactive.StoryMemoryStructureModule `json:"story_memory_structures"`
-	}
-	decodeResponse(t, listResp.Body.Bytes(), &list)
-	if len(list.Items) == 0 || list.Items[0].ID == "" {
-		t.Fatalf("list should include built-in memory structure modules: %#v", list)
-	}
-
-	enabled := true
-	createResp := performJSONRequest(t, server, http.MethodPost, "/api/story-memory-structures", interactive.StoryMemoryStructureModule{
-		ID:   "custom-memory-api",
-		Name: "API 记忆结构",
-		Structures: []interactive.StoryMemoryStructure{{
-			ID:      "quest",
-			Name:    "任务",
-			Mode:    "keyed",
-			Enabled: &enabled,
-			Fields: []interactive.StoryMemoryField{
-				{ID: "name", Name: "名称", Required: true, Order: 10},
-				{ID: "status", Name: "状态", Order: 20},
-			},
-			KeyFieldID: "name",
-			Order:      10,
-		}},
-	})
-	if createResp.Code != http.StatusOK {
-		t.Fatalf("create story memory structure status = %d body=%s", createResp.Code, createResp.Body.String())
-	}
-	var created interactive.StoryMemoryStructureModule
-	decodeResponse(t, createResp.Body.Bytes(), &created)
-	if created.ID != "custom-memory-api" || !created.Custom || len(created.Structures) != 1 {
-		t.Fatalf("created story memory structure mismatch: %#v", created)
-	}
-
-	getResp := performJSONRequest(t, server, http.MethodGet, "/api/story-memory-structures/custom-memory-api", nil)
-	if getResp.Code != http.StatusOK {
-		t.Fatalf("get story memory structure status = %d body=%s", getResp.Code, getResp.Body.String())
-	}
-	var loaded interactive.StoryMemoryStructureModule
-	decodeResponse(t, getResp.Body.Bytes(), &loaded)
-	if loaded.ID != created.ID || loaded.UpdatedAt != created.UpdatedAt {
-		t.Fatalf("loaded story memory structure mismatch: %#v", loaded)
-	}
-
-	conflictResp := performJSONRequest(t, server, http.MethodPatch, "/api/story-memory-structures/custom-memory-api", map[string]any{
-		"id":            "custom-memory-api",
-		"name":          "冲突名称",
-		"structures":    created.Structures,
-		"base_revision": "stale-revision",
-	})
-	if conflictResp.Code != http.StatusConflict {
-		t.Fatalf("stale story memory structure update should conflict, status = %d body=%s", conflictResp.Code, conflictResp.Body.String())
-	}
-
-	updateResp := performJSONRequest(t, server, http.MethodPatch, "/api/story-memory-structures/custom-memory-api", map[string]any{
-		"id":            "custom-memory-api",
-		"name":          "更新后的 API 记忆结构",
-		"structures":    created.Structures,
-		"base_revision": created.UpdatedAt,
-	})
-	if updateResp.Code != http.StatusOK {
-		t.Fatalf("update story memory structure status = %d body=%s", updateResp.Code, updateResp.Body.String())
-	}
-	var updated interactive.StoryMemoryStructureModule
-	decodeResponse(t, updateResp.Body.Bytes(), &updated)
-	if updated.Name != "更新后的 API 记忆结构" || updated.UpdatedAt == created.UpdatedAt {
-		t.Fatalf("updated story memory structure mismatch: %#v", updated)
-	}
-
-	deleteResp := performJSONRequest(t, server, http.MethodDelete, "/api/story-memory-structures/custom-memory-api", nil)
-	if deleteResp.Code != http.StatusOK {
-		t.Fatalf("delete story memory structure status = %d body=%s", deleteResp.Code, deleteResp.Body.String())
-	}
-	missingResp := performJSONRequest(t, server, http.MethodGet, "/api/story-memory-structures/custom-memory-api", nil)
-	if missingResp.Code != http.StatusNotFound {
-		t.Fatalf("deleted story memory structure should be missing, status = %d body=%s", missingResp.Code, missingResp.Body.String())
 	}
 }
 
@@ -754,6 +645,28 @@ func TestInteractiveChatRequiresStoryID(t *testing.T) {
 	}
 	if !strings.Contains(resp.Body.String(), "故事 ID 不能为空") {
 		t.Fatalf("unexpected response body: %s", resp.Body.String())
+	}
+}
+
+func TestInteractiveChatRecoveryRoutesRejectMissingActiveRun(t *testing.T) {
+	application := newTestApplication(t)
+	server := NewServer(application, "0")
+
+	activeResp := performJSONRequest(t, server, http.MethodGet, "/api/interactive/chat/active?story_id=story-1&branch=main", nil)
+	if activeResp.Code != http.StatusOK {
+		t.Fatalf("active chat status = %d body=%s", activeResp.Code, activeResp.Body.String())
+	}
+	var active struct {
+		Active bool `json:"active"`
+	}
+	decodeResponse(t, activeResp.Body.Bytes(), &active)
+	if active.Active {
+		t.Fatalf("chat should not be active: %s", activeResp.Body.String())
+	}
+
+	streamResp := performJSONRequest(t, server, http.MethodGet, "/api/interactive/chat/stream?story_id=story-1&branch=main", nil)
+	if streamResp.Code != http.StatusNotFound {
+		t.Fatalf("missing stream status = %d body=%s", streamResp.Code, streamResp.Body.String())
 	}
 }
 

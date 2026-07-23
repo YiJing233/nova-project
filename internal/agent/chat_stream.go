@@ -12,6 +12,10 @@ import (
 	"github.com/cloudwego/eino/schema"
 )
 
+// interactiveContentReclassifiedEvent tells the Game UI to retract provisional
+// prose when the same response reveals a non-submission tool call.
+const interactiveContentReclassifiedEvent = "interactive_content_reclassified"
+
 // processStreamingEvent 处理流式助手消息，输出领域事件。
 // 工具调用在流中一检测到名称就立即 emit，让前端尽早展示 running 卡片。
 // 参数在流中逐帧 emit tool_args_delta，调用方可在对外传输前按展示策略过滤。
@@ -23,6 +27,13 @@ func processStreamingEvent(ctx context.Context, mv *adk.MessageVariant, fullCont
 	lastArgsLen := make(map[int]int)   // 记录上次已发送的参数长度
 	loggedToolPaths := make(map[int]bool)
 	var chunks []*schema.Message
+	var interactiveContent strings.Builder
+	interactiveContentReclassified := false
+	isInteractiveRoot := meta.AgentKind == AgentKindInteractiveStory && !meta.SubAgent
+	// Runner production can advance through later tool calls before Runtime has
+	// consumed earlier model events. Keep classification tied to consumed output
+	// so a future readiness update cannot reopen an already locked candidate.
+	acceptInteractiveCandidate := isInteractiveRoot && fullContent.Len() == 0
 
 	for {
 		frame, err := recvMessageFrame(ctx, mv.MessageStream, idleTimeout)
@@ -30,6 +41,15 @@ func processStreamingEvent(ctx context.Context, mv *adk.MessageVariant, fullCont
 			break
 		}
 		if err != nil {
+			if _, retrying := interactiveCompletionRetryFromError(err); retrying {
+				finalizeInteractiveStreamContent(fullContent, fullThinking, &interactiveContent, interactiveContentReclassified)
+				log.Printf("[agent-run] interactive completion rejected before TurnResult submission; retrying model call generated_bytes=%d", fullContent.Len())
+				message, concatErr := concatStreamingChunks(chunks)
+				if concatErr != nil {
+					log.Printf("[agent-run] concat rejected streaming message failed err=%v chunks=%d", concatErr, len(chunks))
+				}
+				return message, err
+			}
 			log.Printf("[agent-run] interrupted reason=stream_recv_error err=%v generated_bytes=%d", err, fullContent.Len())
 			if ctx.Err() == nil {
 				emit(Event{Type: "error", Data: map[string]string{"message": err.Error()}})
@@ -41,10 +61,17 @@ func processStreamingEvent(ctx context.Context, mv *adk.MessageVariant, fullCont
 		}
 		chunks = append(chunks, frame)
 		if frame.ReasoningContent != "" {
-			if fullThinking != nil && !meta.SubAgent {
-				fullThinking.WriteString(frame.ReasoningContent)
+			emitThinkingContent(fullThinking, frame.ReasoningContent, meta, "thinking", emit)
+		}
+		if len(frame.ToolCalls) > 0 {
+			accumulatedToolCalls = mergeToolCalls(accumulatedToolCalls, frame.ToolCalls)
+		}
+		if isInteractiveRoot && !interactiveContentReclassified && interactiveToolCallsRequireReclassification(accumulatedToolCalls, false) {
+			interactiveContentReclassified = true
+			if interactiveContent.Len() > 0 {
+				emitThinkingContent(fullThinking, interactiveContent.String(), meta, interactiveContentReclassifiedEvent, emit)
+				interactiveContent.Reset()
 			}
-			emit(Event{Type: "thinking", Data: meta.appendTo(map[string]interface{}{"content": frame.ReasoningContent})})
 		}
 		if frame.Content != "" {
 			content := frame.Content
@@ -52,14 +79,22 @@ func processStreamingEvent(ctx context.Context, mv *adk.MessageVariant, fullCont
 				content = planParser.Push(frame.Content)
 			}
 			if content != "" {
-				if !meta.SubAgent {
-					fullContent.WriteString(content)
+				if isInteractiveRoot {
+					if acceptInteractiveCandidate && !interactiveContentReclassified {
+						interactiveContent.WriteString(content)
+						emit(Event{Type: "chunk", Data: meta.appendTo(map[string]interface{}{"content": content})})
+					} else {
+						emitThinkingContent(fullThinking, content, meta, "thinking", emit)
+					}
+				} else {
+					if !meta.SubAgent {
+						fullContent.WriteString(content)
+					}
+					emit(Event{Type: "chunk", Data: meta.appendTo(map[string]interface{}{"content": content})})
 				}
-				emit(Event{Type: "chunk", Data: meta.appendTo(map[string]interface{}{"content": content})})
 			}
 		}
 		if len(frame.ToolCalls) > 0 {
-			accumulatedToolCalls = mergeToolCalls(accumulatedToolCalls, frame.ToolCalls)
 			for i, tc := range accumulatedToolCalls {
 				if tc.Function.Name == "" {
 					continue
@@ -125,27 +160,76 @@ func processStreamingEvent(ctx context.Context, mv *adk.MessageVariant, fullCont
 	if len(chunks) == 0 {
 		return nil, nil
 	}
+	if isInteractiveRoot && !interactiveContentReclassified && interactiveToolCallsRequireReclassification(accumulatedToolCalls, true) {
+		interactiveContentReclassified = true
+		if interactiveContent.Len() > 0 {
+			emitThinkingContent(fullThinking, interactiveContent.String(), meta, interactiveContentReclassifiedEvent, emit)
+			interactiveContent.Reset()
+		}
+	}
+	if acceptInteractiveCandidate {
+		finalizeInteractiveStreamContent(fullContent, fullThinking, &interactiveContent, interactiveContentReclassified)
+	}
 	for _, tc := range accumulatedToolCalls {
 		if handled, successful := emitPlanProtocolToolCall(tc.Function.Name, tc.Function.Arguments, meta, emit); handled && successful && planParser != nil {
 			planParser.NoteSuccessfulBlock()
 		}
 	}
-	msg, err := schema.ConcatMessages(chunks)
+	msg, err := concatStreamingChunks(chunks)
 	if err != nil {
 		log.Printf("[agent-run] concat streaming message failed err=%v chunks=%d", err, len(chunks))
 		return nil, nil
 	}
-	msg.ToolCalls = filterPlanProtocolToolCalls(msg.ToolCalls)
 	return msg, nil
+}
+
+func interactiveToolCallsRequireReclassification(calls []schema.ToolCall, complete bool) bool {
+	for _, call := range calls {
+		name := strings.TrimSpace(call.Function.Name)
+		if name == "" {
+			if complete {
+				return true
+			}
+			continue
+		}
+		if !IsInteractiveTurnSubmissionTool(name) {
+			return true
+		}
+	}
+	return false
+}
+
+func finalizeInteractiveStreamContent(fullContent, fullThinking, content *strings.Builder, reclassified bool) {
+	if content == nil || content.Len() == 0 {
+		return
+	}
+	if reclassified {
+		if fullThinking != nil {
+			fullThinking.WriteString(content.String())
+		}
+		return
+	}
+	if fullContent != nil {
+		fullContent.WriteString(content.String())
+	}
+}
+
+func concatStreamingChunks(chunks []*schema.Message) (*schema.Message, error) {
+	if len(chunks) == 0 {
+		return nil, nil
+	}
+	message, err := schema.ConcatMessages(chunks)
+	if err != nil {
+		return nil, err
+	}
+	message.ToolCalls = filterPlanProtocolToolCalls(message.ToolCalls)
+	return message, nil
 }
 
 // processNonStreamingEvent 处理非流式助手消息，输出领域事件。
 func processNonStreamingEvent(mv *adk.MessageVariant, fullContent, fullThinking *strings.Builder, toolResultMaxBytes int, meta agentEventMetadata, planParser *planProtocolParser, emit func(Event)) {
 	if mv.Message.ReasoningContent != "" {
-		if fullThinking != nil && !meta.SubAgent {
-			fullThinking.WriteString(mv.Message.ReasoningContent)
-		}
-		emit(Event{Type: "thinking", Data: meta.appendTo(map[string]interface{}{"content": mv.Message.ReasoningContent})})
+		emitThinkingContent(fullThinking, mv.Message.ReasoningContent, meta, "thinking", emit)
 	}
 	if mv.Message.Content != "" {
 		content := mv.Message.Content
@@ -153,10 +237,16 @@ func processNonStreamingEvent(mv *adk.MessageVariant, fullContent, fullThinking 
 			content = planParser.Push(mv.Message.Content)
 		}
 		if content != "" {
-			if !meta.SubAgent {
-				fullContent.WriteString(content)
+			isInteractiveRoot := meta.AgentKind == AgentKindInteractiveStory && !meta.SubAgent
+			isInteractiveThinking := isInteractiveRoot && (fullContent.Len() > 0 || interactiveToolCallsRequireReclassification(mv.Message.ToolCalls, true))
+			if isInteractiveThinking {
+				emitThinkingContent(fullThinking, content, meta, "thinking", emit)
+			} else {
+				if !meta.SubAgent {
+					fullContent.WriteString(content)
+				}
+				emit(Event{Type: "chunk", Data: meta.appendTo(map[string]interface{}{"content": content})})
 			}
-			emit(Event{Type: "chunk", Data: meta.appendTo(map[string]interface{}{"content": content})})
 		}
 	}
 	for _, tc := range mv.Message.ToolCalls {
@@ -177,9 +267,6 @@ func processNonStreamingEvent(mv *adk.MessageVariant, fullContent, fullThinking 
 			logToolPath(name, tc.ID, path)
 		}
 		manifest := manifestForToolEvent(name, toolResultMaxBytes)
-		if len(args) > 200 {
-			args = args[:200] + "..."
-		}
 		data := meta.appendTo(map[string]interface{}{
 			"id":                  tc.ID,
 			"name":                name,

@@ -3,13 +3,16 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/cloudwego/eino/components/tool"
 
 	"denova/config"
+	"denova/internal/automation"
 )
 
 func TestConfigManagerToolsExposeStableSchema(t *testing.T) {
@@ -19,7 +22,7 @@ func TestConfigManagerToolsExposeStableSchema(t *testing.T) {
 	}
 	names := configManagerToolNameSet(t, tools)
 
-	for _, name := range []string{"list_style_references", "write_style_references", "list_tellers", "read_tellers", "write_tellers", "list_actor_states", "read_actor_states", "write_actor_states", "list_image_presets", "read_image_presets", "write_image_presets", "list_story_memory_structures", "write_story_memory_structures", "list_story_memory_records", "read_story_memory_records", "write_story_memory_records", "list_lore_items", "read_lore_items", "write_lore_items", "list_skills", "read_skills", "write_skills", "list_automations", "read_automations", "write_automations", "list_agent_configs", "write_agent_configs"} {
+	for _, name := range []string{"list_style_references", "write_style_references", "list_tellers", "read_tellers", "write_tellers", "list_actor_states", "read_actor_states", "write_actor_states", "list_image_presets", "read_image_presets", "write_image_presets", "list_lore_items", "read_lore_items", "write_lore_items", "list_skills", "read_skills", "write_skills", "list_automations", "read_automations", "write_automations", "list_agent_configs", "write_agent_configs"} {
 		if !names[name] {
 			t.Fatalf("stable config manager schema should expose %s, names=%v", name, names)
 		}
@@ -43,6 +46,32 @@ func TestConfigManagerToolsExposeStableSchema(t *testing.T) {
 	} {
 		if got := ManifestForTool(tc.name).Capability; got != tc.capability {
 			t.Fatalf("%s capability = %q, want %q", tc.name, got, tc.capability)
+		}
+	}
+}
+
+func TestListAutomationsToolUsesTheUserCatalogAcrossWorkspaces(t *testing.T) {
+	novaDir := filepath.Join(t.TempDir(), "user")
+	workspaceA := filepath.Join(t.TempDir(), "book-a")
+	workspaceB := filepath.Join(t.TempDir(), "book-b")
+	if _, err := automation.NewStore(novaDir, workspaceA).Create(automation.Task{Scope: automation.ScopeWorkspace, Name: "Task A", Template: automation.TemplateReview}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := automation.NewStore(novaDir, workspaceB).Create(automation.Task{Scope: automation.ScopeWorkspace, Name: "Task B", Template: automation.TemplateReview}); err != nil {
+		t.Fatal(err)
+	}
+
+	listTool, err := newListAutomationsTool(novaDir, workspaceA, []string{workspaceA, workspaceB})
+	if err != nil {
+		t.Fatal(err)
+	}
+	output, err := listTool.(tool.InvokableTool).InvokableRun(context.Background(), `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"Task A", "Task B", "catalog_id:", "target: workspace"} {
+		if !strings.Contains(output, required) {
+			t.Fatalf("global automation catalog missing %q:\n%s", required, output)
 		}
 	}
 }
@@ -185,6 +214,14 @@ func TestWriteAgentConfigsRequiresExplicitScopeAndWorkspace(t *testing.T) {
 	if _, err := writeTool.(tool.InvokableTool).InvokableRun(context.Background(), `{"scope":"workspace","operations":[]}`); err == nil {
 		t.Fatalf("write_agent_configs should reject workspace scope without workspace")
 	}
+
+	writeTool, err = newWriteAgentConfigsTool(&config.Config{NovaDir: t.TempDir(), Workspace: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writeTool.(tool.InvokableTool).InvokableRun(context.Background(), `{"scope":"workspace","operations":[{"op":"set_agent_override","agent":"ide","model":{"profile_id":"workspace-model"}}]}`); err == nil {
+		t.Fatalf("write_agent_configs should keep model selection user-scoped")
+	}
 }
 
 func TestWriteAgentConfigsPreservesUnrelatedSettings(t *testing.T) {
@@ -247,6 +284,141 @@ func TestWriteAgentConfigsPreservesUnrelatedSettings(t *testing.T) {
 	}
 	if len(read.SubAgents) != 1 || read.SubAgents[0].ID != "researcher" {
 		t.Fatalf("expected upserted SubAgent, got %#v", read.SubAgents)
+	}
+}
+
+func TestMutateAgentConfigsPreservesAConcurrentSettingsMutation(t *testing.T) {
+	novaDir := t.TempDir()
+	workspace := t.TempDir()
+	path := config.UserConfigPath(novaDir)
+	if err := config.WriteSettingsFile(path, config.Settings{Theme: "dark"}); err != nil {
+		t.Fatal(err)
+	}
+	layered, err := config.LoadLayeredWithStartupConfig(novaDir, workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				errs[0] = fmt.Errorf("concurrent settings mutation panic: %v", recovered)
+			}
+		}()
+		_, errs[0] = config.MutateSettingsFile(path, "", func(current config.Settings) (config.Settings, error) {
+			close(firstEntered)
+			<-releaseFirst
+			current.AgentPrompts.ConfigManager.SystemPrompt = "concurrent prompt"
+			return current, nil
+		})
+	}()
+	<-firstEntered
+	off := false
+	go func() {
+		defer wg.Done()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				errs[1] = fmt.Errorf("agent settings mutation panic: %v", recovered)
+			}
+		}()
+		close(secondStarted)
+		_, errs[1] = mutateAgentConfigSettings(path, "user", layered, []agentConfigWriteOperation{{
+			Op:    "set_agent_override",
+			Agent: config.AgentKindIDE,
+			Tools: &config.AgentToolOverride{FileWrite: &off},
+		}})
+	}()
+	<-secondStarted
+	close(releaseFirst)
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent mutation failed: %v", err)
+		}
+	}
+
+	persisted, err := config.ReadSettingsFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.AgentPrompts.ConfigManager.SystemPrompt != "concurrent prompt" {
+		t.Fatalf("Agent write lost the concurrent prompt: %#v", persisted.AgentPrompts.ConfigManager)
+	}
+	if persisted.AgentTools.IDE.FileWrite == nil || *persisted.AgentTools.IDE.FileWrite {
+		t.Fatalf("Agent tool override was not persisted: %#v", persisted.AgentTools.IDE)
+	}
+}
+
+func TestWriteAutomationsRequiresExplicitCreateTarget(t *testing.T) {
+	writeTool, err := newWriteAutomationsTool(t.TempDir(), t.TempDir(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = writeTool.(tool.InvokableTool).InvokableRun(context.Background(), `{
+		"operations": [{
+			"op": "create",
+			"task": {
+				"name": "Missing target",
+				"template": "custom",
+				"prompt": "Run without an implicit workspace",
+				"write_mode": "read_only",
+				"write_scope": "none",
+				"output_policy": "run_record_only"
+			}
+		}]
+	}`)
+	if err == nil || !strings.Contains(err.Error(), "target") {
+		t.Fatalf("automation create should require an explicit target, got %v", err)
+	}
+}
+
+func TestWriteAutomationsRejectsAStaleAgentDefinition(t *testing.T) {
+	novaDir := filepath.Join(t.TempDir(), "user")
+	workspace := filepath.Join(t.TempDir(), "book")
+	store := automation.NewStore(novaDir, workspace)
+	created, err := store.Create(automation.Task{
+		Scope:    automation.ScopeWorkspace,
+		Name:     "Original",
+		Template: automation.TemplateReview,
+		Prompt:   "original prompt",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateIfRevision(created.ID, automation.Task{Prompt: "user autosave"}, created.Revision); err != nil {
+		t.Fatal(err)
+	}
+	staleAgentTask := created
+	staleAgentTask.Name = "stale Agent name"
+	payload, err := json.Marshal(automationWriteInput{Operations: []automationWriteOperation{{
+		Op:   "update",
+		ID:   created.CatalogID,
+		Task: staleAgentTask,
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeTool, err := newWriteAutomationsTool(novaDir, workspace, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = writeTool.(tool.InvokableTool).InvokableRun(context.Background(), string(payload))
+	if err == nil || !strings.Contains(err.Error(), "revision conflict") {
+		t.Fatalf("stale Agent update should fail with revision conflict, got %v", err)
+	}
+	latest, err := store.Get(created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if latest.Prompt != "user autosave" || latest.Name == "stale Agent name" {
+		t.Fatalf("stale Agent update overwrote user definition: %#v", latest)
 	}
 }
 

@@ -1,18 +1,24 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Brain, GripHorizontal, GripVertical } from 'lucide-react'
+import { Gauge, GripHorizontal, GripVertical } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { motion } from 'motion/react'
 import { Group, Panel, Separator } from 'react-resizable-panels'
 import type { Layout } from 'react-resizable-panels'
+import { useShallow } from 'zustand/react/shallow'
 import { readFile } from '@/lib/api'
-import { createInteractiveBranch, createInteractiveStory, deleteInteractiveBranch, deleteInteractiveStory, getInteractiveBranches, getInteractiveSnapshot, getInteractiveStories, getInteractiveTellers, getStoryDirectors, switchInteractiveBranch, updateInteractiveStory } from '../api'
+import { createInteractiveBranch, createInteractiveStory, deleteInteractiveBranch, deleteInteractiveStory, getInteractiveBranches, getInteractiveSnapshot, getInteractiveStories, getInteractiveTellers, getStoryDirectors, selectInteractiveStory, switchInteractiveBranch, updateInteractiveStory } from '../api'
 import { useInteractiveStore } from '../stores/interactive-store'
 import { BranchTimeline } from './BranchTimeline'
-import { MemoryPanel } from './MemoryPanel'
+import { DirectorBackstage } from './director-backstage/DirectorBackstage'
+import { DirectorPanel } from './DirectorPanel'
 import { SettingPanel, type SettingPanelMode } from './SettingPanel'
 import { StoryPicker } from './StoryPicker'
-import { StoryMemoryView } from './StoryMemoryView'
 import { StoryStage } from './StoryStage'
+import {
+  readStoryStateDisplayPreference,
+  writeStoryStateDisplayPreference,
+  type StoryStateDisplayPreference,
+} from './story-state/display-preference'
 import { novaEase, panelPresence, subtlePresence } from '@/features/motion/motion-tokens'
 import { useIsMobile } from '@/hooks/useIsMobile'
 import { MobilePaneHost } from '@/components/layout/mobile-pane-host'
@@ -21,6 +27,7 @@ import { INTERACTIVE_OPENING_PRESET_PATH, INTERACTIVE_OPENING_PRESET_UPDATED_EVE
 
 interface InteractiveLayoutProps {
   workspace?: string
+  active?: boolean
   imagePresets?: ImagePreset[]
   onImagePresetsChange?: (presets: ImagePreset[]) => void
   loreEmpty?: boolean
@@ -29,10 +36,50 @@ interface InteractiveLayoutProps {
   onToggleRightPanel?: () => void
 }
 
-export function InteractiveLayout({ workspace, imagePresets = [], onImagePresetsChange, loreEmpty = false, onRequestLoreInit, rightPanelVisible = true, onToggleRightPanel }: InteractiveLayoutProps) {
+const SNAPSHOT_POLL_INTERVAL_MS = 1000
+
+export function InteractiveLayout({ workspace, active = true, imagePresets = [], onImagePresetsChange, loreEmpty = false, onRequestLoreInit, rightPanelVisible = true, onToggleRightPanel }: InteractiveLayoutProps) {
   const { t } = useTranslation()
   const isMobile = useIsMobile()
-  const { stories, tellers, storyDirectors, branches, snapshot, currentStoryId, currentBranchId, submode, setStories, setTellers, setStoryDirectors, setBranches, setSnapshot, applyTurnPersisted, setCurrentStoryId, setCurrentBranchId, setSubmode, resetWorkspaceState } = useInteractiveStore()
+  const {
+    stories,
+    tellers,
+    storyDirectors,
+    branches,
+    snapshot,
+    currentStoryId,
+    currentBranchId,
+    submode,
+    setStories,
+    setTellers,
+    setStoryDirectors,
+    setBranches,
+    setSnapshot,
+    applyTurnPersisted,
+    setCurrentStoryId,
+    setCurrentBranchId,
+    setSubmode,
+    resetWorkspaceState,
+  } = useInteractiveStore(useShallow((state) => ({
+    stories: state.stories,
+    tellers: state.tellers,
+    storyDirectors: state.storyDirectors,
+    branches: state.branches,
+    snapshot: state.snapshot,
+    currentStoryId: state.currentStoryId,
+    currentBranchId: state.currentBranchId,
+    submode: state.submode,
+    setStories: state.setStories,
+    setTellers: state.setTellers,
+    setStoryDirectors: state.setStoryDirectors,
+    setBranches: state.setBranches,
+    setSnapshot: state.setSnapshot,
+    applyTurnPersisted: state.applyTurnPersisted,
+    setCurrentStoryId: state.setCurrentStoryId,
+    setCurrentBranchId: state.setCurrentBranchId,
+    setSubmode: state.setSubmode,
+    resetWorkspaceState: state.resetWorkspaceState,
+  })))
   const currentStory = stories.find((story) => story.id === currentStoryId)
   const currentTeller = tellers.find((teller) => teller.id === currentStory?.story_teller_id)
   const styleSceneSuggestions = Array.from(new Set((currentTeller?.style_rules || []).map((rule) => rule.scene.trim()).filter((scene) => scene && !isGlobalStyleSceneName(scene))))
@@ -40,12 +87,13 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
   const storyIndexRequestSeqRef = useRef(0)
   const snapshotStoryIdRef = useRef('')
   const snapshotRequestSeqRef = useRef(0)
+  const storySelectionQueueRef = useRef<Promise<void>>(Promise.resolve())
   const lastStableSnapshotRef = useRef<Snapshot | null>(null)
   const [snapshotLoading, setSnapshotLoading] = useState(false)
   const [snapshotLoadFailed, setSnapshotLoadFailed] = useState(false)
   const [mobileSnapshotOpen, setMobileSnapshotOpen] = useState(false)
+  const [storyStateDisplayPreference, setStoryStateDisplayPreference] = useState(readStoryStateDisplayPreference)
   const [bookOpeningPresets, setBookOpeningPresets] = useState<BookOpeningPreset[]>([])
-  const [presetFocus, setPresetFocus] = useState<{ nonce: number; kind: 'memory-structure'; id?: string } | undefined>()
 
   if (currentBranchSnapshot) {
     lastStableSnapshotRef.current = currentBranchSnapshot
@@ -57,18 +105,6 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
   useEffect(() => {
     snapshotStoryIdRef.current = snapshot?.story_id || ''
   }, [snapshot?.story_id])
-
-  useEffect(() => {
-    const openPresets = (event: Event) => {
-      const detail = (event as CustomEvent<{ kind?: 'memory-structure'; id?: string }>).detail
-      if (detail?.kind !== 'memory-structure') return
-      setPresetFocus({ nonce: Date.now(), kind: detail.kind, id: detail.id })
-      setSubmode('teller')
-      setMobileSnapshotOpen(false)
-    }
-    window.addEventListener('nova:interactive-open-preset', openPresets)
-    return () => window.removeEventListener('nova:interactive-open-preset', openPresets)
-  }, [setSubmode])
 
   const reloadStories = useCallback(async (preferredStory?: StorySummary) => {
     const requestSeq = storyIndexRequestSeqRef.current + 1
@@ -153,24 +189,46 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
   }, [reloadBookOpeningPreset])
 
   useEffect(() => {
+    if (!active) return
     void reloadSnapshot()
-  }, [currentStoryId])
+  }, [active, currentStoryId, reloadSnapshot])
 
   useEffect(() => {
     const branchID = snapshot?.branch_id
     const directorStatus = snapshot?.director_plan_status?.status || ''
     const directorPending = directorStatus === 'running' || (directorStatus === 'waiting_opening' && (snapshot?.turns?.length || 0) > 0)
-    const memoryPending = snapshot?.current_turn?.memory_status === 'pending' || snapshot?.current_turn?.memory_status === 'running'
-    if (!branchID || (snapshot?.current_turn?.state_status !== 'pending' && !memoryPending && !directorPending)) return
-    const timer = window.setInterval(() => {
-      void reloadSnapshot(branchID)
-    }, 1000)
-    return () => window.clearInterval(timer)
-  }, [reloadSnapshot, snapshot?.branch_id, snapshot?.current_turn?.id, snapshot?.current_turn?.memory_status, snapshot?.current_turn?.state_status, snapshot?.director_plan_status?.status, snapshot?.turns?.length])
+    if (!active || !branchID || (snapshot?.current_turn?.state_status !== 'pending' && !directorPending)) return
+    let cancelled = false
+    let timer: number | null = null
+    const clearTimer = () => {
+      if (timer === null) return
+      window.clearTimeout(timer)
+      timer = null
+    }
+    const schedule = () => {
+      clearTimer()
+      if (cancelled || document.visibilityState !== 'visible') return
+      timer = window.setTimeout(() => {
+        timer = null
+        void reloadSnapshot(branchID, undefined, { silent: true }).finally(schedule)
+      }, SNAPSHOT_POLL_INTERVAL_MS)
+    }
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') schedule()
+      else clearTimer()
+    }
+    schedule()
+    document.addEventListener('visibilitychange', handleVisibilityChange)
+    return () => {
+      cancelled = true
+      clearTimer()
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
+  }, [active, reloadSnapshot, snapshot?.branch_id, snapshot?.current_turn?.id, snapshot?.current_turn?.state_status, snapshot?.director_plan_status?.status, snapshot?.turns?.length])
 
   useEffect(() => {
-    if (!isMobile) setMobileSnapshotOpen(false)
-  }, [isMobile])
+    if (!isMobile || submode !== 'story') setMobileSnapshotOpen(false)
+  }, [isMobile, submode])
 
   const handleCreateStory = async (input: StoryCreateInput) => {
     const story = await createInteractiveStory(input)
@@ -179,9 +237,50 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
     await reloadStories(story)
   }
 
-  const handleDeleteStory = async (storyId: string) => {
-    await deleteInteractiveStory(storyId)
+  const handleStorySelect = useCallback((storyId: string) => {
+    if (!storyId || storyId === useInteractiveStore.getState().currentStoryId) return
+    setCurrentStoryId(storyId)
+    const persisted = storySelectionQueueRef.current
+      .catch(() => undefined)
+      .then(() => selectInteractiveStory(storyId))
+    storySelectionQueueRef.current = persisted
+    void persisted.catch((error) => {
+      console.error('[interactive-layout] 持久化当前故事线失败', { storyId, error })
+    })
+  }, [setCurrentStoryId])
+
+  const handleDeleteStories = async (storyIds: string[]) => {
+    const uniqueStoryIds = Array.from(new Set(storyIds.filter(Boolean)))
+    if (uniqueStoryIds.length === 0) return
+
+    console.info('[interactive-layout] 开始删除故事线', { count: uniqueStoryIds.length, storyIds: uniqueStoryIds })
+    const results = await Promise.allSettled(uniqueStoryIds.map((storyId) => deleteInteractiveStory(storyId)))
     await reloadStories()
+    const failed = results.flatMap((result, index) => result.status === 'rejected' ? [{ storyId: uniqueStoryIds[index], reason: result.reason }] : [])
+    if (failed.length > 0) {
+      console.error('[interactive-layout] 删除故事线失败', { requested: uniqueStoryIds.length, failed })
+      const reason = failed[0].reason
+      throw reason instanceof Error ? reason : new Error(String(reason))
+    }
+    console.info('[interactive-layout] 故事线删除完成', { count: uniqueStoryIds.length })
+  }
+
+  const handleStorySetupUpdate = async (input: StoryCreateInput) => {
+    if (!currentStoryId) return
+    await updateInteractiveStory(currentStoryId, {
+      title: input.title,
+      origin: input.origin,
+      story_teller_id: input.story_teller_id,
+      story_director_id: input.story_director_id,
+      director_run_policy: input.director_run_policy,
+      module_refs: input.module_refs,
+      reply_target_chars: input.reply_target_chars,
+      choice_count: input.choice_count,
+      image_settings: input.image_settings,
+      state_schema_policy: input.state_schema_policy,
+    })
+    await reloadStories()
+    await reloadSnapshot(undefined, currentStoryId, { silent: true })
   }
 
   const handleDirectorChange = async (directorId: string) => {
@@ -210,6 +309,19 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
     })
     await reloadStories()
   }
+
+  const handleStoryStateDisplayPreferenceChange = useCallback((value: StoryStateDisplayPreference) => {
+    setStoryStateDisplayPreference(value)
+    writeStoryStateDisplayPreference(value)
+  }, [])
+
+  const openDirectorState = useCallback(() => {
+    if (isMobile) {
+      setMobileSnapshotOpen(true)
+      return
+    }
+    if (!rightPanelVisible) onToggleRightPanel?.()
+  }, [isMobile, onToggleRightPanel, rightPanelVisible])
 
   const handleTurnPersisted = useCallback((event: InteractiveTurnPersistedEvent) => {
     return applyTurnPersisted(event) || undefined
@@ -247,10 +359,10 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
     await reloadStories()
   }
 
-  const settingMode: SettingPanelMode = submode === 'story' || submode === 'timeline' || submode === 'memory' ? 'lore' : submode
-  const settingsWorkspaceVisible = submode !== 'story' && submode !== 'timeline' && submode !== 'memory'
+  const settingMode: SettingPanelMode = submode === 'story' || submode === 'timeline' || submode === 'director' ? 'lore' : submode
+  const settingsWorkspaceVisible = submode !== 'story' && submode !== 'timeline' && submode !== 'director'
   const contentKey = settingsWorkspaceVisible ? `settings:${settingMode}` : submode
-  const sceneMemoryVisible = isMobile ? mobileSnapshotOpen : rightPanelVisible
+  const directorPanelVisible = isMobile ? mobileSnapshotOpen : rightPanelVisible
   const storyStage = (
     <StoryStage
       workspace={workspace}
@@ -266,10 +378,12 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
       snapshotLoading={snapshotPending}
       loreEmpty={loreEmpty}
       bookOpeningPresets={bookOpeningPresets}
-      sceneMemoryVisible={sceneMemoryVisible}
-      onStorySelect={setCurrentStoryId}
+      directorPanelVisible={directorPanelVisible}
+      stateDisplayPreference={storyStateDisplayPreference}
+      onStorySelect={handleStorySelect}
       onStoryCreate={handleCreateStory}
-      onStoryDelete={handleDeleteStory}
+      onStorySetupUpdate={handleStorySetupUpdate}
+      onStoryDelete={handleDeleteStories}
       onDirectorChange={handleDirectorChange}
       onReplyTargetCharsChange={handleReplyTargetCharsChange}
       onImageSettingsChange={handleImageSettingsChange}
@@ -278,39 +392,37 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
         setSubmode('teller')
         setMobileSnapshotOpen(false)
       }}
-      onToggleSceneMemory={isMobile ? () => setMobileSnapshotOpen((open) => !open) : onToggleRightPanel}
+      onToggleDirectorPanel={isMobile ? () => setMobileSnapshotOpen((open) => !open) : onToggleRightPanel}
+      onOpenDirectorState={openDirectorState}
+      onStateDisplayPreferenceChange={handleStoryStateDisplayPreferenceChange}
       onTurnPersisted={handleTurnPersisted}
       onDone={handleStoryStageDone}
     />
   )
-  const openMemoryManager = () => {
-    setSubmode('memory')
-    setMobileSnapshotOpen(false)
-  }
   return (
     <div className="flex h-full min-h-0 flex-col bg-[var(--nova-bg)] text-[var(--nova-text)]">
       <div data-testid="interactive-shell" className="flex min-h-0 flex-1 flex-col overflow-hidden bg-[var(--nova-bg)]">
         <div className="flex min-h-0 flex-1">
           <div className="flex min-w-0 flex-1 flex-col bg-[var(--nova-surface-2)]">
             <motion.div key={contentKey} variants={panelPresence} initial="initial" animate="animate" transition={{ duration: 0.2, ease: novaEase }} className="flex min-h-0 flex-1 flex-col">
-              {submode === 'memory' ? (
-                <StoryMemoryView storyId={currentStoryId} branchId={currentBranchId} branches={branches} onBackToStory={() => setSubmode('story')} />
-              ) : settingsWorkspaceVisible ? (
-                <SettingPanel mode={settingMode} workspace={workspace} presetFocus={presetFocus} presetUsageMode="game" tellers={tellers} storyDirectors={storyDirectors} imagePresets={imagePresets} onTellersChange={setTellers} onStoryDirectorsChange={setStoryDirectors} onImagePresetsChange={onImagePresetsChange} />
+              {settingsWorkspaceVisible ? (
+                <SettingPanel mode={settingMode} workspace={workspace} presetUsageMode="game" tellers={tellers} storyDirectors={storyDirectors} imagePresets={imagePresets} onTellersChange={setTellers} onStoryDirectorsChange={setStoryDirectors} onImagePresetsChange={onImagePresetsChange} />
+              ) : submode === 'director' ? (
+                <DirectorBackstage storyId={currentStoryId} branchId={currentBranchId} snapshot={displaySnapshot} loading={snapshotPending} onSnapshotRefresh={() => reloadSnapshot(currentBranchId, currentStoryId, { silent: true })} />
               ) : submode === 'timeline' ? (
-                <BranchTimeline snapshot={displaySnapshot} branches={branches} currentBranchId={currentBranchId} onSwitchBranch={handleSwitchBranch} onCreateBranch={handleCreateBranch} onDeleteBranch={handleDeleteBranch} fill variant="workspace" onBackToStory={() => setSubmode('story')} headerControls={<StoryPicker stories={stories} currentStoryId={currentStoryId} tellers={tellers} storyDirectors={storyDirectors} onSelect={setCurrentStoryId} onCreate={handleCreateStory} onDelete={handleDeleteStory} />} />
+                <BranchTimeline snapshot={displaySnapshot} branches={branches} currentBranchId={currentBranchId} onSwitchBranch={handleSwitchBranch} onCreateBranch={handleCreateBranch} onDeleteBranch={handleDeleteBranch} fill variant="workspace" onBackToStory={() => setSubmode('story')} headerControls={<StoryPicker stories={stories} currentStoryId={currentStoryId} onSelect={handleStorySelect} onCreate={() => undefined} onDeleteStories={handleDeleteStories} hideCreate />} />
               ) : isMobile ? (
                 <MobilePaneHost
                   panes={[{
-                    id: 'scene-memory',
-                    title: t('memoryPanel.title'),
+                    id: 'director-panel',
+                    title: t('directorPanel.title'),
                     side: 'right',
-                    icon: <Brain className="h-4 w-4" />,
-                    content: <MemoryPanel storyId={currentStoryId} branchId={currentBranchId} snapshot={displaySnapshot} loading={snapshotPending} refreshKey={`${displaySnapshot?.current_turn?.id || ''}:${displaySnapshot?.current_turn?.memory_status || ''}:${displaySnapshot?.current_turn?.state_status || ''}`} onOpenMemoryManager={openMemoryManager} onSnapshotRefresh={() => reloadSnapshot(currentBranchId, currentStoryId, { silent: true })} />,
+                    icon: <Gauge className="h-4 w-4" />,
+                    content: <DirectorPanel storyId={currentStoryId} story={currentStory} storyDirectors={storyDirectors} onDirectorChange={handleDirectorChange} onReplyTargetCharsChange={handleReplyTargetCharsChange} branchId={currentBranchId} snapshot={displaySnapshot} stateDisplayPreference={storyStateDisplayPreference} onStateDisplayPreferenceChange={handleStoryStateDisplayPreferenceChange} />,
                   }]}
                   closeLabel={t('common.close')}
-                  openPaneId={mobileSnapshotOpen ? 'scene-memory' : null}
-                  onOpenPaneChange={(id) => setMobileSnapshotOpen(id === 'scene-memory')}
+                  openPaneId={mobileSnapshotOpen ? 'director-panel' : null}
+                  onOpenPaneChange={(id) => setMobileSnapshotOpen(id === 'director-panel')}
                   className="relative flex min-h-0 flex-1"
                 >
                   {storyStage}
@@ -322,10 +434,10 @@ export function InteractiveLayout({ workspace, imagePresets = [], onImagePresets
                   </Panel>
                   {rightPanelVisible && (
                     <>
-                      <InteractiveResizeHandle direction="vertical" label={t('interactiveLayout.resizeSceneMemory')} />
+                      <InteractiveResizeHandle direction="vertical" label={t('interactiveLayout.resizeDirectorPanel')} />
                       <Panel id="snapshot" defaultSize="320px" minSize="180px" maxSize="45%" className="min-w-0">
                         <motion.div className="h-full min-h-0" variants={subtlePresence} initial="initial" animate="animate" transition={{ duration: 0.16, ease: novaEase }}>
-                          <MemoryPanel storyId={currentStoryId} branchId={currentBranchId} snapshot={displaySnapshot} loading={snapshotPending} refreshKey={`${displaySnapshot?.current_turn?.id || ''}:${displaySnapshot?.current_turn?.memory_status || ''}:${displaySnapshot?.current_turn?.state_status || ''}`} onOpenMemoryManager={openMemoryManager} onSnapshotRefresh={() => reloadSnapshot(currentBranchId, currentStoryId, { silent: true })} />
+                          <DirectorPanel storyId={currentStoryId} story={currentStory} storyDirectors={storyDirectors} onDirectorChange={handleDirectorChange} onReplyTargetCharsChange={handleReplyTargetCharsChange} branchId={currentBranchId} snapshot={displaySnapshot} stateDisplayPreference={storyStateDisplayPreference} onStateDisplayPreferenceChange={handleStoryStateDisplayPreferenceChange} />
                         </motion.div>
                       </Panel>
                     </>

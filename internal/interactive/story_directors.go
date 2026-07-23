@@ -30,9 +30,6 @@ const (
 	EventFrequencyBalanced              = "balanced"
 	EventFrequencyFrequent              = "frequent"
 	DefaultEventFrequency               = EventFrequencyBalanced
-	DefaultStateSchemaAdaptationMode    = StateSchemaAdaptationModeAuto
-	StateSchemaAdaptationModeAuto       = "auto"
-	StateSchemaAdaptationModeOff        = "off"
 )
 
 var ErrStoryDirectorRevisionConflict = errors.New("故事导演已被其他操作更新，请重新加载后再保存")
@@ -49,11 +46,8 @@ type StoryDirector struct {
 	ModuleRefs        StoryDirectorModuleRefs       `json:"module_refs,omitempty"`
 	Strategy          StoryDirectorStrategy         `json:"strategy"`
 	EventPackages     []TellerEventPackage          `json:"event_packages,omitempty"`
-	EventSystem       StoryDirectorEventSystem      `json:"-"`
 	TRPGSystem        StoryDirectorTRPGSystem       `json:"trpg_system"`
 	ActorState        StoryDirectorActorStateSystem `json:"actor_state,omitempty"`
-	OpeningSelector   StoryDirectorOpeningSelector  `json:"opening_selector,omitempty"`
-	MigrationWarnings []string                      `json:"migration_warnings,omitempty"`
 	ResolvedSnapshot  StoryDirectorResolvedSnapshot `json:"resolved_snapshot,omitempty"`
 	Path              string                        `json:"path,omitempty"`
 	Custom            bool                          `json:"custom"`
@@ -65,34 +59,21 @@ type StoryDirector struct {
 }
 
 type StoryDirectorStrategy struct {
-	Enabled                   bool                           `json:"enabled"`
-	MainlineStrength          string                         `json:"mainline_strength,omitempty"`
-	FailurePolicy             string                         `json:"failure_policy,omitempty"`
-	PacingCurve               string                         `json:"pacing_curve,omitempty"`
-	EventFrequency            string                         `json:"event_frequency,omitempty"`
-	LegacyRandomEventRate     *float64                       `json:"random_event_rate,omitempty" jsonschema:"-"`
-	DirectorAgentMode         string                         `json:"director_agent_mode,omitempty"`
-	RuleStateConsumptionMode  string                         `json:"rule_state_consumption_mode,omitempty"`
-	RuleVisibilityMode        string                         `json:"rule_visibility_mode,omitempty"`
-	StateSchemaAdaptationMode string                         `json:"state_schema_adaptation_mode,omitempty"`
-	PromptMarkdown            string                         `json:"prompt_markdown,omitempty"`
-	BranchPlanningTurns       int                            `json:"branch_planning_turns,omitempty"`
-	PlanningTemplates         StoryDirectorPlanningTemplates `json:"planning_templates,omitempty"`
-}
-
-type StoryDirectorEventSystem struct {
-	EventPackages []TellerEventPackage `json:"event_packages,omitempty"`
-	CustomEvents  []DirectorEvent      `json:"custom_events,omitempty"`
+	Enabled                  bool                           `json:"enabled"`
+	MainlineStrength         string                         `json:"mainline_strength,omitempty"`
+	FailurePolicy            string                         `json:"failure_policy,omitempty"`
+	PacingCurve              string                         `json:"pacing_curve,omitempty"`
+	EventFrequency           string                         `json:"event_frequency,omitempty"`
+	DirectorAgentMode        string                         `json:"director_agent_mode,omitempty"`
+	RuleStateConsumptionMode string                         `json:"rule_state_consumption_mode,omitempty"`
+	RuleVisibilityMode       string                         `json:"rule_visibility_mode,omitempty"`
+	PromptMarkdown           string                         `json:"prompt_markdown,omitempty"`
+	BranchPlanningTurns      int                            `json:"branch_planning_turns,omitempty"`
+	PlanningTemplates        StoryDirectorPlanningTemplates `json:"planning_templates,omitempty"`
 }
 
 type StoryDirectorTRPGSystem struct {
 	RuleTemplates []RuleCheck `json:"rule_templates,omitempty"`
-}
-
-type StoryDirectorOpeningSelector struct {
-	Enabled         bool               `json:"enabled"`
-	TraitPools      []OpeningTraitPool `json:"trait_pools,omitempty"`
-	InitialStateOps []StateOp          `json:"initial_state_ops,omitempty"`
 }
 
 func NewStoryDirectorLibrary(novaDir string) *StoryDirectorLibrary {
@@ -238,9 +219,6 @@ func (l *StoryDirectorLibrary) ensureBuiltins() error {
 	if err := NewActorStateLibrary(l.novaDir).ensureBuiltins(); err != nil {
 		return err
 	}
-	if err := NewStoryMemoryStructureLibrary(l.novaDir).ensureBuiltins(); err != nil {
-		return err
-	}
 	if err := os.MkdirAll(l.dir(), 0o755); err != nil {
 		return err
 	}
@@ -248,130 +226,12 @@ func (l *StoryDirectorLibrary) ensureBuiltins() error {
 	version, versionErr := readStoryDirectorFileVersion(path)
 	current, parseErr := parseStoryDirectorFile(path)
 	if parseErr == nil && current.BuiltinOverridden {
-		return l.migrateStoryDirectorResources()
+		return nil
 	}
 	if versionErr == nil && parseErr == nil && current.Version == storyDirectorVersion && version == storyDirectorVersion {
-		return l.migrateStoryDirectorResources()
+		return nil
 	}
-	if err := writeStoryDirectorFile(path, DefaultStoryDirector()); err != nil {
-		return err
-	}
-	return l.migrateStoryDirectorResources()
-}
-
-func (l *StoryDirectorLibrary) migrateStoryDirectorResources() error {
-	if err := l.migrateLegacyTellerOrchestrations(); err != nil {
-		return err
-	}
-	return l.migrateEmbeddedStoryDirectorModules()
-}
-
-func (l *StoryDirectorLibrary) migrateLegacyTellerOrchestrations() error {
-	files, err := filepath.Glob(filepath.Join(l.novaDir, "story-tellers", "*.json"))
-	if err != nil {
-		return err
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	for _, file := range files {
-		if isBuiltinTellerFile(file) {
-			continue
-		}
-		teller, err := parseTellerFile(file)
-		if err != nil || teller.Orchestration == nil {
-			continue
-		}
-		directorID := NormalizeStoryDirectorID(teller.ID)
-		if directorID == "" {
-			directorID = NormalizeStoryDirectorID(teller.Name)
-		}
-		if directorID == "" {
-			continue
-		}
-		if IsBuiltinStoryDirectorID(directorID) {
-			directorID = "teller-" + directorID
-		}
-		path := filepath.Join(l.dir(), directorID+".json")
-		if _, err := os.Stat(path); err == nil {
-			continue
-		} else if !os.IsNotExist(err) {
-			return err
-		}
-		directorName := strings.TrimSpace(teller.Name)
-		if directorName != "" {
-			directorName += " 故事导演"
-		} else {
-			directorName = directorID
-		}
-		director := StoryDirectorFromTellerOrchestration(
-			directorID,
-			directorName,
-			"由旧叙事风格中的 orchestration 配置迁移生成。",
-			*teller.Orchestration,
-		)
-		director.CreatedAt = firstNonEmptyString(teller.CreatedAt, now)
-		director.UpdatedAt = now
-		if err := writeStoryDirectorFile(path, director); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (l *StoryDirectorLibrary) migrateEmbeddedStoryDirectorModules() error {
-	files, err := filepath.Glob(filepath.Join(l.dir(), "*.json"))
-	if err != nil {
-		return err
-	}
-	eventLibrary := NewEventPackageLibrary(l.novaDir)
-	ruleLibrary := NewRuleSystemLibrary(l.novaDir)
-	actorStateLibrary := NewActorStateLibrary(l.novaDir)
-	for _, file := range files {
-		if isBuiltinStoryDirectorFile(file) {
-			continue
-		}
-		raw, err := parseRawStoryDirectorFile(file)
-		if err != nil {
-			continue
-		}
-		if !StoryDirectorModuleRefsEmpty(raw.ModuleRefs) || !storyDirectorHasEmbeddedModules(raw) {
-			continue
-		}
-		director := normalizeStoryDirector(raw)
-		refs := NormalizeStoryDirectorModuleRefs(raw.ModuleRefs)
-		if refs.NarrativeStyleID == "" {
-			refs.NarrativeStyleID = "classic"
-		}
-		if refs.ImagePresetID == "" {
-			refs.ImagePresetID = "game-cg"
-		}
-		if len(raw.EventPackages) > 0 || !eventSystemEmpty(raw.EventSystem) {
-			ids, err := ensureMigratedEventPackages(eventLibrary, director)
-			if err != nil {
-				return err
-			}
-			refs.EventPackageIDs = ids
-		}
-		if !ruleSystemEmpty(raw.TRPGSystem) {
-			id, err := ensureMigratedRuleSystem(ruleLibrary, director)
-			if err != nil {
-				return err
-			}
-			refs.RuleSystemID = id
-		}
-		if !actorStateEmpty(raw.ActorState) || !openingSelectorEmpty(raw.OpeningSelector) {
-			id, err := ensureMigratedActorState(actorStateLibrary, director)
-			if err != nil {
-				return err
-			}
-			refs.ActorStateID = id
-		}
-		director.ModuleRefs = refs
-		director = ResolveStoryDirectorModules(l.novaDir, director)
-		if err := writeStoryDirectorFile(file, director); err != nil {
-			return err
-		}
-	}
-	return nil
+	return writeStoryDirectorFile(path, DefaultStoryDirector())
 }
 
 func readStoryDirectorFileVersion(path string) (int, error) {
@@ -386,19 +246,6 @@ func readStoryDirectorFileVersion(path string) (int, error) {
 		return 0, err
 	}
 	return payload.Version, nil
-}
-
-func parseRawStoryDirectorFile(path string) (StoryDirector, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return StoryDirector{}, err
-	}
-	director, err := decodeStoryDirectorJSON(data)
-	if err != nil {
-		return StoryDirector{}, fmt.Errorf("解析故事导演 JSON 失败: %w", err)
-	}
-	director.Path = path
-	return applyStoryDirectorOwnership(director), nil
 }
 
 func parseStoryDirectorFile(path string) (StoryDirector, error) {
@@ -420,27 +267,12 @@ func decodeStoryDirectorJSON(data []byte) (StoryDirector, error) {
 	if err := json.Unmarshal(data, &director); err != nil {
 		return StoryDirector{}, err
 	}
-	var legacy struct {
-		EventSystem      StoryDirectorEventSystem `json:"event_system"`
-		ResolvedSnapshot struct {
-			EventSystem StoryDirectorEventSystem `json:"event_system"`
-		} `json:"resolved_snapshot"`
-	}
-	if err := json.Unmarshal(data, &legacy); err != nil {
-		return StoryDirector{}, err
-	}
-	if len(director.EventPackages) == 0 && !eventSystemEmpty(legacy.EventSystem) {
-		director.EventSystem = legacy.EventSystem
-	}
-	if len(director.ResolvedSnapshot.EventPackages) == 0 && !eventSystemEmpty(legacy.ResolvedSnapshot.EventSystem) {
-		director.ResolvedSnapshot.EventSystem = legacy.ResolvedSnapshot.EventSystem
-	}
 	return director, nil
 }
 
 func writeStoryDirectorFile(path string, director StoryDirector) error {
 	director = normalizeStoryDirector(director)
-	data, err := marshalJSONWithoutFields(director, "opening_selector")
+	data, err := json.MarshalIndent(director, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -449,90 +281,6 @@ func writeStoryDirectorFile(path string, director StoryDirector) error {
 		return err
 	}
 	return os.WriteFile(path, data, 0o644)
-}
-
-func ensureMigratedEventPackages(library *EventPackageLibrary, director StoryDirector) ([]string, error) {
-	packages := director.EventPackages
-	if len(packages) == 0 && !eventSystemEmpty(director.EventSystem) {
-		packages = eventPackagesFromLegacyEventSystem(director.EventSystem, director.ID)
-	}
-	ids := make([]string, 0, len(packages))
-	for i, pkg := range packages {
-		id := normalizeDirectorModuleID(pkg.ID)
-		if id == "" {
-			id = normalizeDirectorModuleID(fmt.Sprintf("%s-events-%d", director.ID, i+1))
-		}
-		if _, err := library.Get(id); err == nil {
-			ids = append(ids, id)
-			continue
-		}
-		module, err := library.Create(EventPackageModule{
-			ID:          id,
-			Name:        firstNonEmptyString(pkg.Name, director.Name+" 事件包"),
-			Description: "由旧故事导演内嵌事件配置迁移生成。",
-			Events:      pkg.Events,
-		})
-		if err != nil {
-			return nil, err
-		}
-		ids = append(ids, module.ID)
-	}
-	return normalizeEventPackageIDs(ids), nil
-}
-
-func ensureMigratedRuleSystem(library *RuleSystemLibrary, director StoryDirector) (string, error) {
-	id := normalizeDirectorModuleID(director.ID + "-rules")
-	if _, err := library.Get(id); err == nil {
-		return id, nil
-	}
-	module, err := library.Create(RuleSystemModule{
-		ID:          id,
-		Name:        director.Name + " TRPG 检定",
-		Description: "由旧故事导演内嵌 trpg_system 迁移生成。",
-		TRPGSystem:  director.TRPGSystem,
-	})
-	if err != nil {
-		return "", err
-	}
-	return module.ID, nil
-}
-
-func ensureMigratedActorState(library *ActorStateLibrary, director StoryDirector) (string, error) {
-	id := normalizeDirectorModuleID(director.ID + "-actor-state")
-	if existing, err := library.Get(id); err == nil {
-		changed := false
-		if !openingSelectorHasContent(existing.OpeningSelector) && openingSelectorHasContent(director.OpeningSelector) {
-			existing.OpeningSelector = director.OpeningSelector
-			existing.Description = firstNonEmptyString(existing.Description, "由旧故事导演内嵌 actor_state 和 opening_selector 迁移生成。")
-			changed = true
-		}
-		if len(director.MigrationWarnings) > 0 {
-			existing.MigrationWarnings = normalizeStringListLimit(append(existing.MigrationWarnings, director.MigrationWarnings...), maxTurnBriefListItems)
-			changed = true
-		}
-		if changed {
-			if _, updateErr := library.Update(id, existing, existing.UpdatedAt); updateErr != nil {
-				return "", updateErr
-			}
-		}
-		return id, nil
-	}
-	actorState := director.ActorState
-	if actorStateEmpty(actorState) {
-		actorState = defaultActorStateSystem()
-	}
-	module, err := library.Create(ActorStateModule{
-		ID:                id,
-		Name:              director.Name + " 状态系统",
-		Description:       "由旧故事导演内嵌 actor_state 和 opening_selector 迁移生成。",
-		ActorState:        actorState,
-		OpeningSelector:   director.OpeningSelector,
-		MigrationWarnings: director.MigrationWarnings,
-	})
-	if err != nil {
-		return "", err
-	}
-	return module.ID, nil
 }
 
 func persistResolvedStoryDirectorSnapshot(path string, director StoryDirector) {
@@ -600,69 +348,22 @@ func DefaultStoryDirector() StoryDirector {
 	})
 }
 
-func StoryDirectorFromTellerOrchestration(id, name, description string, config TellerOrchestrationConfig) StoryDirector {
-	return normalizeStoryDirector(StoryDirector{
-		Version:     storyDirectorVersion,
-		ID:          NormalizeStoryDirectorID(id),
-		Name:        name,
-		Description: description,
-		ModuleRefs:  StoryDirectorModuleRefs{},
-		Strategy: StoryDirectorStrategy{
-			Enabled:                  config.Enabled,
-			MainlineStrength:         config.MainlineStrength,
-			FailurePolicy:            config.FailurePolicy,
-			PacingCurve:              config.PacingCurve,
-			EventFrequency:           config.EventFrequency,
-			DirectorAgentMode:        DefaultDirectorAgentMode,
-			RuleStateConsumptionMode: DefaultRuleStateConsumptionMode,
-			RuleVisibilityMode:       DefaultRuleVisibilityMode,
-			BranchPlanningTurns:      defaultBranchPlanningTurns,
-			PlanningTemplates:        DefaultStoryDirectorPlanningTemplates(),
-		},
-		EventPackages: eventPackagesFromLegacyEventSystem(StoryDirectorEventSystem{EventPackages: config.EventPackages, CustomEvents: config.CustomEvents}, id),
-		TRPGSystem: StoryDirectorTRPGSystem{
-			RuleTemplates: config.RuleTemplates,
-		},
-		ActorState: defaultActorStateSystem(),
-		OpeningSelector: StoryDirectorOpeningSelector{
-			Enabled:         config.Opening.Enabled,
-			TraitPools:      config.Opening.TraitPools,
-			InitialStateOps: config.Opening.InitialStateOps,
-		},
-	})
-}
-
 func normalizeStoryDirector(director StoryDirector) StoryDirector {
 	director.Version = storyDirectorVersion
 	director.ID = NormalizeStoryDirectorID(director.ID)
 	director.Name = trimBytes(firstNonEmptyString(director.Name, director.ID, "故事导演"), 256)
 	director.Description = trimBytes(director.Description, 1024)
 	director.ModuleRefs = NormalizeStoryDirectorModuleRefs(director.ModuleRefs)
-	if StoryDirectorModuleRefsEmpty(director.ModuleRefs) && !storyDirectorHasEmbeddedModules(director) {
+	if StoryDirectorModuleRefsEmpty(director.ModuleRefs) {
 		director.ModuleRefs = DefaultStoryDirectorModuleRefs()
 	}
 	director.Strategy = normalizeStoryDirectorStrategy(director.Strategy)
-	if len(director.EventPackages) == 0 && !eventSystemEmpty(director.EventSystem) {
-		director.EventPackages = eventPackagesFromLegacyEventSystem(director.EventSystem, director.ID)
-	}
-	if director.ModuleRefs.EventPackagesDisabled {
-		director.EventPackages = normalizeTellerEventPackagesNoDefault(director.EventPackages)
-	} else {
-		director.EventPackages = normalizeTellerEventPackagesNoDefault(director.EventPackages)
-	}
-	director.EventSystem = StoryDirectorEventSystem{}
+	director.EventPackages = normalizeTellerEventPackagesNoDefault(director.EventPackages)
 	director.TRPGSystem.RuleTemplates = normalizeRuleChecks(director.TRPGSystem.RuleTemplates)
 	if director.ModuleRefs.ActorStateDisabled {
 		director.ActorState = normalizeActorStateSystem(StoryDirectorActorStateSystem{})
 	} else {
 		director.ActorState = normalizeActorStateSystem(director.ActorState)
-	}
-	director.OpeningSelector = normalizeStoryDirectorOpeningSelector(director.OpeningSelector)
-	if !director.ModuleRefs.ActorStateDisabled && openingSelectorHasContent(director.OpeningSelector) {
-		var warnings []string
-		director.ActorState, warnings = migrateLegacyOpeningTraits(director.ActorState, director.OpeningSelector)
-		director.MigrationWarnings = normalizeStringListLimit(append(director.MigrationWarnings, warnings...), maxTurnBriefListItems)
-		director.OpeningSelector = StoryDirectorOpeningSelector{}
 	}
 	director.TRPGSystem = resolveRuleStateFieldIDs(director.ActorState, director.TRPGSystem)
 	director.ResolvedSnapshot = normalizeStoryDirectorResolvedSnapshot(director.ResolvedSnapshot)
@@ -677,30 +378,14 @@ func normalizeStoryDirectorStrategy(strategy StoryDirectorStrategy) StoryDirecto
 	strategy.MainlineStrength = normalizeOrchestrationOption(strategy.MainlineStrength, "soft_guidance")
 	strategy.FailurePolicy = normalizeOrchestrationOption(strategy.FailurePolicy, "reversible")
 	strategy.PacingCurve = normalizeOrchestrationOption(strategy.PacingCurve, "progressive")
-	if strings.TrimSpace(strategy.EventFrequency) == "" && strategy.LegacyRandomEventRate != nil {
-		strategy.EventFrequency = eventFrequencyFromLegacyRate(*strategy.LegacyRandomEventRate)
-	}
 	strategy.EventFrequency = normalizeEventFrequency(strategy.EventFrequency)
-	strategy.LegacyRandomEventRate = nil
 	strategy.DirectorAgentMode = normalizeDirectorAgentMode(strategy.DirectorAgentMode)
 	strategy.RuleStateConsumptionMode = normalizeRuleStateConsumptionMode(strategy.RuleStateConsumptionMode)
 	strategy.RuleVisibilityMode = normalizeRuleVisibilityMode(strategy.RuleVisibilityMode)
-	strategy.StateSchemaAdaptationMode = normalizeStateSchemaAdaptationMode(strategy.StateSchemaAdaptationMode)
 	strategy.PromptMarkdown = trimBytes(strategy.PromptMarkdown, MaxStoryDirectorStrategyPromptBytes)
 	strategy.BranchPlanningTurns = NormalizeBranchPlanningTurns(strategy.BranchPlanningTurns)
 	strategy.PlanningTemplates = NormalizeStoryDirectorPlanningTemplates(strategy.PlanningTemplates)
 	return strategy
-}
-
-func normalizeStateSchemaAdaptationMode(mode string) string {
-	switch strings.TrimSpace(mode) {
-	case StateSchemaAdaptationModeOff:
-		return StateSchemaAdaptationModeOff
-	case StateSchemaAdaptationModeAuto, "":
-		return StateSchemaAdaptationModeAuto
-	default:
-		return StateSchemaAdaptationModeAuto
-	}
 }
 
 func normalizeEventFrequency(value string) string {
@@ -709,19 +394,6 @@ func normalizeEventFrequency(value string) string {
 		return strings.TrimSpace(value)
 	default:
 		return DefaultEventFrequency
-	}
-}
-
-func eventFrequencyFromLegacyRate(rate float64) string {
-	switch {
-	case rate <= 0:
-		return EventFrequencyOff
-	case rate <= 0.10:
-		return EventFrequencySparse
-	case rate <= 0.22:
-		return EventFrequencyBalanced
-	default:
-		return EventFrequencyFrequent
 	}
 }
 
@@ -749,31 +421,6 @@ func normalizeDirectorAgentMode(mode string) string {
 	}
 }
 
-func normalizeStoryDirectorVisibility(value string) string {
-	switch strings.TrimSpace(value) {
-	case "visible", "hidden", "spoiler":
-		return strings.TrimSpace(value)
-	default:
-		return "visible"
-	}
-}
-
-func normalizeStoryDirectorOpeningSelector(config StoryDirectorOpeningSelector) StoryDirectorOpeningSelector {
-	config.TraitPools = normalizeOpeningTraitPools(config.TraitPools)
-	config.InitialStateOps = normalizeStateOpsForRule(config.InitialStateOps)
-	return config
-}
-
-func StoryDirectorInitialStateOps(director StoryDirector) []StateOp {
-	director = normalizeStoryDirector(director)
-	return actorStateInitialOps(director.ActorState)
-}
-
-func BuildStoryDirectorInitialStateOps(director StoryDirector, rolls []InitialActorTraitRoll) ([]StateOp, error) {
-	director = normalizeStoryDirector(director)
-	return BuildActorStateInitialOps(director.ActorState, rolls)
-}
-
 func StoryDirectorStrategyPromptMarkdown(director StoryDirector) string {
 	director = normalizeStoryDirector(director)
 	return director.Strategy.PromptMarkdown
@@ -781,7 +428,7 @@ func StoryDirectorStrategyPromptMarkdown(director StoryDirector) string {
 
 func DirectorEventCatalogFromStoryDirector(director StoryDirector) []DirectorEvent {
 	director = normalizeStoryDirector(director)
-	if !StoryDirectorEventSystemEnabled(director) {
+	if !StoryDirectorEventPackagesEnabled(director) {
 		return []DirectorEvent{}
 	}
 	events := []DirectorEvent{}
@@ -809,10 +456,9 @@ func StoryDirectorRuleSummary(director StoryDirector, limitBytes int) string {
 			"story_director_id": director.ID,
 			"name":              director.Name,
 		},
-		"limits":       map[string]int{"max_bytes": limitBytes},
-		"strategy":     storyDirectorStructuredStrategySummary(director.Strategy),
-		"state_system": storyDirectorActorStateSchemaSummary(director.ActorState),
-		"trpg_system":  director.TRPGSystem,
+		"limits":      map[string]int{"max_bytes": limitBytes},
+		"strategy":    storyDirectorStructuredStrategySummary(director.Strategy),
+		"trpg_system": director.TRPGSystem,
 	}
 	data, err := json.MarshalIndent(payload, "", "  ")
 	if err != nil {
@@ -846,17 +492,6 @@ func storyDirectorActorStateSchemaSummary(system StoryDirectorActorStateSystem) 
 	for poolIndex := range system.TraitPools {
 		system.TraitPools[poolIndex].Traits = nil
 	}
-	for templateIndex := range system.Templates {
-		fields := system.Templates[templateIndex].Fields
-		visibleFields := make([]ActorStateField, 0, len(fields))
-		for _, field := range fields {
-			if field.Visibility == "hidden" {
-				continue
-			}
-			visibleFields = append(visibleFields, field)
-		}
-		system.Templates[templateIndex].Fields = visibleFields
-	}
 	return system
 }
 
@@ -869,30 +504,28 @@ func ActorStateSchemaContext(system StoryDirectorActorStateSystem, limitBytes in
 }
 
 type storyDirectorStructuredStrategy struct {
-	Enabled                   bool   `json:"enabled"`
-	MainlineStrength          string `json:"mainline_strength,omitempty"`
-	FailurePolicy             string `json:"failure_policy,omitempty"`
-	PacingCurve               string `json:"pacing_curve,omitempty"`
-	EventFrequency            string `json:"event_frequency,omitempty"`
-	DirectorAgentMode         string `json:"director_agent_mode,omitempty"`
-	RuleStateConsumptionMode  string `json:"rule_state_consumption_mode,omitempty"`
-	RuleVisibilityMode        string `json:"rule_visibility_mode,omitempty"`
-	StateSchemaAdaptationMode string `json:"state_schema_adaptation_mode,omitempty"`
-	BranchPlanningTurns       int    `json:"branch_planning_turns,omitempty"`
+	Enabled                  bool   `json:"enabled"`
+	MainlineStrength         string `json:"mainline_strength,omitempty"`
+	FailurePolicy            string `json:"failure_policy,omitempty"`
+	PacingCurve              string `json:"pacing_curve,omitempty"`
+	EventFrequency           string `json:"event_frequency,omitempty"`
+	DirectorAgentMode        string `json:"director_agent_mode,omitempty"`
+	RuleStateConsumptionMode string `json:"rule_state_consumption_mode,omitempty"`
+	RuleVisibilityMode       string `json:"rule_visibility_mode,omitempty"`
+	BranchPlanningTurns      int    `json:"branch_planning_turns,omitempty"`
 }
 
 func storyDirectorStructuredStrategySummary(strategy StoryDirectorStrategy) storyDirectorStructuredStrategy {
 	return storyDirectorStructuredStrategy{
-		Enabled:                   strategy.Enabled,
-		MainlineStrength:          strategy.MainlineStrength,
-		FailurePolicy:             strategy.FailurePolicy,
-		PacingCurve:               strategy.PacingCurve,
-		EventFrequency:            strategy.EventFrequency,
-		DirectorAgentMode:         strategy.DirectorAgentMode,
-		RuleStateConsumptionMode:  strategy.RuleStateConsumptionMode,
-		RuleVisibilityMode:        strategy.RuleVisibilityMode,
-		StateSchemaAdaptationMode: strategy.StateSchemaAdaptationMode,
-		BranchPlanningTurns:       strategy.BranchPlanningTurns,
+		Enabled:                  strategy.Enabled,
+		MainlineStrength:         strategy.MainlineStrength,
+		FailurePolicy:            strategy.FailurePolicy,
+		PacingCurve:              strategy.PacingCurve,
+		EventFrequency:           strategy.EventFrequency,
+		DirectorAgentMode:        strategy.DirectorAgentMode,
+		RuleStateConsumptionMode: strategy.RuleStateConsumptionMode,
+		RuleVisibilityMode:       strategy.RuleVisibilityMode,
+		BranchPlanningTurns:      strategy.BranchPlanningTurns,
 	}
 }
 

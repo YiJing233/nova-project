@@ -1,11 +1,16 @@
 import type { UIMessageChunk } from 'ai'
 import { fetchAPI, jsonHeaders, parseUIMessageStream, requestJSON } from './client'
-import type { AutomationActiveRun, AutomationInboxActionResult, AutomationInboxItem, AutomationTask, AutomationTriggerEvidence } from './types'
+import type { AutomationActiveRun, AutomationInboxActionResult, AutomationInboxItem, AutomationTask, AutomationTaskTemplate, AutomationTaskUpdate, AutomationTriggerEvidence } from './types'
 import type { AgentUIMessage } from '@/lib/agent-ui'
 
 export async function getAutomations(): Promise<AutomationTask[]> {
   const data = await requestJSON<{ tasks: AutomationTask[] }>('/api/automations')
   return data.tasks || []
+}
+
+export async function getAutomationTemplates(locale: string): Promise<AutomationTaskTemplate[]> {
+  const data = await requestJSON<{ templates: AutomationTaskTemplate[] }>(`/api/automations/templates?locale=${encodeURIComponent(locale)}`)
+  return data.templates || []
 }
 
 export async function createAutomation(task: AutomationTask): Promise<AutomationTask> {
@@ -38,11 +43,11 @@ export async function markAutomationInboxItemRead(id: string): Promise<Automatio
   return requestJSON(`/api/automations/inbox/${encodeURIComponent(id)}/read`, { method: 'POST' })
 }
 
-export async function updateAutomation(id: string, task: AutomationTask): Promise<AutomationTask> {
+export async function updateAutomation(id: string, task: AutomationTaskUpdate, baseRevision?: string): Promise<AutomationTask> {
   return requestJSON(`/api/automations/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     headers: jsonHeaders,
-    body: JSON.stringify(task),
+    body: JSON.stringify({ ...task, base_revision: baseRevision }),
   })
 }
 

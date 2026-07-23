@@ -1,10 +1,11 @@
 import { Children, Fragment, cloneElement, isValidElement, memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, ReactNode } from 'react'
-import { Activity, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, CircleDot, ClipboardCheck, ClipboardList, Clock3, Copy, Dice5, FileText, ImagePlus, ListTodo, Loader2, PanelRightOpen, Pencil, RefreshCw, Send, X } from 'lucide-react'
+import { Activity, Check, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Circle, CircleDot, ClipboardCheck, ClipboardList, Copy, Dice5, FileText, ImagePlus, ListTodo, Loader2, PanelRightOpen, Pencil, RefreshCw, Send, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ImagePreviewDialog } from '@/components/common/ImagePreviewDialog'
 import { MarkdownRenderer, type MarkdownRendererComponents } from '@/components/common/MarkdownRenderer'
 import { workspaceAssetURL, type ChapterIllustration, type ChatMessage, type InteractiveImage, type InteractiveImageError } from '@/lib/api'
+import type { UserMessageReference } from '@/lib/api-client/types'
 import { findDialogueHighlightRanges } from '@/lib/dialogue-highlight'
 import { isWorkspaceImagePath } from '@/lib/workspace-file-kind'
 import { useBottomScrollLock } from '@/hooks/useBottomScrollLock'
@@ -13,18 +14,21 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { subAgentSessionKey } from './subagent-session'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { boundedPlanDisplay, formatPlanQuestionAnswerMessage, formatPlanQuestionAnswerPreview, parsePlanQuestionSet, recommendedAnswerSet } from '@/lib/plan-mode'
+import { formatPlanQuestionAnswerMessage, formatPlanQuestionAnswerPreview, parsePlanQuestionSet, planDisplayContent, recommendedAnswerSet } from '@/lib/plan-mode'
 import type { PlanQuestionAnswer } from '@/lib/plan-mode'
 import { Message as AIMessage, MessageContent as AIMessageContent } from '@/components/ai-elements/message'
 import { Reasoning, ReasoningContent, ReasoningTrigger } from '@/components/ai-elements/reasoning'
 import { Plan, PlanContent, PlanHeader } from '@/components/ai-elements/plan'
 import { Tool, ToolContent } from '@/components/ai-elements/tool'
+import { Shimmer } from '@/components/ai-elements/shimmer'
+import { StreamingContentStage } from './StreamingContentStage'
 
 interface MessageItemProps {
   message: ChatMessage
   highlightDialogue?: boolean
   messageStyle?: CSSProperties
   onEdit?: (message: ChatMessage) => void
+  onEditAssistantReply?: (message: ChatMessage) => void
   onRegenerate?: (message: ChatMessage) => void
   onSwitchVersion?: (message: ChatMessage, direction: -1 | 1) => void
   onOpenSubAgentSession?: (message: ChatMessage) => void
@@ -48,10 +52,11 @@ const messageActionTooltipSideOffset = 3
 const planThinkingPreviewStaleMs = 3500
 
 /** 单条消息组件，根据 role 渲染不同样式 */
-export const MessageItem = memo(function MessageItem({ message, highlightDialogue = false, messageStyle, onEdit, onRegenerate, onSwitchVersion, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, subAgentPresentation = 'card', onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onOpenTrace, onPlanCardLayoutChange }: MessageItemProps) {
+export const MessageItem = memo(function MessageItem({ message, highlightDialogue = false, messageStyle, onEdit, onEditAssistantReply, onRegenerate, onSwitchVersion, onOpenSubAgentSession, onInsertIllustration, onGenerateInteractiveImage, generatingInteractiveImageTurnId, activeSubAgentSessionKey, subAgentPresentation = 'card', onSubmitPlanQuestion, onApprovePlan, onContinuePlan, onExitPlanMode, onOpenTrace, onPlanCardLayoutChange }: MessageItemProps) {
   const { role, content = '' } = message
   const canEdit = role === 'user' && Boolean(message.turn_id) && Boolean(onEdit)
-  const canRegenerate = role === 'assistant' && Boolean(message.turn_id) && Boolean(onRegenerate) && !message.streaming
+  const canEditAssistantReply = role === 'assistant' && !message.subagent && Boolean(message.turn_id) && Boolean(onEditAssistantReply) && !message.streaming
+  const canRegenerate = (role === 'assistant' || role === 'error') && Boolean(onRegenerate) && !message.streaming
   const canGenerateInteractiveImage = role === 'assistant' && Boolean(message.turn_id) && Boolean(onGenerateInteractiveImage) && !message.streaming
   const versionCount = message.turn_versions?.length || 0
   const markedVersionIndex = message.turn_versions?.findIndex((version) => version.current) ?? -1
@@ -64,7 +69,8 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
         <AIMessage from="user" className="max-w-none items-end">
           <div className="nova-message-body-with-meta nova-message-body-with-meta-user max-w-[88%]">
             <AIMessageContent className="nova-user-message rounded-lg bg-[var(--nova-user-message-bg-to)] px-3 py-2 text-sm leading-5 text-[var(--nova-user-message-text)] whitespace-pre-wrap group-[.is-user]:px-3 group-[.is-user]:py-2" style={messageStyle}>
-              {content}
+              <SentMessageReferences references={message.user_references} />
+              <span>{content}</span>
             </AIMessageContent>
             <MessageInlineMeta message={message} content={content} align="right" reserveSpace={Boolean(onEdit)} onEdit={canEdit ? onEdit : undefined} />
           </div>
@@ -90,7 +96,7 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
         ? message.streaming_target_content
         : undefined
       const visibleContent = sanitizeThinkTags(streamingTargetContent || content).trim()
-      const reserveMetaSpace = message.streaming === true || Boolean(onGenerateInteractiveImage || onRegenerate || onSwitchVersion)
+      const reserveMetaSpace = message.streaming === true || Boolean(canEditAssistantReply || onGenerateInteractiveImage || onRegenerate || onSwitchVersion)
       return (
         <AIMessage from="assistant" className="max-w-none">
           <div className="w-full">
@@ -111,6 +117,8 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
                 align="left"
                 reserveSpace={reserveMetaSpace}
                 hideActions={message.streaming === true}
+                onEdit={canEditAssistantReply ? onEditAssistantReply : undefined}
+                editLabelKey="chat.action.editAssistantReply"
                 onGenerateInteractiveImage={canGenerateInteractiveImage ? onGenerateInteractiveImage : undefined}
                 generatingInteractiveImage={Boolean(message.turn_id && generatingInteractiveImageTurnId === message.turn_id)}
                 onRegenerate={canRegenerate ? onRegenerate : undefined}
@@ -173,9 +181,12 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
     case 'error':
       return (
         <div className="flex justify-center">
-          <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-2 rounded-full border border-[var(--nova-danger-border)] bg-[var(--nova-danger-bg)] px-3 py-1 text-xs text-[var(--nova-danger)]">
-            <span className="min-w-0 truncate">{content}</span>
-            <TraceLinkButton runID={message.run_id} onOpenTrace={onOpenTrace} />
+          <div className="nova-message-body-with-meta max-w-full">
+            <div className="inline-flex max-w-full flex-wrap items-center justify-center gap-2 rounded-full border border-[var(--nova-danger-border)] bg-[var(--nova-danger-bg)] px-3 py-1 text-xs text-[var(--nova-danger)]">
+              <span className="min-w-0 truncate">{content}</span>
+              <TraceLinkButton runID={message.run_id} onOpenTrace={onOpenTrace} />
+            </div>
+            <MessageInlineMeta message={message} content={content} align="left" onRegenerate={canRegenerate ? onRegenerate : undefined} />
           </div>
         </div>
       )
@@ -184,6 +195,32 @@ export const MessageItem = memo(function MessageItem({ message, highlightDialogu
       return null
   }
 })
+
+function SentMessageReferences({ references }: { references?: UserMessageReference[] }) {
+  const { t } = useTranslation()
+  if (!references?.length) return null
+  return (
+    <div data-testid="sent-message-references" className="mb-1.5 flex max-w-full flex-col gap-1 border-b border-current/10 pb-1.5 text-[11px] leading-4">
+      {references.map((reference, index) => (
+        <div key={`${reference.kind}:${reference.id || reference.label}:${index}`} className="flex min-w-0 items-start gap-1.5">
+          <span className="shrink-0 rounded bg-black/10 px-1 py-0.5 text-[10px] opacity-75 dark:bg-white/10">
+            {t(`chat.reference.${reference.kind}`)}
+          </span>
+          <span className="min-w-0 break-words">
+            <span className="font-medium">{reference.label}{formatReferenceLines(reference)}</span>
+            {reference.detail ? <span className="ml-1 opacity-75">— {reference.detail}</span> : null}
+          </span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function formatReferenceLines(reference: UserMessageReference): string {
+  if (reference.start_line === undefined) return ''
+  if (reference.end_line !== undefined && reference.end_line !== reference.start_line) return `:L${reference.start_line}-L${reference.end_line}`
+  return `:L${reference.start_line}`
+}
 
 function TraceLinkButton({ runID, onOpenTrace }: { runID?: string; onOpenTrace?: (runID: string) => void }) {
   const { t } = useTranslation()
@@ -233,8 +270,8 @@ function RuleRollBlock({ message }: { message: ChatMessage }) {
         {stateChanges.length ? (
           <div className="mt-1 flex flex-wrap gap-1">
             {stateChanges.map((change, index) => (
-				<span key={`${change.actor_id || ''}:${change.field_id || change.path || index}`} className="rounded border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--nova-text-muted)]">
-					{[change.actor_id, change.field_id].filter(Boolean).join(' / ') || change.path} {formatSignedRuleRollNumber(change.change)}
+				<span key={`${change.actor_id}:${change.field_id}:${index}`} className="rounded border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-1.5 py-0.5 text-[10px] text-[var(--nova-text-muted)]">
+					{change.actor_id} / {change.field_id} {formatSignedRuleRollNumber(change.change)}
               </span>
             ))}
           </div>
@@ -261,7 +298,7 @@ function formatSignedRuleRollNumber(value: number) {
   return value > 0 ? `+${formatted}` : formatted
 }
 
-function MessageInlineMeta({ message, content, align, reserveSpace = false, hideActions = false, onEdit, onGenerateInteractiveImage, generatingInteractiveImage = false, onRegenerate, onSwitchVersion, versionIndex = -1, versionCount = 0 }: { message: ChatMessage; content: string; align: 'left' | 'right'; reserveSpace?: boolean; hideActions?: boolean; onEdit?: (message: ChatMessage) => void; onGenerateInteractiveImage?: (message: ChatMessage) => void; generatingInteractiveImage?: boolean; onRegenerate?: (message: ChatMessage) => void; onSwitchVersion?: (message: ChatMessage, direction: -1 | 1) => void; versionIndex?: number; versionCount?: number }) {
+function MessageInlineMeta({ message, content, align, reserveSpace = false, hideActions = false, onEdit, editLabelKey = 'chat.action.editTurn', onGenerateInteractiveImage, generatingInteractiveImage = false, onRegenerate, onSwitchVersion, versionIndex = -1, versionCount = 0 }: { message: ChatMessage; content: string; align: 'left' | 'right'; reserveSpace?: boolean; hideActions?: boolean; onEdit?: (message: ChatMessage) => void; editLabelKey?: 'chat.action.editTurn' | 'chat.action.editAssistantReply'; onGenerateInteractiveImage?: (message: ChatMessage) => void; generatingInteractiveImage?: boolean; onRegenerate?: (message: ChatMessage) => void; onSwitchVersion?: (message: ChatMessage, direction: -1 | 1) => void; versionIndex?: number; versionCount?: number }) {
   const { t } = useTranslation()
   const [copied, setCopied] = useState(false)
   const formatted = formatMessageHoverTime(message.created_at)
@@ -298,6 +335,19 @@ function MessageInlineMeta({ message, content, align, reserveSpace = false, hide
             }}
           >
             {copied ? <Check className="h-3 w-3" /> : <Copy className="h-3 w-3" />}
+          </TooltipIconButton>
+        )}
+        {onEdit && (
+          <TooltipIconButton
+            label={t(editLabelKey)}
+            {...metaTooltip}
+            className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)]"
+            onClick={(event) => {
+              event.stopPropagation()
+              onEdit(message)
+            }}
+          >
+            <Pencil className="h-3 w-3" />
           </TooltipIconButton>
         )}
         {onGenerateInteractiveImage && (
@@ -357,19 +407,6 @@ function MessageInlineMeta({ message, content, align, reserveSpace = false, hide
               <ChevronRight className="h-3 w-3" />
             </TooltipIconButton>
           </>
-        )}
-        {onEdit && (
-          <TooltipIconButton
-            label={t('chat.action.editTurn')}
-            {...metaTooltip}
-            className="h-5 w-5 border border-transparent bg-transparent text-[var(--nova-text-faint)] shadow-none hover:border-[var(--nova-border)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text-muted)]"
-            onClick={(event) => {
-              event.stopPropagation()
-              onEdit(message)
-            }}
-          >
-            <Pencil className="h-3 w-3" />
-          </TooltipIconButton>
         )}
       </div>
     </TooltipProvider>
@@ -512,31 +549,11 @@ function AgentSourceBadge({ message, compact = false }: { message: ChatMessage; 
   )
 }
 
-/** 工具执行中的轻量状态卡片 */
-export function ToolActivityBlock({ content }: { content: string }) {
-  const { t } = useTranslation()
-  const activity = parseActivityContent(content, t)
-
+/** Agent 运行中、尚无具体消息时的轻量活动提示。 */
+export function AgentActivityShimmer({ content }: { content: string }) {
   return (
-    <div className="flex justify-start">
-      <div className="w-full rounded-lg border border-[var(--nova-border)] bg-[var(--nova-surface)] px-3 py-2.5 text-xs shadow-[var(--nova-shadow)]">
-        <div className="flex items-start gap-3">
-          <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-[var(--nova-border)] bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]">
-            <Clock3 className="h-3.5 w-3.5 animate-pulse" />
-          </span>
-          <div className="min-w-0 flex-1">
-            <div className="flex flex-wrap items-center gap-2 text-[var(--nova-text)]">
-              <span className="font-medium">{activity.title}</span>
-              {activity.toolName && (
-                <code className="rounded border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-1.5 py-0.5 font-mono text-[11px] text-[var(--nova-text-muted)]">
-                  {activity.toolName}
-                </code>
-              )}
-            </div>
-            {activity.detail && <div className="mt-1 truncate text-[var(--nova-text-faint)]">{activity.detail}</div>}
-          </div>
-        </div>
-      </div>
+    <div className="flex justify-start px-1 py-1" role="status" aria-live="polite">
+      <Shimmer as="span" className="text-sm font-medium">{content}</Shimmer>
     </div>
   )
 }
@@ -604,7 +621,7 @@ function ContextCompactionBlock({ message }: { message: ChatMessage }) {
 function PlanQuestionBlock({ message, onSubmit, onLayoutChange }: { message: ChatMessage; onSubmit?: (message: ChatMessage, content: string, preview: string) => void; onLayoutChange?: () => void }) {
   const { t } = useTranslation()
   const questionSet = parsePlanQuestionSet(message.content || '')
-  const fallback = boundedPlanDisplay(message.content || '')
+  const fallback = planDisplayContent(message.content || '')
   const [selected, setSelected] = useState<Record<string, string[]>>(() => questionSet ? recommendedAnswerSet(questionSet) : {})
   const [customAnswers, setCustomAnswers] = useState<Record<string, string>>({})
   const [questionIndex, setQuestionIndex] = useState(0)
@@ -642,7 +659,7 @@ function PlanQuestionBlock({ message, onSubmit, onLayoutChange }: { message: Cha
   if (!questionSet) {
     return (
       <PlanShell icon={<ClipboardList className="h-3.5 w-3.5" />} title={t('chat.plan.questionTitle')}>
-        <div className="max-h-72 overflow-auto whitespace-pre-wrap text-xs leading-relaxed text-[var(--nova-text-muted)]">{fallback.content}</div>
+        <div className="max-h-72 overflow-auto whitespace-pre-wrap text-xs leading-relaxed text-[var(--nova-text-muted)]">{fallback}</div>
       </PlanShell>
     )
   }
@@ -781,7 +798,7 @@ function PlanQuestionBlock({ message, onSubmit, onLayoutChange }: { message: Cha
 
 function ProposedPlanBlock({ message, highlightDialogue, onApprove, onContinue, onExit, onLayoutChange }: { message: ChatMessage; highlightDialogue?: boolean; onApprove?: (message: ChatMessage) => void; onContinue?: (message: ChatMessage) => void; onExit?: () => void; onLayoutChange?: () => void }) {
   const { t } = useTranslation()
-  const display = boundedPlanDisplay(message.content || '')
+  const display = planDisplayContent(message.content || '')
   const [localAction, setLocalAction] = useState<ChatMessage['plan_action']>(message.plan_action)
   const planAction = message.plan_action || localAction
   useEffect(() => {
@@ -798,9 +815,8 @@ function ProposedPlanBlock({ message, highlightDialogue, onApprove, onContinue, 
     <PlanShell icon={<ClipboardCheck className="h-3.5 w-3.5" />} title={t('chat.plan.proposalTitle')} badge={t('chat.plan.proposalBadge')}>
       <div className="flex max-h-[min(680px,calc(100vh-220px))] min-h-0 flex-col">
         <div className="chat-agent-message min-h-0 flex-1 overflow-y-auto overscroll-contain pr-1 text-sm leading-6 text-[var(--nova-text)] [scrollbar-gutter:stable]">
-          <MarkdownContent content={display.content} highlightDialogue={highlightDialogue === true} />
+          <MarkdownContent content={display} highlightDialogue={highlightDialogue === true} />
         </div>
-        {display.truncated && <div className="mt-2 shrink-0 text-[11px] text-[var(--nova-text-faint)]">{t('chat.plan.displayTruncated')}</div>}
         {planAction ? (
           <PlanActionStatus text={planActionStatusText(t, planAction)} />
         ) : (
@@ -929,7 +945,11 @@ function ToolExecutionBlock({ message }: { message: ChatMessage }) {
   const displayName = isDelegationTool ? t('chat.subagent.taskLabel') : name
   const detailArgs = isDelegationTool ? formatTaskDelegationArgs(rawArgs) : (isChapterBodyHidden ? '' : args)
   const hasResult = status === 'success'
-  const isStreamingContent = !isChapterBodyHidden && status === 'running' && isContentTool(name) && rawArgs.length > 50
+  const batchEditCount = name === 'edit_file' ? extractBatchEditCount(rawArgs) : 0
+  const batchEditSummary = batchEditCount > 0
+    ? [extractToolArgPath(rawArgs), t('chat.tool.batchEdits', { count: batchEditCount })].filter(Boolean).join(' · ')
+    : ''
+  const isStreamingContent = !isChapterBodyHidden && batchEditCount === 0 && status === 'running' && isContentTool(name) && rawArgs.length > 50
   const streamPreview = isStreamingContent ? extractStreamingContent(rawArgs) : ''
   const summary = taskSubAgent
     ? t('chat.subagent.delegating', { name: taskSubAgent })
@@ -939,7 +959,7 @@ function ToolExecutionBlock({ message }: { message: ChatMessage }) {
     ? chapterGeneratedChars !== undefined
       ? t(isDirectorPlanHidden ? (hasResult ? 'chat.tool.fileWrittenWithCount' : 'chat.tool.fileWritingWithCount') : (hasResult ? 'chat.tool.chapterWrittenWithCount' : 'chat.tool.chapterWritingWithCount'), { count: chapterGeneratedChars })
       : (isDirectorPlanHidden ? (hasResult ? t('chat.tool.fileWritten') : t('chat.tool.fileWriting')) : (hasResult ? t('chat.tool.chapterWritten') : t('chat.tool.chapterWriting')))
-    : (hasResult ? resultPreview || t('chat.tool.done') : summary)
+    : batchEditSummary || (hasResult ? resultPreview || t('chat.tool.done') : summary)
   const hasDetail = Boolean(detailArgs || result || isChapterBodyHidden)
   const streamPreviewScrollLock = useBottomScrollLock<HTMLDivElement>({
     enabled: isStreamingContent,
@@ -1436,33 +1456,6 @@ function formatTaskDelegationArgs(args: string) {
   }
 }
 
-function parseActivityContent(content: string, t: (key: string) => string) {
-  const toolMatch = content.match(/^正在执行工具：([^\n]+)(?:\n([\s\S]*))?$/)
-  if (toolMatch) {
-    const args = formatMaybeJSON((toolMatch[2] || '').trim())
-    return {
-      title: t('chat.tool.runningTitle'),
-      toolName: toolMatch[1].trim(),
-      detail: buildToolArgSummary(args) || t('chat.tool.waitingResult'),
-    }
-  }
-
-  const doneMatch = content.match(/^工具执行完成：?([\s\S]*)$/)
-  if (doneMatch) {
-    return {
-      title: t('chat.tool.resultDone'),
-      toolName: '',
-      detail: buildPreview(doneMatch[1] || '', 120),
-    }
-  }
-
-  return {
-    title: content,
-    toolName: '',
-    detail: '',
-  }
-}
-
 function formatMaybeJSON(value: string) {
   if (!value) return ''
   try {
@@ -1482,6 +1475,23 @@ function buildToolArgSummary(args: string) {
     // 非 JSON 参数使用通用预览。
   }
   return buildPreview(args, 120)
+}
+
+/** edit_file 的 edits 数组是结构化批量改动，不把 new_string 当成流式正文展开。 */
+function extractBatchEditCount(args: string): number {
+  if (!args || !/"edits"\s*:/.test(args)) return 0
+  try {
+    const data = JSON.parse(args) as { edits?: unknown[] }
+    return Array.isArray(data.edits) ? data.edits.length : 0
+  } catch {
+    const editsStart = args.search(/"edits"\s*:\s*\[/)
+    if (editsStart < 0) return 0
+    const partialEdits = args.slice(editsStart)
+    return Math.max(
+      (partialEdits.match(/"old_string"\s*:/g) || []).length,
+      (partialEdits.match(/"new_string"\s*:/g) || []).length,
+    )
+  }
 }
 
 function extractToolArgPath(args: string) {
@@ -1516,6 +1526,14 @@ function isContentTool(name: string): boolean {
 
 /** 从不完整的 JSON args 中提取 content/new_string 字段的流式文本 */
 function extractStreamingContent(rawArgs: string): string {
+  try {
+    const parsed = JSON.parse(rawArgs) as Record<string, unknown>
+    for (const key of ['content', 'new_string']) {
+      if (typeof parsed[key] === 'string') return parsed[key]
+    }
+  } catch {
+    // 流式参数尚未形成完整 JSON 时继续按增量文本提取。
+  }
   // 尝试提取 "content": "..." 或 "new_string": "..."
   const match = rawArgs.match(/"(?:content|new_string)"\s*:\s*"([\s\S]*)$/m)
   if (!match) return ''
@@ -1528,10 +1546,6 @@ function extractStreamingContent(rawArgs: string): string {
     // 不完整时做简单转义还原
     text = text.replace(/\\n/g, '\n').replace(/\\t/g, '\t').replace(/\\"/g, '"').replace(/\\\\/g, '\\')
   }
-  // 只展示最后 500 字符以保持性能
-  if (text.length > 500) {
-    return '...' + text.slice(-500)
-  }
   return text
 }
 
@@ -1539,32 +1553,18 @@ function extractStreamingContent(rawArgs: string): string {
 function StreamingPlaceholder() {
   const { t } = useTranslation()
   return (
-    <div className="flex items-center gap-2 py-1 text-sm text-[var(--nova-text-muted)]">
-      <span className="flex gap-1">
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[var(--nova-text-muted)] [animation-delay:-0.3s]" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[var(--nova-text-muted)] [animation-delay:-0.15s]" />
-        <span className="h-1.5 w-1.5 animate-bounce rounded-full bg-[var(--nova-text-muted)]" />
-      </span>
-      <span>{t('chat.activity.thinking')}</span>
+    <div className="py-1" role="status" aria-live="polite">
+      <Shimmer as="span" className="text-sm font-medium">{t('chat.activity.thinking')}</Shimmer>
     </div>
   )
 }
 
-/** 流式 Markdown 由上层先提交 target 高度，随后再把 target 提升为可见 content。 */
+/** 流式 Markdown 与纯文本共用“预留目标高度后再揭示”的帧序。 */
 function StreamingMarkdown({ content, targetContent, highlightDialogue }: { content: string; targetContent?: string; highlightDialogue: boolean }) {
-  if (!targetContent || targetContent === content) {
-    return <MarkdownContent content={content} highlightDialogue={highlightDialogue} />
-  }
-
   return (
-    <div className="nova-streaming-markdown-stage">
-      <div className="nova-streaming-markdown-reserve" aria-hidden="true">
-        <MarkdownContent content={targetContent} highlightDialogue={highlightDialogue} />
-      </div>
-      <div className="nova-streaming-markdown-overlay">
-        <MarkdownContent content={content} highlightDialogue={highlightDialogue} />
-      </div>
-    </div>
+    <StreamingContentStage content={content} targetContent={targetContent} streaming>
+      {(value) => <MarkdownContent content={value} highlightDialogue={highlightDialogue} />}
+    </StreamingContentStage>
   )
 }
 
@@ -1668,14 +1668,17 @@ function highlightDialogueText(text: string, enabled: boolean, keyPrefix: string
   return <Fragment>{nodes}</Fragment>
 }
 
-/** 思考过程折叠块，流式思考中自动展开，结束后自动折叠。 */
+/** 思考过程折叠块：默认展开，流式结束后自动折叠。 */
 function ThinkingBlock({ message, content, streaming }: { message: ChatMessage; content: string; streaming: boolean }) {
   const { t } = useTranslation()
-  const [expanded, setExpanded] = useState(streaming)
+  const [expanded, setExpanded] = useState(true)
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     setExpanded(streaming)
   }, [streaming])
+
+  // 流式思考但内容尚未到达时，复用 Shimmer 显示“思考中...”，避免空白折叠块像卡死。
+  const showActivityShimmer = streaming && !content.trim()
 
   return (
     <div className="flex justify-start">
@@ -1683,11 +1686,17 @@ function ThinkingBlock({ message, content, streaming }: { message: ChatMessage; 
         <Reasoning isStreaming={streaming} open={expanded} onOpenChange={setExpanded} className="mb-0">
           <ReasoningTrigger className="flex items-center gap-1 py-1 text-xs text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]">
             {expanded ? <ChevronDown className="w-3 h-3" /> : <ChevronRight className="w-3 h-3" />}
-            <span>{t('chat.trace.thinking')}</span>
+            {showActivityShimmer ? (
+              <Shimmer as="span" className="text-xs font-medium">{t('chat.activity.thinking')}</Shimmer>
+            ) : (
+              <span>{t('chat.trace.thinking')}</span>
+            )}
             {message.subagent && <AgentSourceBadge message={message} compact />}
           </ReasoningTrigger>
           <ReasoningContent className="mt-0 border-l border-[var(--nova-border)] px-3 py-2 text-xs text-[var(--nova-text-muted)] whitespace-pre-wrap">
-            {content}
+            <StreamingContentStage content={content} targetContent={streaming ? message.streaming_target_content : undefined} streaming={streaming}>
+              {(value) => value}
+            </StreamingContentStage>
           </ReasoningContent>
         </Reasoning>
       </div>

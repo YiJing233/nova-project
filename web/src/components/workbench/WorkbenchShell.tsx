@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from 'react-i18next'
@@ -6,24 +6,32 @@ import { DndContext, KeyboardSensor, PointerSensor, closestCenter, useSensor, us
 import { SortableContext, arrayMove, sortableKeyboardCoordinates, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
 import { Group, Panel, Separator } from 'react-resizable-panels'
-import { BookOpen, Bot, Clock3, Database, History, MessageSquareText, PanelLeft, PenLine, Search, Settings, SlidersHorizontal, Sparkles, X } from 'lucide-react'
+import { BookOpen, Bot, Clock3, Database, History, MessageSquareText, PanelLeft, PenLine, Search, Settings, SlidersHorizontal, Sparkles } from 'lucide-react'
 import { AnimatePresence, LayoutGroup, motion } from 'motion/react'
 import { WorkspaceLayout } from '@/components/layout/workspace-layout'
 import { WorkspaceMobileLayout, type MobileNavItem } from '@/components/layout/workspace-mobile-layout'
+import { createStablePortalHost, StablePortalSlot } from '@/components/layout/stable-portal-slot'
 import { TooltipIconButton } from '@/components/common/tooltip-icon-button'
 import { novaSpring } from '@/features/motion/motion-tokens'
 import { MessageCenterButton } from '@/features/messages/MessageCenter'
+import type { AutomationMessageNavigation } from '@/features/messages/types'
+import { requestAutomationNavigation } from '@/features/automations/automation-navigation'
 import { useIsMobile } from '@/hooks/useIsMobile'
-import { getAutomationInbox, type ChapterSummary, type WorkspaceSummary } from '@/lib/api'
+import { getActiveAutomationRuns, getAutomationInbox, type BookRecord, type ChapterSummary, type WorkspaceSummary } from '@/lib/api'
 import { useWorkspaceStore, type RightPanel, type WorkspaceMode } from '@/stores/workspace-store'
 import type { InteractiveSubmode } from '@/features/interactive/types'
 import { formatNumber } from './workbench-utils'
+import { formatDateTime } from '@/i18n'
+import { BookSwitcher } from './BookSwitcher'
+import { WorkbenchNoticePill } from './WorkbenchNoticePill'
+import type { WorkbenchNotice } from '@/features/notices/use-workbench-notice'
 
 interface WorkbenchShellProps {
   mode: WorkspaceMode
   booksReturnMode: 'ide' | 'interactive'
   currentBookName: string
   workspace: string
+  books: BookRecord[]
   appVersion: string
   summary: WorkspaceSummary | null
   currentChapter?: ChapterSummary
@@ -38,14 +46,16 @@ interface WorkbenchShellProps {
   main: ReactNode
   rightPanelContent: ReactNode
   rightPanelWide?: boolean
-  updateNotice?: { latestVersion: string } | null
+  centerFocus?: boolean
+  notice?: WorkbenchNotice | null
   onSetMode: (mode: WorkspaceMode) => void
   onToggleActivityBarExpanded: () => void
   onSetInteractiveSubmode: (mode: InteractiveSubmode) => void
   onSetRightPanel: (panel: RightPanel) => void
   onToggleSettings: () => void
   onCloseSettings: () => void
-  onDismissUpdateNotice?: () => void
+  onQuickSwitchBook: (path: string) => Promise<boolean>
+  onDismissNotice?: () => void
 }
 
 type ActivityItemId = 'writing' | 'story' | 'timeline' | 'lore' | 'teller' | 'versions' | 'books' | 'skills' | 'agents' | 'automations'
@@ -78,6 +88,7 @@ const ACTIVITY_BAR_LEGACY_DEFAULT_WIDTH = 152
 const ACTIVITY_BAR_DEFAULT_WIDTH = 180
 const ACTIVITY_BAR_MAX_WIDTH = 280
 const ACTIVITY_BAR_WIDTH_KEYBOARD_STEP = 8
+const AUTOMATION_ACTIVITY_REFRESH_INTERVAL_MS = 30000
 
 function NovaBrandIcon() {
   return (
@@ -95,6 +106,7 @@ export function WorkbenchShell({
   booksReturnMode,
   currentBookName,
   workspace,
+  books,
   appVersion,
   summary,
   currentChapter,
@@ -109,14 +121,16 @@ export function WorkbenchShell({
   main,
   rightPanelContent,
   rightPanelWide = false,
-  updateNotice,
+  centerFocus = false,
+  notice,
   onSetMode,
   onToggleActivityBarExpanded,
   onSetInteractiveSubmode,
   onSetRightPanel,
   onToggleSettings,
   onCloseSettings,
-  onDismissUpdateNotice,
+  onQuickSwitchBook,
+  onDismissNotice,
 }: WorkbenchShellProps) {
   const { t } = useTranslation()
   const isMobile = useIsMobile()
@@ -124,7 +138,12 @@ export function WorkbenchShell({
   const [activityOrders, setActivityOrders] = useState<Record<ActivityOrderScope, ActivityItemId[]>>(readStoredActivityOrders)
   const [activityBarWidth, setActivityBarWidth] = useState(readStoredActivityBarWidth)
   const [automationInboxUnread, setAutomationInboxUnread] = useState(0)
-  const [mainContentHost] = useState(createWorkbenchMainHost)
+  const [automationRunning, setAutomationRunning] = useState(0)
+  const [mainContentHost] = useState(() => {
+    const host = createStablePortalHost('h-full min-h-0 w-full min-w-0 overflow-hidden')
+    if (host) host.dataset.novaWorkbenchMainHost = 'true'
+    return host
+  })
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
@@ -141,21 +160,46 @@ export function WorkbenchShell({
 
   useEffect(() => {
     let cancelled = false
-    async function loadAutomationInboxCount() {
+    let timer: number | null = null
+    let running = false
+    const clearTimer = () => {
+      if (timer === null) return
+      window.clearTimeout(timer)
+      timer = null
+    }
+    const scheduleNext = () => {
+      clearTimer()
+      if (cancelled || document.visibilityState !== 'visible') return
+      timer = window.setTimeout(() => {
+        timer = null
+        void loadAutomationActivity()
+      }, AUTOMATION_ACTIVITY_REFRESH_INTERVAL_MS)
+    }
+    async function loadAutomationActivity() {
+      if (cancelled || running || document.visibilityState !== 'visible') return
+      running = true
       try {
-        const items = await getAutomationInbox()
-        if (!cancelled) setAutomationInboxUnread(items.filter((item) => item.status === 'pending' && !item.read_at).length)
-      } catch {
-        if (!cancelled) setAutomationInboxUnread(0)
+        const [inboxResult, runsResult] = await Promise.allSettled([getAutomationInbox(), getActiveAutomationRuns()])
+        if (cancelled) return
+        setAutomationInboxUnread(inboxResult.status === 'fulfilled' ? inboxResult.value.filter((item) => item.status === 'pending' && !item.read_at).length : 0)
+        setAutomationRunning(runsResult.status === 'fulfilled' ? runsResult.value.length : 0)
+      } finally {
+        running = false
+        scheduleNext()
       }
     }
-    void loadAutomationInboxCount()
-    const timer = window.setInterval(loadAutomationInboxCount, 30000)
+    const handleVisibilityChange = () => {
+      clearTimer()
+      if (document.visibilityState === 'visible') void loadAutomationActivity()
+    }
+    void loadAutomationActivity()
+    document.addEventListener('visibilitychange', handleVisibilityChange)
     return () => {
       cancelled = true
-      window.clearInterval(timer)
+      clearTimer()
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
     }
-  }, [workspace])
+  }, [])
 
   const loreVisible = rightPanel === 'lore'
   const tellerVisible = rightPanel === 'teller'
@@ -228,6 +272,12 @@ export function WorkbenchShell({
     onSetMode('books')
   }
 
+  const manageBooks = () => {
+    closeSettingsIfOpen()
+    if (versionsVisible) onSetRightPanel(null)
+    onSetMode('books')
+  }
+
   const openAgents = () => {
     if (mode === 'agents' && !settingsOpen) {
       returnFromBooks()
@@ -255,6 +305,13 @@ export function WorkbenchShell({
     }
     closeSettingsIfOpen()
     if (versionsVisible) onSetRightPanel(null)
+    onSetMode('automations')
+  }
+
+  const openAutomationNotification = (target: AutomationMessageNavigation) => {
+    closeSettingsIfOpen()
+    if (versionsVisible) onSetRightPanel(null)
+    requestAutomationNavigation(target)
     onSetMode('automations')
   }
 
@@ -287,7 +344,7 @@ export function WorkbenchShell({
       id: 'story',
       label: t('workbench.activity.story'),
       onClick: () => openInteractiveSubmode('story'),
-      active: interactiveModeActive && (interactiveSubmode === 'story' || interactiveSubmode === 'memory'),
+      active: interactiveModeActive && (interactiveSubmode === 'story' || interactiveSubmode === 'director'),
       icon: <MessageSquareText className="h-4 w-4" />,
     },
     {
@@ -347,7 +404,7 @@ export function WorkbenchShell({
       label: t('workbench.activity.automations'),
       onClick: openAutomations,
       active: automationsActive,
-      icon: <ActivityIconBadge count={automationInboxUnread}><Clock3 className="size-3" /></ActivityIconBadge>,
+      icon: <ActivityIconBadge count={automationInboxUnread} running={automationRunning > 0}><Clock3 className="size-3" /></ActivityIconBadge>,
     },
   ]
 
@@ -356,7 +413,7 @@ export function WorkbenchShell({
       ...(navigationMode === 'interactive' ? interactiveActivityItems : ideActivityItems),
       ...sharedActivityItems,
     ], activityOrder, defaultActivityOrderForScope(activityOrderScope)),
-    [activityOrder, activityOrderScope, agentsActive, automationInboxUnread, automationsActive, booksReturnMode, ideModeActive, interactiveModeActive, interactiveSubmode, loreVisible, mode, navigationMode, settingsOpen, skillsActive, tellerVisible, versionsVisible],
+    [activityOrder, activityOrderScope, agentsActive, automationInboxUnread, automationRunning, automationsActive, booksReturnMode, ideModeActive, interactiveModeActive, interactiveSubmode, loreVisible, mode, navigationMode, settingsOpen, skillsActive, tellerVisible, versionsVisible],
   )
 
   const handleActivityDragEnd = (event: DragEndEvent) => {
@@ -414,8 +471,8 @@ export function WorkbenchShell({
   }
 
   const topBar = (
-    <header className="nova-topbar grid h-10 shrink-0 grid-cols-[auto_1fr_auto] items-center border-b px-3 text-xs">
-      <div className="flex items-center gap-3">
+    <header className="nova-topbar grid h-10 shrink-0 grid-cols-[minmax(0,1fr)_auto] items-center border-b px-3 text-xs">
+      <div className="flex min-w-0 items-center gap-2">
         <NovaBrandIcon />
         <LayoutGroup id="workbench-mode-switch">
         <div role="group" className="flex h-7 items-center rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] p-0.5" aria-label={t('workbench.modeSwitch')}>
@@ -441,13 +498,17 @@ export function WorkbenchShell({
           </button>
         </div>
         </LayoutGroup>
-      </div>
-      <div className="mx-auto flex min-w-0 max-w-[520px] items-center justify-center gap-1.5" title={workspace || currentBookName}>
-        <BookOpen className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-muted)]" />
-        <span className="truncate font-medium text-[var(--nova-text)]">{currentBookName}</span>
+        <BookSwitcher
+          books={books}
+          currentBookName={currentBookName}
+          currentChapterCount={summary?.chapter_count}
+          workspace={workspace}
+          onSwitchBook={onQuickSwitchBook}
+          onManageBooks={manageBooks}
+        />
       </div>
       <div className="nova-ui-compact flex items-center justify-end gap-2 text-[var(--nova-text-faint)]">
-        <MessageCenterButton className="h-7 w-7" />
+        <MessageCenterButton className="h-7 w-7" onOpenAutomation={openAutomationNotification} />
         <span>{modeLabel}</span>
       </div>
     </header>
@@ -478,12 +539,12 @@ export function WorkbenchShell({
         ))}
       </SortableContext>
       <div className="mt-auto flex flex-col gap-2">
-        {updateNotice && (
-          <UpdateNoticePill
+        {notice && (
+          <WorkbenchNoticePill
             expanded={activityBarExpanded}
-            latestVersion={updateNotice.latestVersion}
+            notice={notice}
             onOpenSettings={onToggleSettings}
-            onDismiss={onDismissUpdateNotice}
+            onDismiss={onDismissNotice}
           />
         )}
         <ActivityButton
@@ -535,7 +596,7 @@ export function WorkbenchShell({
       )}
       {mode === 'ide' && currentChapter && (
         <span className="ml-4">
-          {t('editor.updatedAt', { time: currentChapter.updated_at || t('editor.unknownTime') })}
+          {t('editor.updatedAt', { time: currentChapter.updated_at ? formatDateTime(currentChapter.updated_at) : t('editor.unknownTime') })}
           {editorLine !== undefined && ` · ${t('editor.currentLine', { line: formatNumber(editorLine) })}`}
         </span>
       )}
@@ -547,22 +608,35 @@ export function WorkbenchShell({
   // the desktop resizable workspace and the mobile shell. This preserves local
   // editor state when the viewport crosses the mobile breakpoint.
   const mainContentPortal = mainContentHost ? createPortal(main, mainContentHost, 'workbench-main-content') : null
-  const mainContentSlot = <WorkbenchMainSlot host={mainContentHost} fallback={main} />
+  const mainContentSlot = (
+    <StablePortalSlot
+      host={mainContentHost}
+      fallback={main}
+      wrapFallback={false}
+      data-nova-workbench-main-slot="true"
+      className="h-full min-h-0 w-full min-w-0 overflow-hidden"
+    />
+  )
 
   if (isMobile) {
     const compactMobileNavigation = mode === 'interactive' && interactiveSubmode === 'story' && !sharedMenuActive
     const mobileTopBar = (
-      <header className="nova-mobile-topbar nova-topbar shrink-0 border-b border-[var(--nova-border)] py-2 pl-3 pr-3" title={workspace || currentBookName}>
+      <header className="nova-mobile-topbar nova-topbar shrink-0 border-b border-[var(--nova-border)] py-2 pl-3 pr-3">
         <div className="flex min-w-0 items-center justify-between gap-2">
           <div className="flex min-w-0 flex-1 items-center gap-2">
             <NovaBrandIcon />
-            <div className="flex min-w-0 items-center gap-1.5 text-[11px] text-[var(--nova-text-faint)]">
-              <BookOpen className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-muted)]" />
-              <span className="min-w-0 truncate font-medium text-[var(--nova-text-muted)]">{currentBookName}</span>
-            </div>
+            <BookSwitcher
+              books={books}
+              currentBookName={currentBookName}
+              currentChapterCount={summary?.chapter_count}
+              workspace={workspace}
+              compact
+              onSwitchBook={onQuickSwitchBook}
+              onManageBooks={manageBooks}
+            />
           </div>
           <div className="flex shrink-0 items-center gap-1.5">
-            <MessageCenterButton className="h-8 w-8" />
+            <MessageCenterButton className="h-8 w-8" onOpenAutomation={openAutomationNotification} />
             <button
               type="button"
               onClick={() => setCommandOpen(true)}
@@ -598,13 +672,14 @@ export function WorkbenchShell({
           </LayoutGroup>
           </div>
         </div>
-        {updateNotice && (
+        {notice && (
           <div className="mt-2 flex justify-end">
-            <UpdateNoticePill
+            <WorkbenchNoticePill
               expanded
-              latestVersion={updateNotice.latestVersion}
+              notice={notice}
+              starSecondaryText="description"
               onOpenSettings={onToggleSettings}
-              onDismiss={onDismissUpdateNotice}
+              onDismiss={onDismissNotice}
             />
           </div>
         )}
@@ -699,35 +774,12 @@ export function WorkbenchShell({
         rightPanel={rightPanelContent}
         rightPanelVisible={mode === 'ide' && !fullWorkspacePanelVisible && Boolean(rightPanelContent)}
         rightPanelWide={rightPanelWide && mode === 'ide' && rightPanel === 'ai' && !fullWorkspacePanelVisible}
+        centerFocus={centerFocus && mode === 'ide' && !fullWorkspacePanelVisible}
         statusBar={statusBar}
       />
       {mainContentPortal}
     </>
   )
-}
-
-function createWorkbenchMainHost() {
-  if (typeof document === 'undefined') return null
-  const host = document.createElement('div')
-  host.dataset.novaWorkbenchMainHost = 'true'
-  host.className = 'h-full min-h-0 w-full min-w-0 overflow-hidden'
-  return host
-}
-
-function WorkbenchMainSlot({ host, fallback }: { host: HTMLDivElement | null; fallback: ReactNode }) {
-  const slotRef = useRef<HTMLDivElement>(null)
-
-  useLayoutEffect(() => {
-    const slot = slotRef.current
-    if (!host || !slot) return
-    slot.appendChild(host)
-    return () => {
-      if (host.parentNode === slot) host.remove()
-    }
-  }, [host])
-
-  if (!host) return fallback
-  return <div ref={slotRef} data-nova-workbench-main-slot="true" className="h-full min-h-0 w-full min-w-0 overflow-hidden" />
 }
 
 function SortableActivityButton({
@@ -804,51 +856,11 @@ function ActivityButton({
   )
 }
 
-function UpdateNoticePill({
-  expanded,
-  latestVersion,
-  onOpenSettings,
-  onDismiss,
-}: {
-  expanded: boolean
-  latestVersion: string
-  onOpenSettings: () => void
-  onDismiss?: () => void
-}) {
-  const { t } = useTranslation()
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: 4 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: 4 }}
-      transition={{ duration: 0.16 }}
-      className={`relative z-20 flex items-center rounded-[var(--nova-radius)] border border-[var(--nova-accent)] bg-[var(--nova-surface)]/95 text-[11px] text-[var(--nova-text)] shadow-[var(--nova-shadow)] backdrop-blur ${expanded ? 'w-full' : 'w-44 -translate-x-1'}`}
-    >
-      <button
-        type="button"
-        className="min-w-0 flex-1 truncate px-2 py-1.5 text-left"
-        title={t('workbench.updateNotice.available', { version: latestVersion })}
-        onClick={onOpenSettings}
-      >
-        {t('workbench.updateNotice.available', { version: latestVersion })}
-      </button>
-      <button
-        type="button"
-        className="mr-1 flex h-5 w-5 shrink-0 items-center justify-center rounded-[6px] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]"
-        aria-label={t('workbench.updateNotice.dismiss')}
-        title={t('workbench.updateNotice.dismiss')}
-        onClick={onDismiss}
-      >
-        <X className="h-3.5 w-3.5" />
-      </button>
-    </motion.div>
-  )
-}
-
-function ActivityIconBadge({ count, children }: { count: number; children: ReactNode }) {
+function ActivityIconBadge({ count, running, children }: { count: number; running?: boolean; children: ReactNode }) {
   return (
     <span className="relative inline-flex size-3 items-center justify-center">
       {children}
+      {running && <span className="absolute -bottom-1 -left-1 h-2 w-2 rounded-full bg-[var(--nova-success)] ring-2 ring-[var(--nova-surface)]" />}
       {count > 0 && (
         <span className="absolute -right-1.5 -top-1.5 min-w-3 rounded-full bg-[var(--nova-danger-border)] px-0.5 text-center text-[8px] leading-3 text-white">
           {count > 9 ? '9+' : count}

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 
 	"github.com/cloudwego/eino/adk"
@@ -25,6 +24,7 @@ type toolOrchestratorMiddleware struct {
 	toolSettings        config.ResolvedAgentToolSettings
 	enforceToolSettings bool
 	toolResultMaxBytes  int
+	executionGate       *toolExecutionGate
 }
 
 type interactiveStoryToolMiddleware struct {
@@ -33,27 +33,14 @@ type interactiveStoryToolMiddleware struct {
 
 type interactiveDirectorPlanFileMiddleware struct {
 	*adk.BaseChatModelAgentMiddleware
-	allowedPaths map[string]bool
-	task         string
 }
 
 func newInteractiveStoryToolMiddleware() *interactiveStoryToolMiddleware {
 	return &interactiveStoryToolMiddleware{}
 }
 
-func newInteractiveDirectorPlanFileMiddleware(allowedPaths []string, tasks ...string) *interactiveDirectorPlanFileMiddleware {
-	allowed := make(map[string]bool, len(allowedPaths))
-	for _, path := range allowedPaths {
-		cleaned := cleanDirectorPlanToolPath(path)
-		if cleaned != "" {
-			allowed[cleaned] = true
-		}
-	}
-	task := ""
-	if len(tasks) > 0 {
-		task = strings.TrimSpace(tasks[0])
-	}
-	return &interactiveDirectorPlanFileMiddleware{allowedPaths: allowed, task: task}
+func newInteractiveDirectorPlanFileMiddleware() *interactiveDirectorPlanFileMiddleware {
+	return &interactiveDirectorPlanFileMiddleware{}
 }
 
 func (m *interactiveDirectorPlanFileMiddleware) WrapInvokableToolCall(
@@ -82,42 +69,18 @@ func (m *interactiveDirectorPlanFileMiddleware) WrapStreamableToolCall(
 	}, nil
 }
 
-func (m *interactiveDirectorPlanFileMiddleware) blockedDirectorToolMessage(name, args string) string {
+func (m *interactiveDirectorPlanFileMiddleware) blockedDirectorToolMessage(name, _ string) string {
 	name = strings.ToLower(strings.TrimSpace(name))
-	if m != nil && m.task == "memory_update" {
-		if name == "apply_story_memory_patches" {
-			return ""
-		}
-		return fmt.Sprintf("[tool error] Memory Recorder 只能使用 apply_story_memory_patches，拒绝工具: %s", name)
-	}
 	switch name {
-	case "read_event_cards":
+	case "read_event_cards", "list_lore_items", "read_lore_items", "search_story_history", submitDirectorPlanUpdateToolName:
 		return ""
 	case "read_file", "write_file", "edit_file":
-		target := cleanDirectorPlanToolPath(toolPathFromArgs(args))
-		if target == "" {
-			return fmt.Sprintf("[tool error] interactive_director 工具 %q 必须提供 file_path。", name)
-		}
-		if m == nil || !m.allowedPaths[target] {
-			return fmt.Sprintf("[tool error] interactive_director 只能访问当前分支导演规划文件，拒绝路径: %s", target)
-		}
-		return ""
-	case "apply_actor_state_patch", "apply_story_memory_patches":
-		return fmt.Sprintf("[tool error] Director 只维护 ArcPlan，不能写 Actor State 或 Story Memory，拒绝工具: %s", name)
+		return fmt.Sprintf("[tool error] Director 规划文档已在上下文中完整提供；请用 %s 提交带 base_hash 的 Markdown Patch，拒绝工具: %s", submitDirectorPlanUpdateToolName, name)
+	case "apply_actor_state_patch":
+		return fmt.Sprintf("[tool error] Director 只维护 ArcPlan，不能写 Actor State，拒绝工具: %s", name)
 	default:
-		return fmt.Sprintf("[tool error] Director 只能使用 read_file、write_file、edit_file 和 read_event_cards，拒绝工具: %s", name)
+		return fmt.Sprintf("[tool error] Director 只能使用 %s、历史检索、资料库只读和事件卡工具，拒绝工具: %s", submitDirectorPlanUpdateToolName, name)
 	}
-}
-
-func cleanDirectorPlanToolPath(path string) string {
-	path = strings.TrimSpace(path)
-	if path == "" {
-		return ""
-	}
-	if abs, err := filepath.Abs(path); err == nil {
-		path = abs
-	}
-	return filepath.Clean(path)
 }
 
 func (m *interactiveStoryToolMiddleware) WrapInvokableToolCall(
@@ -169,7 +132,7 @@ func isInteractiveStoryWriteTool(name string) bool {
 }
 
 func interactiveStoryWriteToolBlockedMessage(name string) string {
-	return fmt.Sprintf("[tool error] 游戏模式禁止使用写文件工具 %q。请不要修改 workspace 文件；先用 submit_interactive_turn_result 提交隐藏回合结果，再只输出本回合故事正文。", name)
+	return fmt.Sprintf("[tool error] 游戏模式禁止使用写文件工具 %q。请不要修改 workspace 文件；先直接输出完整故事正文，再用 submit_interactive_turn 提交一致的隐藏回合结果。", name)
 }
 
 type ToolDecision struct {
@@ -188,19 +151,28 @@ type ToolDecision struct {
 }
 
 type ToolExecutionRecord struct {
-	ToolName          string `json:"tool_name"`
-	ToolCallID        string `json:"tool_call_id,omitempty"`
-	Status            string `json:"status"`
-	Capability        string `json:"capability,omitempty"`
-	OriginalBytes     int    `json:"original_bytes,omitempty"`
-	ReturnedBytes     int    `json:"returned_bytes,omitempty"`
-	Truncated         bool   `json:"truncated,omitempty"`
-	Target            string `json:"target,omitempty"`
-	IdempotencyKey    string `json:"idempotency_key,omitempty"`
-	Error             string `json:"error,omitempty"`
-	ArgsBytes         int    `json:"args_bytes,omitempty"`
-	ArgsComplete      *bool  `json:"args_complete,omitempty"`
-	ModelFinishReason string `json:"model_finish_reason,omitempty"`
+	ToolName              string   `json:"tool_name"`
+	ToolCallID            string   `json:"tool_call_id,omitempty"`
+	Workspace             string   `json:"workspace,omitempty"`
+	Status                string   `json:"status"`
+	DomainStatus          string   `json:"domain_status,omitempty"`
+	DomainDiagnosticCount int      `json:"domain_diagnostic_count,omitempty"`
+	RetryModules          []string `json:"retry_modules,omitempty"`
+	Capability            string   `json:"capability,omitempty"`
+	OriginalBytes         int      `json:"original_bytes,omitempty"`
+	ReturnedBytes         int      `json:"returned_bytes,omitempty"`
+	Truncated             bool     `json:"truncated,omitempty"`
+	Target                string   `json:"target,omitempty"`
+	IdempotencyKey        string   `json:"idempotency_key,omitempty"`
+	Error                 string   `json:"error,omitempty"`
+	ArgsBytes             int      `json:"args_bytes,omitempty"`
+	ArgsComplete          *bool    `json:"args_complete,omitempty"`
+	ModelFinishReason     string   `json:"model_finish_reason,omitempty"`
+	ChangeGroupID         string   `json:"change_group_id,omitempty"`
+	ReviewThreadID        string   `json:"review_thread_id,omitempty"`
+	ChangeSetID           string   `json:"change_set_id,omitempty"`
+	BaseRevision          string   `json:"base_revision,omitempty"`
+	Revision              string   `json:"revision,omitempty"`
 }
 
 func (m *toolOrchestratorMiddleware) WrapInvokableToolCall(
@@ -225,12 +197,14 @@ func (m *toolOrchestratorMiddleware) WrapInvokableToolCall(
 			observer.RecordToolExecution(blockedToolExecutionRecord(decision, msg))
 			return msg, nil
 		}
+		release := m.acquireToolExecution(decision)
+		defer release()
 		result, err := endpoint(ctx, args, opts...)
 		if err != nil {
 			if _, ok := compose.IsInterruptRerunError(err); ok {
 				return "", err
 			}
-			msg := fmt.Sprintf("[tool error] %v", err)
+			msg := toolEndpointErrorMessage(decision.ToolName, err)
 			observer.RecordToolExecution(ToolExecutionRecord{
 				ToolName:   decision.ToolName,
 				ToolCallID: decision.ToolCallID,
@@ -242,7 +216,7 @@ func (m *toolOrchestratorMiddleware) WrapInvokableToolCall(
 			return msg, nil
 		}
 		filtered := FilterToolResultForModelWithLimit(toolName(toolCtx), args, result, m.toolResultLimitBytes())
-		observer.RecordToolExecution(ToolExecutionRecord{
+		record := ToolExecutionRecord{
 			ToolName:       filtered.Manifest.Name,
 			ToolCallID:     decision.ToolCallID,
 			Status:         "success",
@@ -252,9 +226,46 @@ func (m *toolOrchestratorMiddleware) WrapInvokableToolCall(
 			Truncated:      filtered.Truncated,
 			Target:         filtered.Target,
 			IdempotencyKey: filtered.IdempotencyKey,
-		})
+		}
+		applyWorkspaceChangeReceiptToExecutionRecord(&record, result)
+		applyInteractiveTurnReceiptToExecutionRecord(&record, result)
+		observer.RecordToolExecution(record)
 		return filtered.Content, nil
 	}, nil
+}
+
+func applyInteractiveTurnReceiptToExecutionRecord(record *ToolExecutionRecord, result string) {
+	if record == nil || !IsInteractiveTurnSubmissionTool(record.ToolName) {
+		return
+	}
+	var receipt struct {
+		Ready        bool              `json:"ready"`
+		ModuleStatus map[string]string `json:"module_status"`
+		Diagnostics  []json.RawMessage `json:"diagnostics"`
+		RetryModules []string          `json:"retry_modules"`
+	}
+	if err := json.Unmarshal([]byte(result), &receipt); err != nil || receipt.ModuleStatus == nil {
+		return
+	}
+	record.DomainDiagnosticCount = len(receipt.Diagnostics)
+	record.RetryModules = append([]string(nil), receipt.RetryModules...)
+	switch {
+	case receipt.Ready:
+		record.DomainStatus = "accepted"
+	case turnSubmissionReceiptHasStatus(receipt.ModuleStatus, "rejected"):
+		record.DomainStatus = "rejected"
+	default:
+		record.DomainStatus = "pending"
+	}
+}
+
+func turnSubmissionReceiptHasStatus(statuses map[string]string, target string) bool {
+	for _, status := range statuses {
+		if status == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *toolOrchestratorMiddleware) WrapStreamableToolCall(
@@ -279,8 +290,10 @@ func (m *toolOrchestratorMiddleware) WrapStreamableToolCall(
 			observer.RecordToolExecution(blockedToolExecutionRecord(decision, msg))
 			return singleChunkReader(msg), nil
 		}
+		release := m.acquireToolExecution(decision)
 		sr, err := endpoint(ctx, args, opts...)
 		if err != nil {
+			release()
 			if _, ok := compose.IsInterruptRerunError(err); ok {
 				return nil, err
 			}
@@ -292,10 +305,25 @@ func (m *toolOrchestratorMiddleware) WrapStreamableToolCall(
 				Target:     decision.Target,
 				Error:      err.Error(),
 			})
-			return singleChunkReader(fmt.Sprintf("[tool error] %v", err)), nil
+			return singleChunkReader(toolEndpointErrorMessage(decision.ToolName, err)), nil
 		}
-		return filterToolResultReader(ctx, sr, toolCtx, args, m.toolResultLimitBytes()), nil
+		return filterToolResultReader(ctx, sr, toolCtx, args, m.toolResultLimitBytes(), release), nil
 	}, nil
+}
+
+func toolEndpointErrorMessage(toolName string, err error) string {
+	if msg, ok := formatWorkspaceChangeToolError(toolName, err); ok {
+		return msg
+	}
+	return fmt.Sprintf("[tool error] %v", err)
+}
+
+func (m *toolOrchestratorMiddleware) acquireToolExecution(decision ToolDecision) func() {
+	if m == nil || m.executionGate == nil {
+		return func() {}
+	}
+	manifest := ManifestForTool(decision.ToolName)
+	return m.executionGate.acquire(executionModeForTool(manifest))
 }
 
 func singleChunkReader(msg string) *schema.StreamReader[string] {
@@ -305,10 +333,27 @@ func singleChunkReader(msg string) *schema.StreamReader[string] {
 	return r
 }
 
-func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string], toolCtx *adk.ToolContext, args string, maxBytes int) *schema.StreamReader[string] {
+func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string], toolCtx *adk.ToolContext, args string, maxBytes int, releases ...func()) *schema.StreamReader[string] {
 	r, w := schema.Pipe[string](1)
 	go func() {
 		defer w.Close()
+		defer func() {
+			for _, release := range releases {
+				if release != nil {
+					release()
+				}
+			}
+		}()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				_ = w.Send(fmt.Sprintf("\n[tool error] panic while reading tool result: %v", recovered), nil)
+			}
+		}()
+		if sr == nil {
+			_ = w.Send("\n[tool error] streamable tool returned a nil result stream", nil)
+			return
+		}
+		defer sr.Close()
 		name := toolName(toolCtx)
 		manifest := ManifestForTool(name)
 		manifest.MaxResultBytes = normalizeToolResultLimitBytes(maxBytes)
@@ -319,7 +364,7 @@ func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string]
 			chunk, err := sr.Recv()
 			if errors.Is(err, io.EOF) {
 				filtered := filteredToolResultFromBody(manifest, args, content.String(), originalBytes, originalBytes > content.Len())
-				RunObserverFromContext(ctx).RecordToolExecution(ToolExecutionRecord{
+				record := ToolExecutionRecord{
 					ToolName:       filtered.Manifest.Name,
 					ToolCallID:     toolCallID(toolCtx),
 					Status:         "success",
@@ -329,7 +374,9 @@ func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string]
 					Truncated:      filtered.Truncated,
 					Target:         filtered.Target,
 					IdempotencyKey: filtered.IdempotencyKey,
-				})
+				}
+				applyWorkspaceChangeReceiptToExecutionRecord(&record, content.String())
+				RunObserverFromContext(ctx).RecordToolExecution(record)
 				_ = w.Send(filtered.Content, nil)
 				return
 			}
@@ -363,6 +410,25 @@ func filterToolResultReader(ctx context.Context, sr *schema.StreamReader[string]
 		}
 	}()
 	return r
+}
+
+func applyWorkspaceChangeReceiptToExecutionRecord(record *ToolExecutionRecord, content string) {
+	if record == nil {
+		return
+	}
+	receipt, ok := parseWorkspaceChangeToolReceipt(record.ToolName, content)
+	if !ok {
+		return
+	}
+	record.Workspace = receipt.Workspace
+	record.ChangeGroupID = receipt.ChangeGroupID
+	record.ReviewThreadID = receipt.ReviewThreadID
+	record.ChangeSetID = receipt.ChangeSetID
+	record.BaseRevision = receipt.BaseRevision
+	record.Revision = receipt.Revision
+	if strings.TrimSpace(receipt.Path) != "" {
+		record.Target = receipt.Path
+	}
 }
 
 func blockedToolExecutionRecord(decision ToolDecision, msg string) ToolExecutionRecord {

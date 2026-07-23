@@ -9,7 +9,7 @@ import (
 )
 
 func TestStructuredRuleStateChangeUsesExactFieldID(t *testing.T) {
-	fieldID := "体力/行动.值"
+	fieldID := "体力与行动.值"
 	system := normalizeActorStateSystem(StoryDirectorActorStateSystem{
 		Templates:     []ActorStateTemplate{{ID: "protagonist", Fields: []ActorStateField{{Name: fieldID, Type: "number", Default: 5.0}}}},
 		InitialActors: []ActorStateInitialActor{{ID: "protagonist", TemplateID: "protagonist", State: map[string]any{fieldID: 5.0}}},
@@ -37,7 +37,7 @@ func TestStructuredRuleStateChangeUsesExactFieldID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(data), `"path"`) || !strings.Contains(string(data), `"field_id":"体力/行动.值"`) {
+	if strings.Contains(string(data), `"path"`) || !strings.Contains(string(data), `"field_id":"体力与行动.值"`) {
 		t.Fatalf("new rule interface must not emit paths: %s", data)
 	}
 }
@@ -116,16 +116,52 @@ func TestLegacyStoryFreezesSchemaAfterBackupOnFirstLoad(t *testing.T) {
 	}
 }
 
+func TestLegacyStoryReplaysFrozenInitialActorsWithoutRewritingHistory(t *testing.T) {
+	root := t.TempDir()
+	novaDir := filepath.Join(root, ".nova")
+	legacyStore := NewStore(root)
+	story, err := legacyStore.CreateStory(CreateStoryRequest{Title: "没有 Actor Delta 的旧故事"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyData, err := os.ReadFile(legacyStore.storyPath(story.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	migratedStore := NewStoreWithNovaDir(root, novaDir)
+	snapshot, err := migratedStore.Snapshot(story.ID, "main")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.ActorStateSchema == nil || len(snapshot.ActorStateSchema.System.InitialActors) == 0 {
+		t.Fatalf("legacy story should freeze a schema with initial Actors: %#v", snapshot.ActorStateSchema)
+	}
+	actors, _ := snapshot.State[actorStateRoot].(map[string]any)
+	for _, initial := range snapshot.ActorStateSchema.System.InitialActors {
+		record, _ := actors[initial.ID].(map[string]any)
+		if record == nil || record["template_id"] != initial.TemplateID {
+			t.Fatalf("frozen initial Actor %q should be available in every replayed snapshot: %#v", initial.ID, record)
+		}
+	}
+	currentData, err := os.ReadFile(legacyStore.storyPath(story.ID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(currentData) != string(legacyData) {
+		t.Fatal("replaying frozen initial Actors must not rewrite legacy history")
+	}
+}
+
 func TestStoryFreezesChineseActorStateFieldIDs(t *testing.T) {
 	system := StoryDirectorActorStateSystem{
 		Templates: []ActorStateTemplate{{
 			ID:   "protagonist",
 			Name: "主角",
 			Fields: []ActorStateField{{
-				Name:       "当前可用能力",
-				Type:       "list",
-				Default:    []any{},
-				Visibility: "visible",
+				Name:    "当前可用能力",
+				Type:    "list",
+				Default: []any{},
 			}},
 		}},
 		InitialActors: []ActorStateInitialActor{{ID: "protagonist", Name: "主角", TemplateID: "protagonist"}},
@@ -144,12 +180,9 @@ func TestStoryFreezesChineseActorStateFieldIDs(t *testing.T) {
 		User:      "查看能力",
 		Narrative: "主角确认了道渊的存在。",
 		TurnResult: &TurnResult{
-			Contract: TurnContract{PlayerIntent: "查看能力", SceneGoal: "确认能力"},
-			Choices:  []string{"继续检查道渊", "询问身边的人"},
-			ActorStatePatches: []ActorStatePatch{{
-				ActorID: "protagonist",
-				State:   map[string]any{"当前可用能力": []any{"道渊"}},
-				Reason:  "正文确认主角能够使用道渊。",
+			Choices: testTurnChoices(),
+			StateUpdates: []StateUpdate{{
+				Op: TurnStateUpdateReplace, Path: "/protagonist/当前可用能力", Value: []any{"道渊"},
 			}},
 		},
 	})
@@ -197,12 +230,12 @@ func TestStoryFreezesChineseActorStateFieldIDs(t *testing.T) {
 	}
 }
 
-func TestActorStateFieldIDSupportsPunctuationWithoutPaths(t *testing.T) {
-	fieldID := "精神/意志.状态"
+func TestActorStateFieldIDSupportsNonPathPunctuation(t *testing.T) {
+	fieldID := "精神与意志.状态"
 	system := StoryDirectorActorStateSystem{
 		Templates: []ActorStateTemplate{{
 			ID:     "protagonist",
-			Fields: []ActorStateField{{Name: fieldID, Type: "string", Visibility: "visible"}},
+			Fields: []ActorStateField{{Name: fieldID, Type: "string"}},
 		}},
 		InitialActors: []ActorStateInitialActor{{ID: "protagonist", TemplateID: "protagonist"}},
 	}
@@ -216,9 +249,8 @@ func TestActorStateFieldIDSupportsPunctuationWithoutPaths(t *testing.T) {
 		User:      "坚持",
 		Narrative: "主角稳住了心神。",
 		TurnResult: &TurnResult{
-			Contract:          TurnContract{PlayerIntent: "坚持", SceneGoal: "稳定心神"},
-			Choices:           []string{"继续向前", "原地调息"},
-			ActorStatePatches: []ActorStatePatch{{ActorID: "protagonist", State: map[string]any{fieldID: "镇定"}}},
+			Choices:      testTurnChoices(),
+			StateUpdates: []StateUpdate{{Op: TurnStateUpdateReplace, Path: formatStateUpdatePath([]string{"protagonist", fieldID}), Value: "镇定"}},
 		},
 	})
 	if err != nil {
@@ -230,6 +262,59 @@ func TestActorStateFieldIDSupportsPunctuationWithoutPaths(t *testing.T) {
 	}
 	if got := actorStateFieldValue(snapshot.State, "protagonist", fieldID); got != "镇定" {
 		t.Fatalf("punctuated field id should be an exact map key, got %#v state=%#v", got, snapshot.State)
+	}
+}
+
+func TestActorStateRejectsPathSeparatorInFieldNames(t *testing.T) {
+	for _, fieldID := range []string{"精神/意志状态", "精神／意志状态"} {
+		t.Run(fieldID, func(t *testing.T) {
+			_, err := NewActorStateLibrary(t.TempDir()).Create(ActorStateModule{
+				ID:   "invalid-field-name",
+				Name: "非法字段名",
+				ActorState: StoryDirectorActorStateSystem{Templates: []ActorStateTemplate{{
+					ID:     "protagonist",
+					Name:   "主角",
+					Fields: []ActorStateField{{Name: fieldID, Type: "string"}},
+				}}},
+			})
+			if err == nil || !strings.Contains(err.Error(), "路径分隔符") {
+				t.Fatalf("field name %q should reject the path separator, got %v", fieldID, err)
+			}
+		})
+	}
+}
+
+func TestCreateStoryRejectsPathSeparatorInActorStateFieldNames(t *testing.T) {
+	system := StoryDirectorActorStateSystem{Templates: []ActorStateTemplate{{
+		ID:     "protagonist",
+		Name:   "主角",
+		Fields: []ActorStateField{{Name: "当前精神/意志状态", Type: "string"}},
+	}}}
+	_, err := NewStore(t.TempDir()).CreateStory(CreateStoryRequest{Title: "非法状态字段", ActorState: &system})
+	if err == nil || !strings.Contains(err.Error(), "路径分隔符") {
+		t.Fatalf("story creation must reject slash-delimited field names, got %v", err)
+	}
+}
+
+func TestBuiltinActorStateFieldNamesExcludePathSeparator(t *testing.T) {
+	systems := []struct {
+		name   string
+		system StoryDirectorActorStateSystem
+	}{{name: "default", system: defaultActorStateSystem()}}
+	for _, module := range builtinActorStateModules() {
+		systems = append(systems, struct {
+			name   string
+			system StoryDirectorActorStateSystem
+		}{name: module.ID, system: module.ActorState})
+	}
+	for _, item := range systems {
+		for _, template := range item.system.Templates {
+			for _, field := range template.Fields {
+				if strings.Contains(normalizeActorStateFieldName(field.Name), "/") {
+					t.Fatalf("built-in state system %s template %s contains path separator in field %q", item.name, template.ID, field.Name)
+				}
+			}
+		}
 	}
 }
 
@@ -283,12 +368,8 @@ func TestLegacyActorStatePathReplaysIntoFrozenFieldID(t *testing.T) {
 		User:      "掌握新能力",
 		Narrative: "主角在旧能力之上掌握了新能力。",
 		TurnResult: &TurnResult{
-			Contract: TurnContract{PlayerIntent: "掌握新能力", SceneGoal: "更新能力状态"},
-			Choices:  []string{"尝试新能力", "检查状态变化"},
-			ActorStatePatches: []ActorStatePatch{{
-				ActorID: "protagonist",
-				State:   map[string]any{"当前可用能力": []any{"旧能力", "新能力"}},
-			}},
+			Choices:      testTurnChoices(),
+			StateUpdates: []StateUpdate{{Op: TurnStateUpdateReplace, Path: "/protagonist/当前可用能力", Value: []any{"旧能力", "新能力"}}},
 		},
 	})
 	if err != nil {

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"denova/internal/session"
 )
@@ -20,6 +21,7 @@ const (
 	DataTypeSystem            = "data-agent-system"
 	DataTypeTokenUsage        = "data-agent-token-usage"
 	DataTypeToolResult        = "data-agent-tool-result"
+	DataTypeWorkspaceChange   = "data-agent-workspace-change"
 )
 
 // Message is the backend JSON shape for AI SDK UI messages used by the web app.
@@ -34,9 +36,15 @@ type Message struct {
 // MessagesFromHistory converts the existing session history into AI SDK UI
 // messages at read time. It does not mutate stored session data.
 func MessagesFromHistory(entries []session.HistoryEntry) []Message {
+	return MessagesFromHistoryAtOffset(entries, 0)
+}
+
+// MessagesFromHistoryAtOffset preserves IDs derived from a message's position
+// when converting a window from the full session history.
+func MessagesFromHistoryAtOffset(entries []session.HistoryEntry, offset int) []Message {
 	result := make([]Message, 0, len(entries))
 	for index, entry := range entries {
-		msg, ok := messageFromHistoryEntry(entry, index)
+		msg, ok := messageFromHistoryEntry(entry, offset+index)
 		if ok {
 			result = append(result, msg)
 		}
@@ -223,6 +231,9 @@ func addMetadataPayload(target map[string]any, entry session.HistoryEntry) {
 	if entry.SSEGeneratedChars > 0 {
 		target["sse_generated_chars"] = entry.SSEGeneratedChars
 	}
+	if len(entry.UserReferences) > 0 {
+		target["user_references"] = append([]session.UserMessageReference(nil), entry.UserReferences...)
+	}
 }
 
 func addUsagePayload(target map[string]any, entry session.HistoryEntry) {
@@ -314,5 +325,5 @@ func formatEntryTime(entry session.HistoryEntry) string {
 	if entry.CreatedAt.IsZero() {
 		return ""
 	}
-	return entry.CreatedAt.Format("2006-01-02T15:04:05Z07:00")
+	return entry.CreatedAt.Format(time.RFC3339)
 }

@@ -1,64 +1,43 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
-import type { ElementType, ReactNode } from 'react'
-import { Bot, Brain, Check, ChevronDown, ChevronRight, Edit3, FolderOpen, Loader2, PanelLeft, Plus, Save, ScrollText, Trash2, Wrench, X } from 'lucide-react'
+import type { ReactNode } from 'react'
+import type { LucideIcon } from 'lucide-react'
+import { Bot, Brain, Check, ChevronDown, ChevronRight, Edit3, FolderOpen, Plus, ScrollText, Trash2, Wrench } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { ConfigManagerChat } from '@/components/Chat/ConfigManagerChat'
-import { InlineErrorNotice } from '@/components/common/inline-error-notice'
+import { AutosaveStatusIndicator } from '@/components/forms/autosave-status'
+import { FormField } from '@/components/forms/form-field'
+import { FormSectionHeader } from '@/components/forms/form-section-header'
 import { AdaptiveSurface } from '@/components/layout/adaptive-surface'
+import { FeaturePageShell } from '@/components/layout/feature-page-shell'
+import { MobilePaneTrigger } from '@/components/layout/mobile-pane-trigger'
+import { SectionedNavigation } from '@/components/navigation/sectioned-navigation'
 import { AlertDialog, AlertDialogAction, AlertDialogCancel, AlertDialogContent, AlertDialogDescription, AlertDialogFooter, AlertDialogHeader, AlertDialogTitle } from '@/components/ui/alert-dialog'
+import { Button } from '@/components/ui/button'
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { Input } from '@/components/ui/input'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
-import { fetchSettings, updateUserSettings, updateWorkspaceSettings } from '@/features/settings/api'
 import type { AgentContextOverride, AgentModelOverride, AgentPromptBlocks, AgentPromptOverride, AgentPromptSource, AgentSkillOverride, AgentToolOverride, LayeredSettings, ModelProfileSettings, Settings, SettingsLayer, SubAgentConfig } from '@/features/settings/types'
 import { modelProfileID, modelProfileLabel, modelProfilesWithDefault } from '@/features/settings/model-profiles'
-import { settingsForLayer, settingsRevisionForLayer, useAutoSaveSettings } from '@/features/settings/use-auto-save-settings'
+import { useLayeredSettingsDraft } from '@/features/settings/use-layered-settings-draft'
 import { getSkills } from '@/lib/api'
 import type { SkillSummary } from '@/lib/api'
 import { AGENTS, DEEP_AGENT_PARENT_KEYS, FALLBACK_AGENT_TOOL_VALUES, TOOL_ROWS, resolveEffectiveTools, skillAgentFieldMatches, skillAvailableForAgent } from './agent-registry'
 import type { AgentToolDefinition, AgentViewDefinition, DeepAgentParentKey, ToolKey, VisibleAgentKey } from './agent-registry'
 
-const fieldCls = 'nova-field min-h-7 w-full min-w-0 flex-1 rounded-[var(--nova-radius)] border px-2.5 py-1.5 outline-none placeholder:text-[var(--nova-text-faint)] focus:border-[var(--nova-field-focus-border)] focus:bg-[var(--nova-surface-3)]'
 const tabCls = 'nova-nav-item rounded-[var(--nova-radius)] px-2.5 py-1 text-xs'
-let nextSettingsEventSourceID = 1
 
 export function AgentsView({ onClose }: { onClose?: () => void }) {
   const { t } = useTranslation()
-  const [layered, setLayered] = useState<LayeredSettings | null>(null)
   const [activeLayer, setActiveLayer] = useState<SettingsLayer>('user')
+  const { layered, draft, setDraft, error, autosaveStatus, autosaveError, reload, notifyUpdated, saveNow } = useLayeredSettingsDraft({
+    layer: activeLayer,
+    sourcePrefix: 'agents-view',
+  })
   const [activeAgent, setActiveAgent] = useState<VisibleAgentKey>('ide')
-  const [draft, setDraft] = useState<Settings>({})
   const [skills, setSkills] = useState<SkillSummary[]>([])
   const [agentChatOpen, setAgentChatOpen] = useState(false)
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState<string | null>(null)
-  const [settingsEventSource] = useState(() => {
-    const source = `agents-view-${nextSettingsEventSourceID}`
-    nextSettingsEventSourceID += 1
-    return source
-  })
-
-  const load = useCallback(async () => {
-    try {
-      const data = await fetchSettings()
-      setLayered(data)
-      setDraft(settingsForLayer(data, activeLayer))
-    } catch (e) {
-      setError((e as Error).message)
-    }
-  }, [activeLayer])
-
-  useEffect(() => { void load() }, [load])
-
-  useEffect(() => {
-    const onSettingsUpdated = (event: Event) => {
-      const source = (event as CustomEvent<{ source?: string }>).detail?.source
-      if (source === settingsEventSource) return
-      void load()
-    }
-    window.addEventListener('nova:settings-updated', onSettingsUpdated)
-    return () => window.removeEventListener('nova:settings-updated', onSettingsUpdated)
-  }, [load, settingsEventSource])
 
   useEffect(() => {
     let cancelled = false
@@ -78,11 +57,6 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
       window.removeEventListener('nova:skills-updated', loadSkills)
     }
   }, [])
-
-  useEffect(() => {
-    if (!layered) return
-    setDraft(settingsForLayer(layered, activeLayer))
-  }, [activeLayer])
 
   const effective = layered?.effective ?? {}
   const selected = AGENTS.find((agent) => agent.key === activeAgent) ?? AGENTS[0]
@@ -112,37 +86,24 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
     write_scope_hint: activeLayer,
   }), [activeAgent, activeLayer, selected.titleKey, t])
 
-  const saveDraft = useCallback(async (settings: Settings, baseRevision?: string) => {
-    const updater = activeLayer === 'user' ? updateUserSettings : updateWorkspaceSettings
-    return baseRevision ? updater(settings, baseRevision) : updater(settings)
-  }, [activeLayer])
+  const reloadAfterAgentMutation = useCallback(() => {
+    void saveNow()
+      .then(async () => {
+        await reload()
+        notifyUpdated()
+      })
+      .catch(() => undefined)
+  }, [notifyUpdated, reload, saveNow])
 
-  const applySavedSettings = useCallback((next: LayeredSettings) => {
-    setLayered(next)
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('nova:settings-updated', { detail: { source: settingsEventSource } }))
-    }
-  }, [settingsEventSource])
-
-  const onSave = async () => {
-    setSaving(true)
-    setError(null)
+  const switchLayer = async (layer: SettingsLayer) => {
+    if (layer === activeLayer) return
     try {
-      const next = await saveDraft(draft, settingsRevisionForLayer(layered, activeLayer))
-      applySavedSettings(next)
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setSaving(false)
+      await saveNow()
+      setActiveLayer(layer)
+    } catch {
+      // The layered settings hook already exposes the actionable save error.
     }
   }
-
-  const reloadAfterAgentMutation = useCallback(() => {
-    void load()
-    if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent('nova:settings-updated', { detail: { source: settingsEventSource } }))
-    }
-  }, [load, settingsEventSource])
 
   const setAgentModel = (patch: Partial<AgentModelOverride>) => {
     setDraft((current) => ({
@@ -214,61 +175,55 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
     })
   }
 
-  useAutoSaveSettings({
-    draft,
-    saved: layered ? settingsForLayer(layered, activeLayer) : {},
-    baseRevision: settingsRevisionForLayer(layered, activeLayer),
-    ready: Boolean(layered),
-    save: saveDraft,
-    onSavingChange: setSaving,
-    onSaved: applySavedSettings,
-    onError: setError,
-  })
-
   return (
-    <div className="flex h-full min-h-0 w-full flex-col bg-[var(--nova-bg)] text-[var(--nova-text)]">
-      <div className="nova-topbar flex min-h-10 shrink-0 flex-nowrap max-md:flex-wrap items-center gap-2 overflow-x-auto max-md:overflow-x-hidden border-b px-3 py-1.5 text-xs sm:px-4">
-        <Bot className="h-3.5 w-3.5 text-[var(--nova-text-muted)]" />
-        <span className="shrink-0 font-medium">Agents</span>
+    <FeaturePageShell
+      icon={Bot}
+      title="Agents"
+      className="bg-[var(--nova-bg)]"
+      topbarClassName="max-md:flex-wrap max-md:overflow-x-hidden"
+      error={error}
+      errorTitle={t('agents.saveError')}
+      onClose={onClose ? () => {
+        void saveNow().then(() => onClose()).catch(() => undefined)
+      } : undefined}
+      closeLabel={t('agents.close')}
+      onSaveShortcut={() => saveNow().catch(() => undefined)}
+      headerContent={(
         <div className="flex shrink-0 gap-1 border-l border-[var(--nova-border)] pl-2 sm:ml-3 sm:pl-3">
           {(['user', 'workspace'] as SettingsLayer[]).map((layer) => (
-            <button
+            <Button
               key={layer}
               type="button"
-              onClick={() => setActiveLayer(layer)}
+              variant="ghost"
+              size="xs"
+              onClick={() => void switchLayer(layer)}
               className={`${tabCls} ${activeLayer === layer ? 'is-active' : 'bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]'}`}
             >
               {layer === 'workspace' ? t('agents.layer.workspace') : t('agents.layer.user')}
-            </button>
+            </Button>
           ))}
         </div>
-        <button
-          type="button"
-          onClick={onSave}
-          disabled={saving}
-          className="nova-nav-item ml-auto inline-flex shrink-0 items-center gap-1.5 rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-active)] px-3 py-1 text-[var(--nova-text)] disabled:opacity-50"
-        >
-          {saving ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Save className="h-3.5 w-3.5" />}
-          {t('common.save')}
-        </button>
-        <button
-          type="button"
-          onClick={() => setAgentChatOpen((value) => !value)}
-          className={`nova-nav-item inline-flex shrink-0 items-center gap-1.5 rounded-[var(--nova-radius)] border border-[var(--nova-border)] px-3 py-1 ${agentChatOpen ? 'is-active' : 'bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]'}`}
-          aria-pressed={agentChatOpen}
-        >
-          <Bot className="h-3.5 w-3.5" />
-          {t('agents.configAgent.button')}
-        </button>
-        {onClose && (
-          <button type="button" onClick={onClose} className="nova-nav-item rounded p-1" aria-label={t('agents.close')} title={t('agents.close')}>
-            <X className="h-3.5 w-3.5" />
-          </button>
-        )}
-      </div>
-
-      {error && <InlineErrorNotice className="mx-3 mt-2" message={error} title={t('agents.saveError')} />}
-
+      )}
+      actions={(
+        <>
+          <AutosaveStatusIndicator
+            status={autosaveStatus}
+            error={autosaveError}
+            onRetry={() => saveNow().catch(() => undefined)}
+          />
+          <Button
+            type="button"
+            onClick={() => setAgentChatOpen((value) => !value)}
+            variant={agentChatOpen ? 'secondary' : 'outline'}
+            size="sm"
+            aria-pressed={agentChatOpen}
+          >
+            <Bot data-icon="inline-start" />
+            {t('agents.configAgent.button')}
+          </Button>
+        </>
+      )}
+    >
       <AdaptiveSurface
         left={{
           id: 'agents-list',
@@ -276,7 +231,7 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
           side: 'left',
           icon: <Bot className="h-4 w-4" />,
           content: <div className="h-full min-h-0 overflow-y-auto bg-[var(--nova-surface-2)] p-3"><AgentList active={activeAgent} onSelect={setActiveAgent} /></div>,
-          desktopClassName: 'min-h-0 border-r border-[var(--nova-border)]',
+          desktopClassName: 'w-72 shrink-0 min-h-0 border-r border-[var(--nova-border)]',
           mobileClassName: 'w-[min(88vw,340px)]',
         }}
         right={agentChatOpen ? {
@@ -301,28 +256,38 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
         className="flex-1 text-xs"
         mainClassName="min-h-0 min-w-0"
         desktopGridClassName={agentChatOpen ? 'grid-cols-[18rem_minmax(0,1fr)_minmax(320px,28rem)]' : 'grid-cols-[18rem_minmax(0,1fr)]'}
+        rightResize={{
+          layoutKey: 'nova-agents-config-manager-layout',
+          label: t('layout.resize.right'),
+          defaultSize: '420px',
+          minSize: '300px',
+          maxSize: '65%',
+          mainMinSize: '240px',
+        }}
       >
         {({ openLeft, openRight }) => (
           <main className="h-full min-h-0 overflow-y-auto overflow-x-hidden">
             <div className="sticky top-0 z-10 flex h-10 items-center gap-2 border-b border-[var(--nova-border)] bg-[var(--nova-surface)] px-3 md:hidden">
-              <button type="button" className="nova-icon-button flex h-8 w-8 items-center justify-center rounded-[var(--nova-radius)] border border-[var(--nova-border)] text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]" aria-label={t('workbench.mobile.openSidePanel', { label: 'Agents' })} onClick={openLeft}>
-                <PanelLeft className="h-4 w-4" />
-              </button>
+              <MobilePaneTrigger side="left" label={t('workbench.mobile.openSidePanel', { label: 'Agents' })} onClick={openLeft} />
               <span className="min-w-0 truncate text-[11px] text-[var(--nova-text-muted)]">{t(selected.titleKey)}</span>
               {agentChatOpen && (
-                <button type="button" className="nova-icon-button ml-auto flex h-8 w-8 items-center justify-center rounded-[var(--nova-radius)] border border-[var(--nova-border)] text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]" aria-label={t('workbench.mobile.openSidePanel', { label: t('agents.configAgent.title') })} onClick={openRight}>
-                  <Bot className="h-4 w-4" />
-                </button>
+                <MobilePaneTrigger side="right" label={t('workbench.mobile.openSidePanel', { label: t('agents.configAgent.title') })} onClick={openRight} className="ml-auto" />
               )}
             </div>
             <div className="mx-auto flex w-full min-w-0 max-w-5xl flex-col gap-5 px-4 py-5 sm:px-6">
               <AgentHeader agent={selected} />
-              <AgentModelSection
-                value={modelValue}
-                inherited={inheritedModel}
-                profiles={profileOptions}
-                onChange={setAgentModel}
-              />
+              {activeLayer === 'user' ? (
+                <AgentModelSection
+                  value={modelValue}
+                  inherited={inheritedModel}
+                  profiles={profileOptions}
+                  onChange={setAgentModel}
+                />
+              ) : (
+                <section className="border-b border-[var(--nova-border)] pb-5 text-xs text-[var(--nova-text-muted)]">
+                  {t('agents.model.userScoped')}
+                </section>
+              )}
               <AgentPromptSection
                 value={promptValue}
                 inherited={inheritedPrompt}
@@ -378,7 +343,7 @@ export function AgentsView({ onClose }: { onClose?: () => void }) {
           </main>
         )}
       </AdaptiveSurface>
-    </div>
+    </FeaturePageShell>
   )
 }
 
@@ -392,32 +357,21 @@ function AgentList({ active, onSelect }: { active: VisibleAgentKey; onSelect: (a
   }, [])
 
   return (
-    <nav className="space-y-4">
-      {groups.map((group) => (
-        <div key={group.group}>
-          <div className="mb-1.5 px-2 text-[11px] font-medium text-[var(--nova-text-faint)]">{t(group.group)}</div>
-          <div className="space-y-1">
-            {group.agents.map((agent) => {
-              const Icon = agent.icon
-              return (
-                <button
-                  key={agent.key}
-                  type="button"
-                  onClick={() => onSelect(agent.key)}
-                  className={`nova-nav-item flex w-full items-center gap-2 rounded-[var(--nova-radius)] px-2.5 py-2 text-left ${active === agent.key ? 'is-active' : ''}`}
-                >
-                  <Icon className="h-4 w-4 shrink-0 text-[var(--nova-text-muted)]" />
-                  <span className="min-w-0">
-                    <span className="block truncate font-medium text-[var(--nova-text)]">{t(agent.titleKey)}</span>
-                    <span className="block truncate text-[11px] text-[var(--nova-text-faint)]">{t(agent.subtitleKey)}</span>
-                  </span>
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      ))}
-    </nav>
+    <SectionedNavigation
+      groups={groups.map((group, index) => ({
+        id: `${group.group}:${index}`,
+        title: t(group.group),
+        items: group.agents.map((agent) => ({
+          id: agent.key,
+          title: t(agent.titleKey),
+          description: t(agent.subtitleKey),
+          icon: agent.icon,
+        })),
+      }))}
+      activeId={active}
+      onSelect={onSelect}
+      itemClassName="py-2"
+    />
   )
 }
 
@@ -456,24 +410,32 @@ function AgentModelSection({ value, inherited, profiles, onChange }: {
   const effectiveEffort = hasEffort ? value.reasoning_effort || '' : inherited.reasoning_effort || ''
 
   return (
-    <section className="space-y-3 border-b border-[var(--nova-border)] pb-5">
+    <section className="flex flex-col gap-3 border-b border-[var(--nova-border)] pb-5">
       <SectionTitle icon={Brain} title={t('agents.section.model')} />
       <div className="grid gap-3 md:grid-cols-2">
         <Field label={t('agents.field.modelProfile')} inherited={!hasProfile} onReset={hasProfile ? () => onChange({ profile_id: '' }) : undefined}>
-          <select value={effectiveProfile} onChange={(e) => onChange({ profile_id: e.target.value })} className={fieldCls}>
-            {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
-          </select>
+          <Select value={effectiveProfile} onValueChange={(profileID) => onChange({ profile_id: profileID })}>
+            <SelectTrigger size="sm" className="min-w-0 flex-1" aria-label={t('agents.field.modelProfile')}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                {profiles.map((profile) => <SelectItem key={profile.id} value={profile.id}>{profile.label}</SelectItem>)}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </Field>
         <Field label="Temperature" inherited={!hasTemperature} onReset={hasTemperature ? () => onChange({ temperature: null }) : undefined}>
-          <input
+          <Input
             type="number"
+            aria-label="Temperature"
             step={0.1}
             min={0}
             max={2}
             value={effectiveTemperature ?? ''}
             placeholder={t('agents.option.platformDefault')}
             onChange={(e) => onChange({ temperature: e.target.value === '' ? null : Number(e.target.value) })}
-            className={fieldCls}
+            className="h-7 flex-1 text-xs"
           />
         </Field>
         <Field label={t('agents.field.thinking')}>
@@ -487,12 +449,19 @@ function AgentModelSection({ value, inherited, profiles, onChange }: {
           />
         </Field>
         <Field label={t('agents.field.reasoningEffort')} inherited={!hasEffort} onReset={hasEffort ? () => onChange({ reasoning_effort: '' }) : undefined}>
-          <select value={effectiveEffort} onChange={(e) => onChange({ reasoning_effort: e.target.value })} className={fieldCls}>
-            <option value="">{t('agents.option.noSend')}</option>
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-          </select>
+          <Select value={effectiveEffort || '__none__'} onValueChange={(effort) => onChange({ reasoning_effort: effort === '__none__' ? '' : effort })}>
+            <SelectTrigger size="sm" className="min-w-0 flex-1" aria-label={t('agents.field.reasoningEffort')}>
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="__none__">{t('agents.option.noSend')}</SelectItem>
+                <SelectItem value="low">low</SelectItem>
+                <SelectItem value="medium">medium</SelectItem>
+                <SelectItem value="high">high</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </Field>
       </div>
     </section>
@@ -510,9 +479,9 @@ function AgentPromptSection({ value, inherited, builtin, blocks, sources, onChan
   const { t } = useTranslation()
   const promptSources = sources?.length ? sources : fallbackPromptSources(blocks, builtin)
   return (
-    <section className="space-y-3 border-b border-[var(--nova-border)] pb-5">
+    <section className="flex flex-col gap-3 border-b border-[var(--nova-border)] pb-5">
       <SectionTitle icon={ScrollText} title={t('agents.section.systemPrompt')} />
-      <div className="space-y-2">
+      <div className="flex flex-col gap-2">
         {promptSources.map((source) => (
           <PromptSourceBlock
             key={`${source.id}:${source.field ?? 'readonly'}`}
@@ -575,7 +544,7 @@ function PromptSourceBlock({ source, value, inherited, onChange }: {
                 aria-label={title}
                 placeholder={t('agents.prompt.placeholder')}
                 onChange={(e) => onChange({ [editableField]: e.target.value })}
-                className={`${fieldCls} min-h-36 resize-y leading-5 shadow-none focus-visible:ring-0`}
+                className="min-h-36 resize-y text-xs leading-5"
               />
             </Field>
           ) : content ? (
@@ -635,21 +604,15 @@ function AgentRuntimeContextSection({ agent, value, inherited, onChange }: {
   const hasCompactionTargetMin = value.compaction_target_min_ratio !== undefined && value.compaction_target_min_ratio !== null
   const hasCompactionTargetMax = value.compaction_target_max_ratio !== undefined && value.compaction_target_max_ratio !== null
   const hasToolResultRetention = value.tool_result_retention_enabled !== undefined && value.tool_result_retention_enabled !== null
-  const hasToolResultKeepRecent = value.tool_result_keep_recent !== undefined && value.tool_result_keep_recent !== null
-  const hasToolResultBudget = value.tool_result_context_budget_kb !== undefined && value.tool_result_context_budget_kb !== null
-  const hasToolResultPreview = value.tool_result_preview_chars !== undefined && value.tool_result_preview_chars !== null
   const effectiveCompactionEnabled = hasCompactionEnabled ? value.compaction_enabled : inherited.compaction_enabled ?? true
   const effectiveCompactionThreshold = hasCompactionThreshold ? value.compaction_threshold : inherited.compaction_threshold ?? 0.9
   const effectiveCompactionRecentTurns = hasCompactionRecentTurns ? value.compaction_recent_turns : inherited.compaction_recent_turns ?? 1
   const effectiveCompactionTargetMin = hasCompactionTargetMin ? value.compaction_target_min_ratio : inherited.compaction_target_min_ratio ?? 0.05
   const effectiveCompactionTargetMax = hasCompactionTargetMax ? value.compaction_target_max_ratio : inherited.compaction_target_max_ratio ?? 0.2
   const effectiveToolResultRetention = hasToolResultRetention ? value.tool_result_retention_enabled : inherited.tool_result_retention_enabled ?? (agent === 'ide' || agent === 'interactive_story')
-  const effectiveToolResultKeepRecent = hasToolResultKeepRecent ? value.tool_result_keep_recent : inherited.tool_result_keep_recent ?? 3
-  const effectiveToolResultBudget = hasToolResultBudget ? value.tool_result_context_budget_kb : inherited.tool_result_context_budget_kb ?? 200
-  const effectiveToolResultPreview = hasToolResultPreview ? value.tool_result_preview_chars : inherited.tool_result_preview_chars ?? 2000
   const isCompactionAgent = agent === 'context_compaction'
   return (
-    <section className="space-y-3 border-b border-[var(--nova-border)] pb-5">
+    <section className="flex flex-col gap-3 border-b border-[var(--nova-border)] pb-5">
       <SectionTitle icon={FolderOpen} title={t('agents.section.runtimeContext')} />
       <div className="grid gap-3 md:grid-cols-2">
         {!isCompactionAgent && (
@@ -664,14 +627,15 @@ function AgentRuntimeContextSection({ agent, value, inherited, onChange }: {
               />
             </Field>
             <Field label={t('agents.field.compactionThreshold')} inherited={!hasCompactionThreshold} onReset={hasCompactionThreshold ? () => onChange({ compaction_threshold: null }) : undefined}>
-              <input
+              <Input
                 type="number"
+                aria-label={t('agents.field.compactionThreshold')}
                 min={50}
                 max={98}
                 step={1}
                 value={Math.round((effectiveCompactionThreshold ?? 0.9) * 100)}
                 onChange={(e) => onChange({ compaction_threshold: e.target.value === '' ? null : Number(e.target.value) / 100 })}
-                className={fieldCls}
+                className="h-7 flex-1 text-xs"
               />
             </Field>
             <Field label={t('agents.field.toolResultRetention')}>
@@ -683,74 +647,44 @@ function AgentRuntimeContextSection({ agent, value, inherited, onChange }: {
                 onReset={hasToolResultRetention ? () => onChange({ tool_result_retention_enabled: null }) : undefined}
               />
             </Field>
-            <Field label={t('agents.field.toolResultKeepRecent')} inherited={!hasToolResultKeepRecent} onReset={hasToolResultKeepRecent ? () => onChange({ tool_result_keep_recent: null }) : undefined}>
-              <input
-                type="number"
-                min={1}
-                max={20}
-                step={1}
-                value={effectiveToolResultKeepRecent ?? 3}
-                onChange={(e) => onChange({ tool_result_keep_recent: e.target.value === '' ? null : Number(e.target.value) })}
-                className={fieldCls}
-              />
-            </Field>
-            <Field label={t('agents.field.toolResultBudget')} inherited={!hasToolResultBudget} onReset={hasToolResultBudget ? () => onChange({ tool_result_context_budget_kb: null }) : undefined}>
-              <input
-                type="number"
-                min={1}
-                max={4096}
-                step={1}
-                value={effectiveToolResultBudget ?? 200}
-                onChange={(e) => onChange({ tool_result_context_budget_kb: e.target.value === '' ? null : Number(e.target.value) })}
-                className={fieldCls}
-              />
-            </Field>
-            <Field label={t('agents.field.toolResultPreview')} inherited={!hasToolResultPreview} onReset={hasToolResultPreview ? () => onChange({ tool_result_preview_chars: null }) : undefined}>
-              <input
-                type="number"
-                min={1}
-                max={20000}
-                step={100}
-                value={effectiveToolResultPreview ?? 2000}
-                onChange={(e) => onChange({ tool_result_preview_chars: e.target.value === '' ? null : Number(e.target.value) })}
-                className={fieldCls}
-              />
-            </Field>
           </>
         )}
         {isCompactionAgent && (
           <>
             <Field label={t('agents.field.compactionRecentTurns')} inherited={!hasCompactionRecentTurns} onReset={hasCompactionRecentTurns ? () => onChange({ compaction_recent_turns: null }) : undefined}>
-              <input
+              <Input
                 type="number"
+                aria-label={t('agents.field.compactionRecentTurns')}
                 min={1}
                 max={30}
                 step={1}
                 value={effectiveCompactionRecentTurns ?? 1}
                 onChange={(e) => onChange({ compaction_recent_turns: e.target.value === '' ? null : Number(e.target.value) })}
-                className={fieldCls}
+                className="h-7 flex-1 text-xs"
               />
             </Field>
             <Field label={t('agents.field.compactionTargetMin')} inherited={!hasCompactionTargetMin} onReset={hasCompactionTargetMin ? () => onChange({ compaction_target_min_ratio: null }) : undefined}>
-              <input
+              <Input
                 type="number"
+                aria-label={t('agents.field.compactionTargetMin')}
                 min={1}
                 max={80}
                 step={1}
                 value={Math.round((effectiveCompactionTargetMin ?? 0.05) * 100)}
                 onChange={(e) => onChange({ compaction_target_min_ratio: e.target.value === '' ? null : Number(e.target.value) / 100 })}
-                className={fieldCls}
+                className="h-7 flex-1 text-xs"
               />
             </Field>
             <Field label={t('agents.field.compactionTargetMax')} inherited={!hasCompactionTargetMax} onReset={hasCompactionTargetMax ? () => onChange({ compaction_target_max_ratio: null }) : undefined}>
-              <input
+              <Input
                 type="number"
+                aria-label={t('agents.field.compactionTargetMax')}
                 min={1}
                 max={80}
                 step={1}
                 value={Math.round((effectiveCompactionTargetMax ?? 0.2) * 100)}
                 onChange={(e) => onChange({ compaction_target_max_ratio: e.target.value === '' ? null : Number(e.target.value) / 100 })}
-                className={fieldCls}
+                className="h-7 flex-1 text-xs"
               />
             </Field>
           </>
@@ -779,7 +713,7 @@ function AgentToolSection({ agent, value, effective, onChange }: {
   const { t } = useTranslation()
   const rows = toolRowsForAgent(agent)
   return (
-    <section className="space-y-3 border-b border-[var(--nova-border)] pb-5">
+    <section className="flex flex-col gap-3 border-b border-[var(--nova-border)] pb-5">
       <SectionTitle icon={Wrench} title={t('agents.section.tools')} />
       <div className="grid gap-2 lg:grid-cols-2">
         {rows.map((tool) => {
@@ -916,7 +850,7 @@ function AgentSubAgentSection({ agent, inheritedModel, generalSettings, effectiv
   }
 
   return (
-    <section className="space-y-3 border-b border-[var(--nova-border)] pb-5">
+    <section className="flex flex-col gap-3 border-b border-[var(--nova-border)] pb-5">
       <div className="flex min-w-0 flex-wrap items-center gap-2">
         <SectionTitle icon={Bot} title={t('agents.section.subAgents')} />
         <button
@@ -954,7 +888,7 @@ function AgentSubAgentSection({ agent, inheritedModel, generalSettings, effectiv
           {t('agents.subAgents.empty')}
         </div>
       ) : (
-        <div className="space-y-2">
+        <div className="flex flex-col gap-2">
           {visibleSubAgents.map((subAgent, index) => (
             <SubAgentRow
               key={`${subAgent.id || 'subagent'}:${index}`}
@@ -1096,46 +1030,53 @@ function SubAgentEditor({ id, agent, subAgent, inheritedModel, profiles, onChang
   }
 
   return (
-    <div className="space-y-3">
+    <div className="flex flex-col gap-3">
       <div className="grid gap-3 md:grid-cols-2">
         <Field label={t('agents.subAgents.id')}>
-          <input value={subAgent.id ?? ''} onChange={(e) => onChange(id, { id: normalizeSubAgentID(e.target.value) })} className={fieldCls} />
+          <Input aria-label={t('agents.subAgents.id')} value={subAgent.id ?? ''} onChange={(e) => onChange(id, { id: normalizeSubAgentID(e.target.value) })} className="h-7 text-xs" />
         </Field>
         <Field label={t('agents.subAgents.name')}>
-          <input value={subAgent.name ?? ''} onChange={(e) => onChange(id, { name: e.target.value })} className={fieldCls} />
+          <Input aria-label={t('agents.subAgents.name')} value={subAgent.name ?? ''} onChange={(e) => onChange(id, { name: e.target.value })} className="h-7 text-xs" />
         </Field>
       </div>
       <div className="grid gap-3 md:grid-cols-2">
         <Field label={t('agents.subAgents.description')}>
-          <input value={subAgent.description ?? ''} onChange={(e) => onChange(id, { description: e.target.value })} className={fieldCls} />
+          <Input aria-label={t('agents.subAgents.description')} value={subAgent.description ?? ''} onChange={(e) => onChange(id, { description: e.target.value })} className="h-7 text-xs" />
         </Field>
         <Field label={t('agents.field.modelProfile')}>
-          <select value={model.profile_id || ''} onChange={(e) => setModel({ profile_id: e.target.value })} className={fieldCls}>
-            <option value="">{t('agents.option.inherit')}</option>
-            {profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.label}</option>)}
-          </select>
+          <Select value={model.profile_id || '__inherit__'} onValueChange={(profileID) => setModel({ profile_id: profileID === '__inherit__' ? '' : profileID })}>
+            <SelectTrigger size="sm" className="w-full" aria-label={t('agents.field.modelProfile')}><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="__inherit__">{t('agents.option.inherit')}</SelectItem>
+                {profiles.map((profile) => <SelectItem key={profile.id} value={profile.id}>{profile.label}</SelectItem>)}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </Field>
       </div>
       <Field label={t('agents.subAgents.prompt')}>
         <Textarea
           autoResize
+          aria-label={t('agents.subAgents.prompt')}
           value={subAgent.system_prompt ?? ''}
           onChange={(e) => onChange(id, { system_prompt: e.target.value })}
           placeholder={t('agents.subAgents.promptPlaceholder')}
-          className={`${fieldCls} min-h-28 resize-y leading-5 shadow-none focus-visible:ring-0`}
+          className="min-h-28 resize-y text-xs leading-5"
         />
       </Field>
       <div className="grid gap-3 md:grid-cols-3">
         <Field label="Temperature">
-          <input
+          <Input
             type="number"
+            aria-label="Temperature"
             min={0}
             max={2}
             step={0.1}
             value={model.temperature ?? ''}
             placeholder={t('agents.option.inherit')}
             onChange={(e) => setModel({ temperature: e.target.value === '' ? null : Number(e.target.value) })}
-            className={fieldCls}
+            className="h-7 text-xs"
           />
         </Field>
         <Field label={t('agents.field.thinking')}>
@@ -1149,12 +1090,17 @@ function SubAgentEditor({ id, agent, subAgent, inheritedModel, profiles, onChang
           />
         </Field>
         <Field label={t('agents.field.reasoningEffort')}>
-          <select value={model.reasoning_effort || ''} onChange={(e) => setModel({ reasoning_effort: e.target.value })} className={fieldCls}>
-            <option value="">{t('agents.option.inherit')}</option>
-            <option value="low">low</option>
-            <option value="medium">medium</option>
-            <option value="high">high</option>
-          </select>
+          <Select value={model.reasoning_effort || '__inherit__'} onValueChange={(effort) => setModel({ reasoning_effort: effort === '__inherit__' ? '' : effort })}>
+            <SelectTrigger size="sm" className="w-full" aria-label={t('agents.field.reasoningEffort')}><SelectValue /></SelectTrigger>
+            <SelectContent>
+              <SelectGroup>
+                <SelectItem value="__inherit__">{t('agents.option.inherit')}</SelectItem>
+                <SelectItem value="low">low</SelectItem>
+                <SelectItem value="medium">medium</SelectItem>
+                <SelectItem value="high">high</SelectItem>
+              </SelectGroup>
+            </SelectContent>
+          </Select>
         </Field>
       </div>
       <div>
@@ -1201,7 +1147,7 @@ function AgentSkillSection({ agent, skills, value, effective, onChange }: {
 }) {
   const { t } = useTranslation()
   return (
-    <section className="space-y-3 border-b border-[var(--nova-border)] pb-5">
+    <section className="flex flex-col gap-3 border-b border-[var(--nova-border)] pb-5">
       <SectionTitle icon={FolderOpen} title={t('agents.section.skills')} />
       {skills.length === 0 ? (
         <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] px-3 py-3 text-[11px] text-[var(--nova-text-faint)]">
@@ -1253,7 +1199,7 @@ function AgentBuiltInCapabilitySection({ agent }: { agent: VisibleAgentKey }) {
   const { t } = useTranslation()
   const rows = builtInCapabilityRows(agent, t)
   return (
-    <section className="space-y-3 border-b border-[var(--nova-border)] pb-5">
+    <section className="flex flex-col gap-3 border-b border-[var(--nova-border)] pb-5">
       <SectionTitle icon={Wrench} title={t('agents.section.builtIn')} />
       <div className="grid gap-2 md:grid-cols-2">
         {rows.map((row) => (
@@ -1273,7 +1219,7 @@ function AgentBuiltInCapabilitySection({ agent }: { agent: VisibleAgentKey }) {
 function AgentModelOnlySection() {
   const { t } = useTranslation()
   return (
-    <section className="space-y-3 border-b border-[var(--nova-border)] pb-5">
+    <section className="flex flex-col gap-3 border-b border-[var(--nova-border)] pb-5">
       <SectionTitle icon={Wrench} title={t('agents.section.tools')} />
       <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] px-3 py-2 text-[11px] leading-5 text-[var(--nova-text-faint)]">
         {t('agents.modelOnly.note')}
@@ -1286,7 +1232,7 @@ function AgentContextSection({ agent, effective }: { agent: VisibleAgentKey; eff
   const { t } = useTranslation()
   const rows = contextRowsFor(agent, effective, t)
   return (
-    <section className="space-y-3 pb-5">
+    <section className="flex flex-col gap-3 pb-5">
       <SectionTitle icon={FolderOpen} title={t('agents.section.context')} />
       <div className="grid gap-2 md:grid-cols-3">
         {rows.map((row) => (
@@ -1303,24 +1249,18 @@ function AgentContextSection({ agent, effective }: { agent: VisibleAgentKey; eff
   )
 }
 
-function SectionTitle({ icon: Icon, title }: { icon: ElementType; title: string }) {
-  return (
-    <div className="flex items-center gap-2 text-xs font-medium">
-      <Icon className="h-3.5 w-3.5 text-[var(--nova-text-muted)]" />
-      {title}
-    </div>
-  )
+function SectionTitle({ icon, title }: { icon: LucideIcon; title: string }) {
+  return <FormSectionHeader icon={icon} title={title} />
 }
 
 function Field({ label, inherited, onReset, children }: { label: string; inherited?: boolean; onReset?: () => void; children: ReactNode }) {
   return (
-    <div className="flex min-w-0 flex-col gap-1.5">
-      <span className="text-[var(--nova-text-muted)]">{label}</span>
-      <span className="flex min-w-0 flex-wrap items-center gap-2">
+    <FormField label={label}>
+      <div className="flex min-w-0 flex-wrap items-center gap-2">
         {children}
         {inherited !== undefined && <InheritanceBadge inherited={inherited} onReset={onReset} />}
-      </span>
-    </div>
+      </div>
+    </FormField>
   )
 }
 
@@ -1602,9 +1542,6 @@ function mergeAgentContextOverride(parent: AgentContextOverride, child: AgentCon
   const compactionRecentTurns = child.compaction_recent_turns ?? parent.compaction_recent_turns ?? 1
   const compactionTargetMin = child.compaction_target_min_ratio ?? parent.compaction_target_min_ratio ?? 0.05
   const compactionTargetMax = child.compaction_target_max_ratio ?? parent.compaction_target_max_ratio ?? 0.2
-  const toolResultKeepRecent = child.tool_result_keep_recent ?? parent.tool_result_keep_recent ?? 3
-  const toolResultBudget = child.tool_result_context_budget_kb ?? parent.tool_result_context_budget_kb ?? 200
-  const toolResultPreview = child.tool_result_preview_chars ?? parent.tool_result_preview_chars ?? 2000
   return {
     compaction_enabled: child.compaction_enabled ?? parent.compaction_enabled ?? true,
     compaction_strategy: child.compaction_strategy || parent.compaction_strategy || 'summary_agent',
@@ -1613,8 +1550,5 @@ function mergeAgentContextOverride(parent: AgentContextOverride, child: AgentCon
     compaction_target_min_ratio: Math.max(0.01, Math.min(0.8, compactionTargetMin)),
     compaction_target_max_ratio: Math.max(0.01, Math.min(0.8, Math.max(compactionTargetMin, compactionTargetMax))),
     tool_result_retention_enabled: child.tool_result_retention_enabled ?? parent.tool_result_retention_enabled,
-    tool_result_keep_recent: Math.max(1, Math.min(20, toolResultKeepRecent)),
-    tool_result_context_budget_kb: Math.max(1, Math.min(4096, toolResultBudget)),
-    tool_result_preview_chars: Math.max(1, Math.min(20000, toolResultPreview)),
   }
 }

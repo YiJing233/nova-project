@@ -1,12 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { FileText, Loader2, Search } from 'lucide-react'
+import { FileText, Loader2, Regex, Replace, Search } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
+import { toast } from 'sonner'
 import { Input } from '@/components/ui/input'
-import { searchWorkspace, type WorkspaceSearchResult } from '@/lib/api'
+import { ConfirmDialog } from '@/components/common/ConfirmDialog'
+import { HighlightedText } from '@/components/common/HighlightedText'
+import { TooltipIconButton } from '@/components/common/tooltip-icon-button'
+import { replaceWorkspace, searchWorkspace, type WorkspaceSearchResult } from '@/lib/api'
 
 interface SearchPanelProps {
   workspace: string
   onSelectResult: (result: WorkspaceSearchResult, query: string) => void | Promise<void>
+  /** 全局替换成功后通知外层刷新受影响的打开文件与版本信息 */
+  onWorkspaceChanged?: (paths: string[]) => void | Promise<void>
 }
 
 interface SearchResultGroup {
@@ -17,17 +23,23 @@ interface SearchResultGroup {
 const SEARCH_LIMIT = 100
 const SEARCH_DEBOUNCE_MS = 260
 
-/** 当前书籍 workspace 的扫描式全局搜索面板。 */
-export function SearchPanel({ workspace, onSelectResult }: SearchPanelProps) {
+/** 当前书籍 workspace 的扫描式全局搜索面板，支持正则匹配与全局替换。 */
+export function SearchPanel({ workspace, onSelectResult, onWorkspaceChanged }: SearchPanelProps) {
   const { t } = useTranslation()
   const [query, setQuery] = useState('')
   const [results, setResults] = useState<WorkspaceSearchResult[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
+  const [useRegex, setUseRegex] = useState(false)
+  const [replaceOpen, setReplaceOpen] = useState(false)
+  const [replaceText, setReplaceText] = useState('')
+  const [replaceConfirmOpen, setReplaceConfirmOpen] = useState(false)
+  const [refreshSeq, setRefreshSeq] = useState(0)
   const requestSeq = useRef(0)
 
   const trimmedQuery = query.trim()
   const groups = useMemo(() => groupSearchResults(results), [results])
+  const canReplace = Boolean(workspace && trimmedQuery && results.length > 0)
 
   useEffect(() => {
     requestSeq.current += 1
@@ -42,7 +54,7 @@ export function SearchPanel({ workspace, onSelectResult }: SearchPanelProps) {
 
     setLoading(true)
     const timer = window.setTimeout(() => {
-      searchWorkspace(trimmedQuery, SEARCH_LIMIT)
+      searchWorkspace(trimmedQuery, SEARCH_LIMIT, { regex: useRegex })
         .then((items) => {
           if (requestSeq.current !== seq) return
           setResults(items)
@@ -58,23 +70,89 @@ export function SearchPanel({ workspace, onSelectResult }: SearchPanelProps) {
     }, SEARCH_DEBOUNCE_MS)
 
     return () => window.clearTimeout(timer)
-  }, [t, trimmedQuery, workspace])
+  }, [t, trimmedQuery, useRegex, workspace, refreshSeq])
+
+  const handleConfirmReplace = async () => {
+    const data = await replaceWorkspace({ query: trimmedQuery, replacement: replaceText, regex: useRegex, workspace })
+    const paths = data.files.map((file) => file.path)
+    if (data.total_replacements > 0) {
+      toast.success(t('search.replaceDone', { count: data.total_replacements, files: data.files.length }))
+    } else {
+      toast.info(t('search.replaceNoMatches'))
+    }
+    if (data.skipped.length > 0) {
+      toast.warning(t('search.replaceSkipped', { count: data.skipped.length }))
+    }
+    if (paths.length > 0) {
+      await onWorkspaceChanged?.(paths)
+    }
+    setRefreshSeq((value) => value + 1)
+  }
 
   return (
     <div className="flex h-full min-h-0 flex-col">
       <div className="shrink-0 space-y-2 p-1">
-        <div className="relative">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--nova-text-faint)]" />
-          <Input
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder={t('search.placeholder')}
-            className="h-8 border-[var(--nova-border)] bg-[var(--nova-surface)] pl-8 pr-8 text-xs text-[var(--nova-text)] placeholder:text-[var(--nova-text-faint)]"
-          />
-          {loading && (
-            <Loader2 className="absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[var(--nova-text-faint)]" />
-          )}
+        <div className="flex items-center gap-1">
+          <div className="relative min-w-0 flex-1">
+            <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--nova-text-faint)]" />
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              placeholder={t('search.placeholder')}
+              className="h-8 border-[var(--nova-border)] bg-[var(--nova-surface)] pl-8 pr-8 text-xs text-[var(--nova-text)] placeholder:text-[var(--nova-text-faint)]"
+            />
+            {loading && (
+              <Loader2 className="absolute right-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[var(--nova-text-faint)]" />
+            )}
+          </div>
+          <TooltipIconButton
+            label={t('search.toggleRegex')}
+            size="icon-xs"
+            tooltipSide="top"
+            aria-pressed={useRegex}
+            className={useRegex ? 'nova-nav-item is-active shrink-0' : 'shrink-0 text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]'}
+            onClick={() => setUseRegex((value) => !value)}
+          >
+            <Regex className="h-3.5 w-3.5" />
+          </TooltipIconButton>
+          <TooltipIconButton
+            label={t('search.toggleReplace')}
+            size="icon-xs"
+            tooltipSide="top"
+            aria-pressed={replaceOpen}
+            className={replaceOpen ? 'nova-nav-item is-active shrink-0' : 'shrink-0 text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]'}
+            onClick={() => setReplaceOpen((value) => !value)}
+          >
+            <Replace className="h-3.5 w-3.5" />
+          </TooltipIconButton>
         </div>
+        {replaceOpen && (
+          <div className="flex items-center gap-1">
+            <div className="relative min-w-0 flex-1">
+              <Replace className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[var(--nova-text-faint)]" />
+              <Input
+                value={replaceText}
+                onChange={(event) => setReplaceText(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Enter' && canReplace) {
+                    event.preventDefault()
+                    setReplaceConfirmOpen(true)
+                  }
+                }}
+                placeholder={t('search.replacePlaceholder')}
+                className="h-8 border-[var(--nova-border)] bg-[var(--nova-surface)] pl-8 text-xs text-[var(--nova-text)] placeholder:text-[var(--nova-text-faint)]"
+              />
+            </div>
+            <button
+              type="button"
+              onClick={() => setReplaceConfirmOpen(true)}
+              disabled={!canReplace}
+              className="shrink-0 rounded px-2 py-1 text-[11px] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)] disabled:opacity-40"
+            >
+              {t('search.replaceAll')}
+            </button>
+          </div>
+        )}
         {trimmedQuery && !loading && results.length > 0 && (
           <div className="px-1 text-[11px] text-[var(--nova-text-faint)]">
             {t('search.resultCount', { count: results.length })}
@@ -115,7 +193,7 @@ export function SearchPanel({ workspace, onSelectResult }: SearchPanelProps) {
                         {result.column > 0 && <span>{t('search.column', { column: result.column })}</span>}
                       </div>
                       <p className="line-clamp-2 whitespace-pre-wrap break-words text-xs leading-5 text-[var(--nova-text-muted)]">
-                        <HighlightedText text={result.preview || result.path} query={trimmedQuery} />
+                        <HighlightedText text={result.preview || result.path} query={useRegex ? result.match_text : trimmedQuery} />
                       </p>
                     </button>
                   ))}
@@ -125,6 +203,15 @@ export function SearchPanel({ workspace, onSelectResult }: SearchPanelProps) {
           </div>
         )}
       </div>
+
+      <ConfirmDialog
+        open={replaceConfirmOpen}
+        onOpenChange={setReplaceConfirmOpen}
+        title={t('search.replaceConfirmTitle')}
+        description={t('search.replaceConfirmDescription', { query: trimmedQuery, replacement: replaceText })}
+        confirmLabel={t('search.replaceAll')}
+        onConfirm={handleConfirmReplace}
+      />
     </div>
   )
 }
@@ -135,38 +222,6 @@ function SearchEmptyState({ text }: { text: string }) {
       {text}
     </div>
   )
-}
-
-function HighlightedText({ text, query }: { text: string; query: string }) {
-  const parts = splitByQuery(text, query)
-  return (
-    <>
-      {parts.map((part, index) => part.matched ? (
-        <mark key={`${part.text}:${index}`} className="rounded bg-[var(--nova-warning-bg)] px-0.5 text-[var(--nova-warning)]">
-          {part.text}
-        </mark>
-      ) : (
-        <span key={`${part.text}:${index}`}>{part.text}</span>
-      ))}
-    </>
-  )
-}
-
-function splitByQuery(text: string, query: string): Array<{ text: string; matched: boolean }> {
-  const normalizedQuery = query.trim().toLowerCase()
-  if (!normalizedQuery) return [{ text, matched: false }]
-  const normalizedText = text.toLowerCase()
-  const parts: Array<{ text: string; matched: boolean }> = []
-  let cursor = 0
-  while (cursor < text.length) {
-    const index = normalizedText.indexOf(normalizedQuery, cursor)
-    if (index < 0) break
-    if (index > cursor) parts.push({ text: text.slice(cursor, index), matched: false })
-    parts.push({ text: text.slice(index, index + normalizedQuery.length), matched: true })
-    cursor = index + normalizedQuery.length
-  }
-  if (cursor < text.length) parts.push({ text: text.slice(cursor), matched: false })
-  return parts.length > 0 ? parts : [{ text, matched: false }]
 }
 
 function groupSearchResults(results: WorkspaceSearchResult[]): SearchResultGroup[] {

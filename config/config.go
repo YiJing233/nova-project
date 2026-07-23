@@ -1,6 +1,7 @@
 package config
 
 import (
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -40,6 +41,7 @@ type Config struct {
 	DenovaDir                   string                       `toml:"denova_dir"`
 	NovaDir                     string                       `toml:"nova_dir"`
 	Workspace                   string                       `toml:"workspace"`
+	AutomationWorkspaces        []string                     `toml:"-"`
 	RuntimeWebPort              int                          `toml:"-"`
 	DevMode                     bool                         `toml:"-"`
 	LLMInputLogEnabled          bool                         `toml:"llm_input_log_enabled"`
@@ -273,6 +275,7 @@ func globalConfigCandidates() []string {
 func Load() *Config {
 	cfg, _, err := LoadWithWorkspace("")
 	if err != nil || cfg == nil {
+		log.Printf("[config] LoadWithWorkspace failed, falling back to defaults: %v", err)
 		// fallback：返回纯默认值 + env，保持启动不挂
 		d := DefaultSettings()
 		cfg = &Config{
@@ -354,7 +357,7 @@ func settingsAgentIdleTimeoutSeconds(v *int) int {
 }
 
 func settingsAgentToolResultLimitKB(v *int) int {
-	if v == nil || *v < 0 {
+	if v == nil || *v <= 0 {
 		return DefaultAgentToolResultLimitKB
 	}
 	return *v
@@ -430,6 +433,32 @@ func (cfg *Config) RemoteAccessConfig() RemoteAccessConfig {
 		Username:       cfg.RemoteAccessUsername,
 		PasswordHash:   cfg.RemoteAccessPasswordHash,
 	}
+}
+
+// DataDir returns the canonical Denova data directory. DenovaDir is the
+// authoritative field; the legacy NovaDir name remains accepted only as a
+// deserialization alias for older config files, so this accessor bridges the
+// two during the rename. Runtime code should read through DataDir instead of
+// touching DenovaDir/NovaDir directly so the fallback lives in one seam.
+func (cfg *Config) DataDir() string {
+	if cfg == nil {
+		return ""
+	}
+	if dir := strings.TrimSpace(cfg.DenovaDir); dir != "" {
+		return dir
+	}
+	return strings.TrimSpace(cfg.NovaDir)
+}
+
+// SetDataDir sets the canonical Denova data directory, keeping the deprecated
+// NovaDir field mirrored so any legacy reader still resolves the same value.
+func (cfg *Config) SetDataDir(dir string) {
+	if cfg == nil {
+		return
+	}
+	dir = strings.TrimSpace(dir)
+	cfg.DenovaDir = dir
+	cfg.NovaDir = dir
 }
 
 func defaultNovaDir() string {

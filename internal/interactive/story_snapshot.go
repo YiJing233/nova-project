@@ -15,7 +15,7 @@ func snapshotFromLines(storyID, branchID string, meta StoryMeta, lines []StoryEv
 		return Snapshot{}, fmt.Errorf("分支不存在: %s", branchID)
 	}
 	state := initialStoryState()
-	snapshot := Snapshot{StoryID: storyID, BranchID: branchID, State: state, ActorStateSchema: meta.ActorStateSchema}
+	snapshot := Snapshot{StoryID: storyID, BranchID: branchID, State: state, ActorStateSchema: meta.ActorStateSchema, StateSchemaInitialization: meta.StateSchemaInitialization}
 	eventsByID := eventsByID(lines)
 	path, pathSet := eventPath(branch.Head, eventsByID)
 	turnVersions := buildTurnVersionIndex(lines)
@@ -76,6 +76,15 @@ func snapshotFromLines(storyID, branchID string, meta StoryMeta, lines []StoryEv
 			snapshot.ContextCompactionRemoval = &removal
 		}
 	}
+	initializeActors := true
+	if storyStateSchemaPolicyRequiresOpeningDraft(meta.StateSchemaPolicy) && meta.StateSchemaInitialization != nil && meta.StateSchemaInitialization.Status == StateSchemaInitializationWaitingOpening {
+		initializeActors = false
+	}
+	if initializeActors {
+		if err := applyFrozenMissingInitialActors(state, meta.ActorStateSchema); err != nil {
+			return Snapshot{}, fmt.Errorf("补全冻结初始 Actor 失败: %w", err)
+		}
+	}
 	applyLegacyActorStateAliases(state, meta.ActorStateSchema)
 	if snapshot.CurrentTurn != nil && (snapshot.CurrentTurn.TurnResult == nil || len(snapshot.CurrentTurn.TurnResult.Choices) == 0) && snapshot.CurrentTurn.HotState == nil {
 		if legacy, ok := latestHotChoicesForHead(lines, branchID, snapshot.CurrentTurn.ID); ok {
@@ -119,16 +128,17 @@ func turnVersionKey(branchID, parentID string) string {
 
 func initialStoryState() map[string]any {
 	return map[string]any{
-		"on_stage":    []any{},
-		"actors":      map[string]any{},
-		"characters":  map[string]any{},
-		"events":      []any{},
-		"scene":       map[string]any{},
-		"inventory":   map[string]any{},
-		"resources":   map[string]any{},
-		"world_flags": []any{},
-		"rules":       []any{},
-		"threads":     []any{},
+		"on_stage":       []any{},
+		"actors":         map[string]any{},
+		"actor_archives": map[string]any{},
+		"characters":     map[string]any{},
+		"events":         []any{},
+		"scene":          map[string]any{},
+		"inventory":      map[string]any{},
+		"resources":      map[string]any{},
+		"world_flags":    []any{},
+		"rules":          []any{},
+		"threads":        []any{},
 	}
 }
 
@@ -151,11 +161,12 @@ func normalizeChoiceListLimit(input []string, limit int) []string {
 	seen := map[string]bool{}
 	for _, choice := range input {
 		choice = strings.TrimSpace(choice)
-		if choice == "" || seen[choice] {
+		key := normalizedChoiceKey(choice)
+		if key == "" || seen[key] {
 			continue
 		}
 		choices = append(choices, choice)
-		seen[choice] = true
+		seen[key] = true
 		if len(choices) >= limit {
 			break
 		}

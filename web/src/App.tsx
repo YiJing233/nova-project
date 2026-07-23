@@ -5,7 +5,7 @@ import { checkForUpdate, fetchSettings } from '@/features/settings/api'
 import { applyFontSettings, fontSettingsFromEffective } from '@/features/settings/font-variables'
 import { markAutoUpdateChecked, shouldRunAutoUpdateCheck, UPDATE_CHECK_RESULT_EVENT } from '@/features/settings/update-check-cache'
 import type { UpdateCheckResult } from '@/features/settings/types'
-import { getLoreItems, importCharacterCard, previewCharacterCard, setChapterConfirmed, type CharacterCardPreview, type LoreItem, type WorkspaceSearchResult } from '@/lib/api'
+import { getLoreItems, importCharacterCard, previewCharacterCard, setChapterConfirmed, switchWorkspace, type CharacterCardPreview, type LoreItem, type WorkspaceSearchResult } from '@/lib/api'
 import { CommandPalette } from '@/components/common/command-palette'
 import { useWorkspace } from '@/hooks/useWorkspace'
 import { useAgentChat } from '@/hooks/useAgentChat'
@@ -27,6 +27,7 @@ import {
   type Tab,
 } from '@/components/workbench/TabController'
 import { ModeRouter } from '@/components/workbench/ModeRouter'
+import type { EditorFlushHandler } from '@/components/Editor/MarkdownEditor'
 import {
   CharacterCardImportDialog,
   type CharacterCardTargetMode,
@@ -35,6 +36,12 @@ import { APP_VERSION } from '@/app-version'
 import { RemoteAccessLogin } from '@/components/RemoteAccessLogin'
 import { OnboardingGuide, type OnboardingNavigationTarget } from '@/features/onboarding/OnboardingGuide'
 import { SETTINGS_SECTION_EVENT, WRITING_AGENT_INIT_EVENT } from '@/features/onboarding/events'
+import { isWorkspaceChangeForWorkspace, type WorkspaceChangeEvent } from '@/features/changes/types'
+import {
+  AUTOSAVE_CONFLICT_PRESERVED_EVENT,
+  type AutosaveConflictPreservedDetail,
+} from '@/lib/autosave/rebase-with-recovery'
+import { useWorkbenchNotice } from '@/features/notices/use-workbench-notice'
 
 const PROJECT_VISIBLE_KEY = 'nova.layout.projectVisible'
 const ACTIVITY_BAR_EXPANDED_KEY = 'nova.layout.activityBarExpanded'
@@ -44,11 +51,9 @@ const CONTENT_MODE_STORAGE_KEY = 'nova:content-mode'
 const MAX_OPEN_TABS_FALLBACK = 5
 const AUTO_SAVE_ENABLED_FALLBACK = true
 const AUTO_SAVE_DELAY_FALLBACK_MS = 1500
-const DISMISSED_UPDATE_VERSION_KEY = 'nova.update.dismissedLatestVersion'
 type SidebarView = 'outline' | 'files' | 'search'
 type WritingRightPanel = Extract<RightPanel, 'ai'> | null
 type BooksReturnMode = 'ide' | 'interactive'
-type UpdateNotice = { latestVersion: string }
 
 function App() {
   const { t } = useTranslation()
@@ -65,7 +70,6 @@ function App() {
   const [editorAutoSaveEnabled, setEditorAutoSaveEnabled] = useState(AUTO_SAVE_ENABLED_FALLBACK)
   const [editorAutoSaveDelayMs, setEditorAutoSaveDelayMs] = useState(AUTO_SAVE_DELAY_FALLBACK_MS)
   const [updateCheckEnabled, setUpdateCheckEnabled] = useState<boolean | null>(null)
-  const [updateNotice, setUpdateNotice] = useState<UpdateNotice | null>(null)
   const [motionIntensity, setMotionIntensity] = useState('system')
   const [novaDir, setNovaDir] = useState('')
   const [sidebarView, setSidebarView] = useState<SidebarView>('outline')
@@ -76,6 +80,7 @@ function App() {
   const [characterCardTargetMode, setCharacterCardTargetMode] = useState<CharacterCardTargetMode>('new_book')
   const [characterCardBookTitle, setCharacterCardBookTitle] = useState('')
   const [characterCardUserName, setCharacterCardUserName] = useState('')
+  const [characterCardSemanticClassification, setCharacterCardSemanticClassification] = useState(true)
   const [characterCardPreviewing, setCharacterCardPreviewing] = useState(false)
   const [characterCardImporting, setCharacterCardImporting] = useState(false)
   const [characterCardError, setCharacterCardError] = useState('')
@@ -88,6 +93,7 @@ function App() {
   const updateCheckInFlightRef = useRef(false)
   const tabActivationsRef = useRef<Map<string, number>>(new Map())
   const tabActivationCounterRef = useRef(0)
+  const editorFlushHandlerRef = useRef<EditorFlushHandler | null>(null)
 
   const rightPanel = useWorkspaceStore((state) => state.rightPanel)
   const commandOpen = useWorkspaceStore((state) => state.commandOpen)
@@ -106,8 +112,8 @@ function App() {
   }, [mode])
 
   const {
-    tree, loading, selectedFile, fileContent, workspace, workspaceLoaded, summary, books,
-    selectFile, clearSelectedFile, saveFileContent, createItem, deleteItem, renameItem, copyItem, moveItem,
+    tree, loading, selectedFile, fileContent, fileRevision, workspace, workspaceLoaded, summary, books, bookSortMode,
+    selectFile, clearSelectedFile, saveFileDraft, createItem, deleteItem, renameItem, copyItem, moveItem,
     refresh, refreshSummary, refreshAfterAgentFileChange, refreshAll, refreshBooks, setWorkspace,
   } = useWorkspace({ autoRefreshEnabled: workspaceAutoRefreshEnabled })
 
@@ -115,10 +121,38 @@ function App() {
     setVersionRefreshSignal(value => value + 1)
   }, [])
 
+  const handleEditorFlushHandlerChange = useCallback((handler: EditorFlushHandler | null) => {
+    editorFlushHandlerRef.current = handler
+  }, [])
+
+  const flushEditorDraft = useCallback(async () => {
+    const handler = editorFlushHandlerRef.current
+    if (!handler) return true
+    try {
+      return await handler()
+    } catch (error) {
+      console.error('导航前保存编辑器草稿失败', error)
+      toast.error(t('editor.saveFailed'))
+      return false
+    }
+  }, [t])
+
   const handleAgentFileChange = useCallback(async (path?: string) => {
     await refreshAfterAgentFileChange(path)
     notifyVersionChange()
   }, [notifyVersionChange, refreshAfterAgentFileChange])
+
+  const handleReviewedWorkspaceChange = useCallback(async (paths: string[]) => {
+    const currentPath = selectedFile && paths.includes(selectedFile) ? selectedFile : undefined
+    await handleAgentFileChange(currentPath)
+  }, [handleAgentFileChange, selectedFile])
+
+  const handleWorkspaceChangeEvent = useCallback(async (event: WorkspaceChangeEvent) => {
+    if (!isWorkspaceChangeForWorkspace(event, workspace)) return
+    const paths = Array.from(new Set([...(event.affected_paths ?? []), ...(event.paths ?? []), ...(event.path ? [event.path] : [])]))
+    const path = selectedFile && paths.includes(selectedFile) ? selectedFile : paths[0]
+    await handleAgentFileChange(path)
+  }, [handleAgentFileChange, selectedFile, workspace])
 
   const {
     messages,
@@ -140,6 +174,9 @@ function App() {
     stop,
     loadSessions,
     loadHistory,
+    loadEarlierHistory,
+    hasEarlierMessages,
+    isLoadingEarlierHistory,
     resumeActiveChat,
     createChatSession,
     switchChatSession,
@@ -154,7 +191,9 @@ function App() {
     removeStyleScene,
     addTextSelection,
     removeTextSelection,
-  } = useAgentChat({ onAgentFileChange: handleAgentFileChange })
+  } = useAgentChat({ workspace, onAgentFileChange: handleAgentFileChange, onWorkspaceChange: handleWorkspaceChangeEvent })
+
+  const { notice, applyUpdateCheckResult, dismissNotice } = useWorkbenchNotice({ messages, isStreaming })
 
   const handleChatPlanModeChange = useCallback((value: boolean) => {
     setPlanMode(value)
@@ -190,22 +229,6 @@ function App() {
     books.find((book) => book.path === workspace)?.name?.trim() ||
     workspace.replace(/\/+$/, '').split('/').pop() ||
     t('workbench.noBook')
-
-  const applyUpdateCheckResult = useCallback((result: UpdateCheckResult) => {
-    if (!result.update_available || !result.latest_version) {
-      setUpdateNotice(null)
-      return
-    }
-    const dismissedVersion = readDismissedUpdateVersion()
-    setUpdateNotice(dismissedVersion === result.latest_version ? null : { latestVersion: result.latest_version })
-  }, [])
-
-  const dismissUpdateNotice = useCallback(() => {
-    setUpdateNotice((current) => {
-      if (current?.latestVersion) writeDismissedUpdateVersion(current.latestVersion)
-      return null
-    })
-  }, [])
 
   const touchTab = useCallback((key: string) => {
     tabActivationCounterRef.current += 1
@@ -259,6 +282,18 @@ function App() {
     window.addEventListener(UPDATE_CHECK_RESULT_EVENT, onUpdateCheckResult)
     return () => window.removeEventListener(UPDATE_CHECK_RESULT_EVENT, onUpdateCheckResult)
   }, [applyUpdateCheckResult])
+
+  useEffect(() => {
+    const onConflictPreserved = (event: Event) => {
+      const detail = (event as CustomEvent<AutosaveConflictPreservedDetail>).detail
+      if (!detail?.id) return
+      toast.warning(t('common.autosave.conflictPreserved'), {
+        description: t('common.autosave.conflictPreservedDetail', { id: detail.id }),
+      })
+    }
+    window.addEventListener(AUTOSAVE_CONFLICT_PRESERVED_EVENT, onConflictPreserved)
+    return () => window.removeEventListener(AUTOSAVE_CONFLICT_PRESERVED_EVENT, onConflictPreserved)
+  }, [t])
 
   useEffect(() => {
     if (updateCheckEnabled !== true || updateCheckInFlightRef.current || !shouldRunAutoUpdateCheck()) return
@@ -351,11 +386,31 @@ function App() {
     notifyVersionChange()
   }
 
-  const handleSaveCurrentFile = useCallback(async (path: string, content: string) => {
-    const saved = await saveFileContent(path, content)
-    if (saved) notifyVersionChange()
+  const handleQuickWorkspaceSwitch = useCallback(async (newPath: string): Promise<boolean> => {
+    if (!newPath || newPath === workspace) return true
+    if (!(await flushEditorDraft())) return false
+    try {
+      const result = await switchWorkspace(newPath)
+      const nextWorkspace = result.workspace || newPath
+      console.info('[App.tsx] 标题栏切换书籍完成', { from: workspace, to: nextWorkspace })
+      setWorkspace(nextWorkspace)
+      await refreshAll()
+      notifyVersionChange()
+      return true
+    } catch (error) {
+      console.error('[App.tsx] 标题栏切换书籍失败', { from: workspace, to: newPath, error })
+      toast.error(t('workbench.bookSwitcher.switchError'), {
+        description: error instanceof Error ? error.message : String(error),
+      })
+      return false
+    }
+  }, [flushEditorDraft, notifyVersionChange, refreshAll, setWorkspace, t, workspace])
+
+  const handleSaveCurrentFile = useCallback(async (path: string, content: string, baseRevision: string) => {
+    const saved = await saveFileDraft(path, content, baseRevision)
+    notifyVersionChange()
     return saved
-  }, [notifyVersionChange, saveFileContent])
+  }, [notifyVersionChange, saveFileDraft])
 
   const handleCreateItem = useCallback(async (path: string, type: 'file' | 'dir') => {
     await createItem(path, type)
@@ -363,12 +418,14 @@ function App() {
   }, [createItem, notifyVersionChange])
 
   const handleDeleteItem = useCallback(async (path: string) => {
+    if ((selectedFile === path || selectedFile?.startsWith(`${path}/`)) && !(await flushEditorDraft())) return
     await deleteItem(path)
     setOpenTabs((prev) => prev.filter((tab) => tab.path !== path && !tab.path.startsWith(`${path}/`)))
     notifyVersionChange()
-  }, [deleteItem, notifyVersionChange])
+  }, [deleteItem, flushEditorDraft, notifyVersionChange, selectedFile])
 
   const handleRenameItem = useCallback(async (path: string, newName: string) => {
+    if ((selectedFile === path || selectedFile?.startsWith(`${path}/`)) && !(await flushEditorDraft())) return
     await renameItem(path, newName)
     const parent = path.replace(/\/[^/]*$/, '')
     const newPath = parent ? `${parent}/${newName}` : newName
@@ -378,7 +435,7 @@ function App() {
       return tab
     })))
     notifyVersionChange()
-  }, [notifyVersionChange, renameItem])
+  }, [flushEditorDraft, notifyVersionChange, renameItem, selectedFile])
 
   const handleCopyItem = useCallback(async (from: string, to: string) => {
     await copyItem(from, to)
@@ -386,6 +443,7 @@ function App() {
   }, [copyItem, notifyVersionChange])
 
   const handleMoveItem = useCallback(async (from: string, to: string) => {
+    if ((selectedFile === from || selectedFile?.startsWith(`${from}/`)) && !(await flushEditorDraft())) return
     await moveItem(from, to)
     setOpenTabs((prev) => dedupeTabs(prev.map((tab) => {
       if (tab.path === from) return { kind: 'file', path: to }
@@ -393,9 +451,10 @@ function App() {
       return tab
     })))
     notifyVersionChange()
-  }, [moveItem, notifyVersionChange])
+  }, [flushEditorDraft, moveItem, notifyVersionChange, selectedFile])
 
   const handleSelectFile = useCallback(async (path: string) => {
+    if (selectedFile !== path && !(await flushEditorDraft())) return false
     setSelectedChapterId(path)
     const key = `file:${path}`
     setOpenTabs((prev) => {
@@ -404,14 +463,15 @@ function App() {
     })
     setActiveTabKey(key)
     await selectFile(path)
-  }, [limitTabs, selectFile, setSelectedChapterId])
+    return true
+  }, [flushEditorDraft, limitTabs, selectFile, selectedFile, setSelectedChapterId])
 
   const handleSelectSearchResult = useCallback(async (result: WorkspaceSearchResult, query: string) => {
     setSettingsOpen(false)
     setMode('ide')
     setProjectVisible(true)
     setSidebarView('search')
-    await handleSelectFile(result.path)
+    if (!(await handleSelectFile(result.path))) return
     setEditorSearchIntent({
       path: result.path,
       query,
@@ -424,6 +484,7 @@ function App() {
     setCharacterCardFile(null)
     setCharacterCardPreview(null)
     setCharacterCardTargetMode('new_book')
+    setCharacterCardSemanticClassification(true)
     setCharacterCardBookTitle('')
     setCharacterCardUserName('')
     setCharacterCardPreviewing(false)
@@ -484,6 +545,7 @@ function App() {
         targetMode: characterCardTargetMode,
         bookTitle: characterCardTargetMode === 'new_book' ? characterCardBookTitle.trim() : undefined,
         userCharacterName: characterCardPreview?.user_placeholder_found ? characterCardUserName.trim() : undefined,
+        loreClassification: characterCardSemanticClassification ? 'semantic' : 'heuristic',
       })
       toast.success(result.message || t('importCard.importSuccess', { name: result.name }))
       if (characterCardTargetMode === 'new_book') {
@@ -506,32 +568,33 @@ function App() {
     } finally {
       setCharacterCardImporting(false)
     }
-  }, [characterCardBookTitle, characterCardFile, characterCardPreview?.user_placeholder_found, characterCardTargetMode, characterCardUserName, notifyVersionChange, refresh, refreshAll, resetCharacterCardImport, setMode, t, workspace])
+  }, [characterCardBookTitle, characterCardFile, characterCardPreview, characterCardSemanticClassification, characterCardTargetMode, characterCardUserName, notifyVersionChange, refresh, refreshAll, resetCharacterCardImport, setMode, t, workspace])
 
-  const handleActivateTab = useCallback((tab: Tab) => {
+  const handleActivateTab = useCallback(async (tab: Tab) => {
     const key = tabKey(tab)
-    setActiveTabKey(key)
-    if (selectedFile !== tab.path) void handleSelectFile(tab.path)
+    if (selectedFile === tab.path) {
+      setActiveTabKey(key)
+      return
+    }
+    await handleSelectFile(tab.path)
   }, [handleSelectFile, selectedFile])
 
-  const handleCloseTab = useCallback((tab: Tab) => {
+  const handleCloseTab = useCallback(async (tab: Tab) => {
     const key = tabKey(tab)
-    setOpenTabs((prev) => {
-      const idx = prev.findIndex((item) => tabKey(item) === key)
-      if (idx === -1) return prev
-      const next = prev.filter((item) => tabKey(item) !== key)
-      if (activeTabKey === key) {
-        if (next.length === 0) {
-          setActiveTabKey(null)
-          clearSelectedFile()
-        } else {
-          const fallback = next[idx] ?? next[idx - 1] ?? next[0]
-          handleActivateTab(fallback)
-        }
-      }
-      return next
-    })
-  }, [activeTabKey, clearSelectedFile, handleActivateTab])
+    const idx = openTabs.findIndex((item) => tabKey(item) === key)
+    if (idx === -1) return
+    if (activeTabKey === key && !(await flushEditorDraft())) return
+    const next = openTabs.filter((item) => tabKey(item) !== key)
+    setOpenTabs(next)
+    if (activeTabKey !== key) return
+    if (next.length === 0) {
+      setActiveTabKey(null)
+      clearSelectedFile()
+      return
+    }
+    const fallback = next[idx] ?? next[idx - 1] ?? next[0]
+    await handleActivateTab(fallback)
+  }, [activeTabKey, clearSelectedFile, flushEditorDraft, handleActivateTab, openTabs])
 
   const triggerSave = useCallback(() => setSaveSignal((value) => value + 1), [])
   const continueWriting = useCallback(() => {
@@ -589,7 +652,7 @@ function App() {
       setSettingsOpen(true)
       window.setTimeout(() => {
         window.dispatchEvent(new CustomEvent(SETTINGS_SECTION_EVENT, {
-          detail: { section: 'model', layer: 'user' },
+          detail: { section: 'model' },
         }))
       }, 0)
       return
@@ -689,10 +752,12 @@ function App() {
         interactiveRightVisible={interactiveRightVisible}
         novaDir={novaDir}
         books={books}
+        bookSortMode={bookSortMode}
         tree={tree}
         loading={loading}
         selectedFile={selectedFile}
         fileContent={fileContent}
+        fileRevision={fileRevision}
         openTabs={openTabs}
         activeTabKey={activeTabKey}
         sidebarView={sidebarView}
@@ -711,16 +776,20 @@ function App() {
         styleScenes={styleScenes}
         textSelections={textSelections}
         chatPlanMode={planMode}
+        hasEarlierMessages={hasEarlierMessages}
+        isLoadingEarlierHistory={isLoadingEarlierHistory}
         onSetMode={handleSetMode}
         onToggleActivityBarExpanded={() => setActivityBarExpanded((value) => !value)}
         onToggleProjectVisible={() => setProjectVisible((value) => !value)}
         onSetRightPanel={handleSetRightPanel}
         onToggleSettings={() => setSettingsOpen((open) => !open)}
         onCloseSettings={() => setSettingsOpen(false)}
-        updateNotice={updateNotice}
-        onDismissUpdateNotice={dismissUpdateNotice}
+        notice={notice}
+        onDismissNotice={dismissNotice}
         onToggleInteractiveRightPanel={() => setInteractiveRightVisible((value) => !value)}
         onSwitchBook={handleWorkspaceSwitch}
+        onQuickSwitchBook={handleQuickWorkspaceSwitch}
+        onBeforeWorkspaceSwitch={flushEditorDraft}
         onBooksChange={refreshBooks}
         onOpenCharacterCardImport={handleOpenCharacterCardImportFromBooks}
         onSetSidebarView={setSidebarView}
@@ -736,11 +805,14 @@ function App() {
         onActivateTab={handleActivateTab}
         onCloseTab={handleCloseTab}
         onSaveCurrentFile={handleSaveCurrentFile}
+        onEditorFlushHandlerChange={handleEditorFlushHandlerChange}
+        onWorkspaceChanged={handleReviewedWorkspaceChange}
         onQuoteSelection={addTextSelection}
         onCreateChatSession={createChatSession}
         onSwitchChatSession={switchChatSession}
         onRenameChatSession={renameChatSession}
         onDeleteChatSession={deleteChatSession}
+        onLoadEarlierHistory={loadEarlierHistory}
         onSend={send}
         onAnalyzeContext={analyzeContext}
         onStop={stop}
@@ -786,6 +858,7 @@ function App() {
         targetMode={characterCardTargetMode}
         bookTitle={characterCardBookTitle}
         userCharacterName={characterCardUserName}
+        semanticClassification={characterCardSemanticClassification}
         previewing={characterCardPreviewing}
         importing={characterCardImporting}
         error={characterCardError}
@@ -795,6 +868,7 @@ function App() {
         onTargetModeChange={setCharacterCardTargetMode}
         onBookTitleChange={setCharacterCardBookTitle}
         onUserCharacterNameChange={setCharacterCardUserName}
+        onSemanticClassificationChange={setCharacterCardSemanticClassification}
         onImport={handleCharacterCardImport}
       />
       <RemoteAccessLogin />
@@ -838,28 +912,12 @@ function normalizeAutoSaveDelayMs(value: number | null | undefined) {
   return Math.floor(value)
 }
 
-function readDismissedUpdateVersion() {
-  try {
-    return window.localStorage.getItem(DISMISSED_UPDATE_VERSION_KEY) || ''
-  } catch {
-    return ''
-  }
-}
-
-function writeDismissedUpdateVersion(version: string) {
-  try {
-    window.localStorage.setItem(DISMISSED_UPDATE_VERSION_KEY, version)
-  } catch {
-    // localStorage 不可写时，当前会话内的关闭状态仍由 React state 保持。
-  }
-}
-
 function isIdeWorkspacePanel(panel: RightPanel): panel is 'lore' | 'creator' | 'teller' | 'versions' {
   return panel === 'lore' || panel === 'creator' || panel === 'teller' || panel === 'versions'
 }
 
 function toWritingRightPanel(panel: RightPanel): WritingRightPanel {
-  return panel === 'ai' ? 'ai' : null
+  return panel === 'ai' ? panel : null
 }
 
 function normalizeAppTheme(theme?: string) {

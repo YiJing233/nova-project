@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log"
 	"strings"
 
@@ -21,6 +22,12 @@ func (h *Handlers) HandleAutomations(ctx context.Context, c *app.RequestContext)
 		return
 	}
 	writeJSON(c, consts.StatusOK, automation.ListResult{Tasks: tasks})
+}
+
+func (h *Handlers) HandleAutomationTemplates(ctx context.Context, c *app.RequestContext) {
+	writeJSON(c, consts.StatusOK, automation.TemplateListResult{
+		Templates: h.app.AutomationTemplates(c.Query("locale")),
+	})
 }
 
 func (h *Handlers) HandleAutomationInbox(ctx context.Context, c *app.RequestContext) {
@@ -85,12 +92,35 @@ func (h *Handlers) HandleAutomationCreate(ctx context.Context, c *app.RequestCon
 func (h *Handlers) HandleAutomationUpdate(ctx context.Context, c *app.RequestContext) {
 	id := c.Param("id")
 	var req automation.Task
-	if err := c.BindJSON(&req); err != nil {
+	body := c.Request.Body()
+	if err := json.Unmarshal(body, &req); err != nil {
 		writeError(c, consts.StatusBadRequest, err.Error())
 		return
 	}
-	task, err := h.app.UpdateAutomation(id, req)
+	var metadata struct {
+		BaseRevision string `json:"base_revision"`
+	}
+	if err := json.Unmarshal(body, &metadata); err != nil {
+		writeError(c, consts.StatusBadRequest, err.Error())
+		return
+	}
+	baseRevision := strings.TrimSpace(metadata.BaseRevision)
+	if baseRevision == "" {
+		writeJSON(c, consts.StatusBadRequest, map[string]any{
+			"error": messageKey(c, "api.automation.baseRevisionRequired"),
+			"code":  "base_revision_required",
+		})
+		return
+	}
+	task, err := h.app.UpdateAutomationIfRevision(id, req, baseRevision)
 	if err != nil {
+		if errors.Is(err, automation.ErrRevisionConflict) {
+			writeJSON(c, consts.StatusConflict, map[string]any{
+				"error": messageKey(c, "api.resource.revisionConflict"),
+				"code":  "revision_conflict",
+			})
+			return
+		}
 		writeError(c, consts.StatusBadRequest, err.Error())
 		return
 	}
@@ -115,9 +145,6 @@ func (h *Handlers) HandleAutomationRun(ctx context.Context, c *app.RequestContex
 }
 
 func (h *Handlers) HandleAutomationRunStream(ctx context.Context, c *app.RequestContext) {
-	if !h.requireWorkspace(c) {
-		return
-	}
 	var req struct {
 		TriggerEvidence []automation.TriggerEvidence `json:"trigger_evidence"`
 	}
@@ -151,9 +178,6 @@ func (h *Handlers) HandleAutomationRunStreamByID(ctx context.Context, c *app.Req
 }
 
 func (h *Handlers) HandleAutomationRunChatStream(ctx context.Context, c *app.RequestContext) {
-	if !h.requireWorkspace(c) {
-		return
-	}
 	var req struct {
 		Message string `json:"message"`
 	}

@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { DndContext, PointerSensor, closestCenter, useSensor, useSensors, type DragEndEvent } from '@dnd-kit/core'
 import { SortableContext, arrayMove, useSortable, verticalListSortingStrategy } from '@dnd-kit/sortable'
 import { CSS } from '@dnd-kit/utilities'
-import { GripVertical, Pin, PinOff, Search, Settings2 } from 'lucide-react'
+import { CircleDashed, GripVertical, MessageCircle, Pin, PinOff, Search, Settings2 } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import type { FileNode } from '@/hooks/useWorkspace'
 import type { DocumentPreview } from '@/lib/api'
@@ -19,6 +19,7 @@ const DEFAULT_PINNED_PATHS = [...LEGACY_DEFAULT_PINNED_PATHS, 'ideas.md', 'setti
 interface BookSettingItem {
   path: string
   title: string
+  exists: boolean
 }
 
 interface BookSettingsShortcutsProps {
@@ -29,6 +30,7 @@ interface BookSettingsShortcutsProps {
   chapterPlans: DocumentPreview[]
   selectedFile: string | null
   onSelectFile: (path: string) => void | Promise<void>
+  onRequestCreate?: (item: { path: string; title: string }) => void
 }
 
 /** 工作区级书籍设定收藏：动态发现文件，并持久化 Pin 与排序偏好。 */
@@ -40,16 +42,20 @@ export function BookSettingsShortcuts({
   chapterPlans,
   selectedFile,
   onSelectFile,
+  onRequestCreate,
 }: BookSettingsShortcutsProps) {
   const { t } = useTranslation()
   const [query, setQuery] = useState('')
   const [pinnedPaths, setPinnedPaths] = useState<string[]>(() => readPinnedPaths(workspace))
+  const [missingItem, setMissingItem] = useState<BookSettingItem | null>(null)
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
   const candidates = useMemo(() => discoverBookSettings({ tree, outline, ideas, chapterPlans, t }), [chapterPlans, ideas, outline, t, tree])
   const candidatesByPath = useMemo(() => new Map(candidates.map((item) => [item.path, item])), [candidates])
+  const visibleMissingItem = missingItem && !candidatesByPath.get(missingItem.path)?.exists ? missingItem : null
 
   useEffect(() => {
     setPinnedPaths(readPinnedPaths(workspace))
+    setMissingItem(null)
   }, [workspace])
 
   useEffect(() => {
@@ -66,6 +72,15 @@ export function BookSettingsShortcuts({
 
   const togglePinned = (path: string) => {
     setPinnedPaths((current) => current.includes(path) ? current.filter((item) => item !== path) : [...current, path])
+  }
+
+  const selectItem = (item: BookSettingItem) => {
+    if (!item.exists) {
+      setMissingItem(item)
+      return
+    }
+    setMissingItem(null)
+    void onSelectFile(item.path)
   }
 
   const handleDragEnd = (event: DragEndEvent) => {
@@ -106,8 +121,8 @@ export function BookSettingsShortcuts({
                         key={item.path}
                         item={item}
                         pinned={pinnedPaths.includes(item.path)}
-                        selected={selectedFile === item.path}
-                        onSelect={onSelectFile}
+                        selected={item.exists && selectedFile === item.path}
+                        onSelect={selectItem}
                         onTogglePinned={togglePinned}
                       />
                     ))}
@@ -122,16 +137,19 @@ export function BookSettingsShortcuts({
         </Popover>
       </div>
       {pinnedItems.length > 0 ? (
-        <div className="flex flex-wrap gap-1">
+        <div data-testid="book-setting-shortcuts" className="grid grid-cols-[repeat(auto-fill,minmax(4rem,1fr))] gap-1">
           {pinnedItems.map((item) => (
             <button
               key={item.path}
               type="button"
-              className={`nova-nav-item max-w-full px-2.5 py-1 text-[11px] font-medium ${selectedFile === item.path ? 'is-active' : 'bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]'}`}
-              title={item.title}
-              onClick={() => onSelectFile(item.path)}
+              data-book-setting-state={item.exists ? 'ready' : 'missing'}
+              aria-label={item.exists ? undefined : t('planning.bookSettingMissingTooltip', { title: item.title, path: item.path })}
+              className={`nova-nav-item relative max-w-full px-2.5 py-1 text-[11px] font-medium ${item.exists && selectedFile === item.path ? 'is-active' : item.exists ? 'bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)]' : 'border border-dashed border-[color-mix(in_srgb,var(--nova-warning)_45%,var(--nova-border))] bg-[color-mix(in_srgb,var(--nova-warning-bg)_42%,var(--nova-surface-2))] pr-5 text-[var(--nova-text-muted)] hover:border-[var(--nova-warning)] hover:bg-[var(--nova-warning-bg)]'}`}
+              title={item.exists ? item.title : t('planning.bookSettingMissingTooltip', { title: item.title, path: item.path })}
+              onClick={() => selectItem(item)}
             >
               <span className="block truncate">{item.title}</span>
+              {!item.exists ? <CircleDashed aria-hidden="true" className="absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[color-mix(in_srgb,var(--nova-warning)_68%,var(--nova-text-faint))]" /> : null}
             </button>
           ))}
         </div>
@@ -140,6 +158,18 @@ export function BookSettingsShortcuts({
           {t('planning.noPinnedBookSettings')}
         </div>
       )}
+      {visibleMissingItem ? (
+        <div role="status" className="rounded-[var(--nova-radius)] border border-[var(--nova-warning)]/25 bg-[var(--nova-warning-bg)] px-2.5 py-2">
+          <div className="text-[11px] font-medium text-[var(--nova-warning)]">{t('planning.bookSettingMissingTitle', { title: visibleMissingItem.title })}</div>
+          <div className="mt-0.5 text-[10px] leading-4 text-[var(--nova-text-muted)]">{t('planning.bookSettingMissingDescription', { path: visibleMissingItem.path })}</div>
+          {onRequestCreate ? (
+            <Button type="button" variant="ghost" size="xs" className="mt-1.5 h-6 gap-1 px-1.5 text-[10px] text-[var(--nova-warning)] hover:bg-[var(--nova-hover)]" onClick={() => onRequestCreate(visibleMissingItem)}>
+              <MessageCircle className="h-3 w-3" />
+              {t('planning.bookSettingAskAgent')}
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
     </section>
   )
 }
@@ -148,19 +178,23 @@ function SortableSettingRow({ item, pinned, selected, onSelect, onTogglePinned }
   item: BookSettingItem
   pinned: boolean
   selected: boolean
-  onSelect: (path: string) => void | Promise<void>
+  onSelect: (item: BookSettingItem) => void
   onTogglePinned: (path: string) => void
 }) {
   const { t } = useTranslation()
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({ id: item.path, disabled: !pinned })
+  const missingTooltip = t('planning.bookSettingMissingTooltip', { title: item.title, path: item.path })
   return (
-    <div ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={`flex items-center gap-1 rounded-md border px-1 py-1 ${selected ? 'border-[var(--nova-border)] bg-[var(--nova-active)]' : 'border-transparent bg-[var(--nova-surface)]'} ${isDragging ? 'z-10 opacity-70 shadow-lg' : ''}`}>
+    <div ref={setNodeRef} style={{ transform: CSS.Transform.toString(transform), transition }} className={`flex items-center gap-1 rounded-md border px-1 py-1 ${selected ? 'border-[var(--nova-border)] bg-[var(--nova-active)]' : item.exists ? 'border-transparent bg-[var(--nova-surface)]' : 'border-dashed border-[color-mix(in_srgb,var(--nova-warning)_45%,var(--nova-border))] bg-[color-mix(in_srgb,var(--nova-warning-bg)_32%,var(--nova-surface))]'} ${isDragging ? 'z-10 opacity-70 shadow-lg' : ''}`}>
       <button type="button" disabled={!pinned} aria-label={t('planning.reorderBookSetting', { title: item.title })} className="cursor-grab p-1 text-[var(--nova-text-faint)] disabled:cursor-default disabled:opacity-20" {...attributes} {...listeners}>
         <GripVertical className="h-3.5 w-3.5" />
       </button>
-      <button type="button" className="min-w-0 flex-1 px-1 text-left" onClick={() => onSelect(item.path)}>
+      <button type="button" data-book-setting-state={item.exists ? 'ready' : 'missing'} aria-label={item.exists ? undefined : missingTooltip} title={item.exists ? undefined : missingTooltip} className="min-w-0 flex-1 px-1 text-left" onClick={() => onSelect(item)}>
         <span className="block truncate text-xs text-[var(--nova-text)]">{item.title}</span>
-        <span className="block truncate text-[10px] text-[var(--nova-text-faint)]">{item.path}</span>
+        <span className="flex min-w-0 items-center gap-1 truncate text-[10px] text-[var(--nova-text-faint)]">
+          {!item.exists ? <CircleDashed aria-hidden="true" className="h-3 w-3 shrink-0 text-[color-mix(in_srgb,var(--nova-warning)_68%,var(--nova-text-faint))]" /> : null}
+          <span className="truncate">{item.path}</span>
+        </span>
       </button>
       <button type="button" aria-label={pinned ? t('planning.unpinBookSetting', { title: item.title }) : t('planning.pinBookSetting', { title: item.title })} className="rounded p-1.5 text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]" onClick={() => onTogglePinned(item.path)}>
         {pinned ? <PinOff className="h-3.5 w-3.5" /> : <Pin className="h-3.5 w-3.5" />}
@@ -176,19 +210,24 @@ function discoverBookSettings({ tree, outline, ideas, chapterPlans, t }: {
   chapterPlans: DocumentPreview[]
   t: (key: string) => string
 }): BookSettingItem[] {
-  const known = new Map<string, string>([
-    [outline?.path ?? 'setting/outline.md', t('planning.outlineTab')],
-    ['CREATOR.md', t('planning.creatorRulesTab')],
-    ['setting/progress.md', t('planning.writingProgressTab')],
-    [ideas?.path ?? 'ideas.md', t('planning.ideas')],
-    ['setting/character-states.md', t('planning.characterStates')],
+  const paths = flattenFileTree(tree)
+  const existingPaths = new Set(paths)
+  const outlinePath = outline?.path ?? 'setting/outline.md'
+  const ideasPath = ideas?.path ?? 'ideas.md'
+  const known = new Map<string, BookSettingItem>([
+    [outlinePath, { path: outlinePath, title: t('planning.outlineTab'), exists: Boolean(outline) || existingPaths.has(outlinePath) }],
+    ['CREATOR.md', { path: 'CREATOR.md', title: t('planning.creatorRulesTab'), exists: existingPaths.has('CREATOR.md') }],
+    ['setting/progress.md', { path: 'setting/progress.md', title: t('planning.writingProgressTab'), exists: existingPaths.has('setting/progress.md') }],
+    [ideasPath, { path: ideasPath, title: t('planning.ideas'), exists: Boolean(ideas) || existingPaths.has(ideasPath) }],
+    ['setting/character-states.md', { path: 'setting/character-states.md', title: t('planning.characterStates'), exists: existingPaths.has('setting/character-states.md') }],
   ])
   const chapterPlanPaths = new Set(chapterPlans.map((plan) => plan.path))
-  for (const path of flattenFileTree(tree)) {
+  for (const path of paths) {
     if (!isBookSettingPath(path, chapterPlanPaths)) continue
-    if (!known.has(path)) known.set(path, titleFromPath(path))
+    const current = known.get(path)
+    known.set(path, current ? { ...current, exists: true } : { path, title: titleFromPath(path), exists: true })
   }
-  return [...known].map(([path, title]) => ({ path, title }))
+  return [...known.values()]
 }
 
 function isBookSettingPath(path: string, chapterPlanPaths: Set<string>) {

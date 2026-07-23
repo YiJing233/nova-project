@@ -1,20 +1,20 @@
 package config
 
 import (
-	"crypto/sha256"
+	"context"
 	"errors"
 	"fmt"
-	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
 
 	toml "github.com/pelletier/go-toml/v2"
 
+	"denova/internal/revisionfile"
 	"denova/internal/workspacepath"
 )
 
-// Settings 是用户可见且可在三层配置中持久化的字段。
+// Settings 是用户设置的持久化模型。工作区文件只会从中取出 Agent 定制字段。
 // 指针类型用于区分 "未设置"（继承上层）与 "显式置零"。
 type Settings struct {
 
@@ -102,7 +102,7 @@ func stringPtr(v string) *string  { return &v }
 const (
 	DefaultWritingSkillName        = "novel-lite"
 	DefaultAgentIdleTimeoutSeconds = 0
-	DefaultAgentToolResultLimitKB  = 0
+	DefaultAgentToolResultLimitKB  = 1024
 	DefaultTraceCaptureLevel       = "summary"
 	DefaultTraceExporter           = "local"
 	DefaultTraceRetentionRuns      = 100
@@ -151,10 +151,11 @@ func DefaultSettings() Settings {
 		TraceExporter:               DefaultTraceExporter,
 		TraceRetentionRuns:          intPtr(DefaultTraceRetentionRuns),
 		AgentModels: AgentModelSettings{
-			IDE:            AgentModelOverride{EnableThinking: boolPtr(true)},
-			ConfigManager:  AgentModelOverride{EnableThinking: boolPtr(true)},
-			VersionSummary: AgentModelOverride{EnableThinking: boolPtr(false)},
-			ToolAgent:      AgentModelOverride{EnableThinking: boolPtr(false)},
+			IDE:              AgentModelOverride{EnableThinking: boolPtr(true)},
+			InteractiveStory: AgentModelOverride{EnableThinking: boolPtr(false)},
+			ConfigManager:    AgentModelOverride{EnableThinking: boolPtr(true)},
+			VersionSummary:   AgentModelOverride{EnableThinking: boolPtr(false)},
+			ToolAgent:        AgentModelOverride{EnableThinking: boolPtr(false)},
 		},
 		AgentTools:                 DefaultAgentToolSettings(),
 		AgentSkills:                AgentSkillSettings{},
@@ -342,7 +343,7 @@ func Merge(parent, child Settings) Settings {
 const (
 	// UserConfigFilename 是用户级配置文件名（位于 DenovaDir 下）。
 	UserConfigFilename = "config.toml"
-	// WorkspaceConfigDir 是工作区级配置目录（相对于 workspace）。
+	// WorkspaceConfigDir 是工作区级 Agent 定制目录（相对于 workspace）。
 	WorkspaceConfigDir = workspacepath.DataDirName
 	// LegacyWorkspaceConfigDir 是改名前的工作区级配置目录，仅用于兼容已有工作区。
 	LegacyWorkspaceConfigDir = workspacepath.LegacyDataDirName
@@ -350,7 +351,7 @@ const (
 	WorkspaceConfigFilename = "config.toml"
 )
 
-// LayeredSettings 暴露三层快照及合并后的 effective 值。
+// LayeredSettings 暴露默认、全局、用户与工作区 Agent 定制快照及合并后的 effective 值。
 type LayeredSettings struct {
 	Default                   Settings                  `json:"default"`
 	Global                    Settings                  `json:"global"`
@@ -397,13 +398,17 @@ type SettingsRuntime struct {
 
 // ReadSettingsFile 读取 TOML，文件不存在时返回零值且无错误。
 func ReadSettingsFile(path string) (Settings, error) {
-	data, err := os.ReadFile(path)
+	snapshot, err := revisionfile.Read(context.Background(), path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return Settings{}, nil
-		}
 		return Settings{}, fmt.Errorf("读取 %s 失败: %w", path, err)
 	}
+	if !snapshot.Exists {
+		return Settings{}, nil
+	}
+	return decodeSettingsFile(path, snapshot.Content)
+}
+
+func decodeSettingsFile(path string, data []byte) (Settings, error) {
 	var s Settings
 	if err := toml.Unmarshal(data, &s); err != nil {
 		return Settings{}, fmt.Errorf("解析 %s 失败: %w", path, err)
@@ -418,39 +423,76 @@ func WriteSettingsFile(path string, s Settings) error {
 
 // WriteSettingsFileIfRevision 写入配置；expectedRevision 非空时要求磁盘文件未被外部改动。
 func WriteSettingsFileIfRevision(path string, s Settings, expectedRevision string) error {
-	if expectedRevision != "" {
-		current, err := SettingsFileRevision(path)
-		if err != nil {
-			return err
-		}
-		if current != expectedRevision {
-			return ErrSettingsRevisionConflict
-		}
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return fmt.Errorf("创建目录失败: %w", err)
-	}
 	data, err := toml.Marshal(sanitizeEditableSettings(s))
 	if err != nil {
 		return fmt.Errorf("序列化失败: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o644); err != nil {
+	if _, err := revisionfile.ReplaceIfRevision(
+		context.Background(),
+		path,
+		expectedRevision,
+		data,
+		revisionfile.Options{FileMode: 0o644, DirectoryMode: 0o755},
+	); err != nil {
+		if errors.Is(err, revisionfile.ErrRevisionConflict) {
+			return ErrSettingsRevisionConflict
+		}
 		return fmt.Errorf("写入 %s 失败: %w", path, err)
 	}
 	return nil
 }
 
+// MutateSettingsFile locks one settings path across reading, preparing and
+// committing the next TOML snapshot. Callers use it for read-modify-write
+// policies that must not be prepared from stale settings.
+func MutateSettingsFile(
+	path string,
+	expectedRevision string,
+	mutate func(Settings) (Settings, error),
+) (string, error) {
+	if mutate == nil {
+		return "", errors.New("settings mutator is nil")
+	}
+	result, err := revisionfile.Mutate(
+		context.Background(),
+		path,
+		revisionfile.Options{FileMode: 0o644, DirectoryMode: 0o755},
+		func(snapshot revisionfile.Snapshot) ([]byte, error) {
+			if expectedRevision != "" && snapshot.Revision != expectedRevision {
+				return nil, ErrSettingsRevisionConflict
+			}
+			current := Settings{}
+			if snapshot.Exists {
+				var decodeErr error
+				current, decodeErr = decodeSettingsFile(path, snapshot.Content)
+				if decodeErr != nil {
+					return nil, decodeErr
+				}
+			}
+			next, mutateErr := mutate(current)
+			if mutateErr != nil {
+				return nil, mutateErr
+			}
+			data, marshalErr := toml.Marshal(sanitizeEditableSettings(next))
+			if marshalErr != nil {
+				return nil, fmt.Errorf("序列化失败: %w", marshalErr)
+			}
+			return data, nil
+		},
+	)
+	if err != nil {
+		return "", err
+	}
+	return result.Revision, nil
+}
+
 // SettingsFileRevision 返回配置文件内容版本；缺失文件使用 stable sentinel。
 func SettingsFileRevision(path string) (string, error) {
-	data, err := os.ReadFile(path)
+	snapshot, err := revisionfile.Read(context.Background(), path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return "missing", nil
-		}
 		return "", fmt.Errorf("读取 %s 版本失败: %w", path, err)
 	}
-	sum := sha256.Sum256(data)
-	return fmt.Sprintf("sha256:%x", sum), nil
+	return snapshot.Revision, nil
 }
 
 // UserConfigPath 计算用户级配置路径。novaDir 已经过 normalizePath 处理。
@@ -461,24 +503,25 @@ func UserConfigPath(novaDir string) string {
 	return filepath.Join(novaDir, UserConfigFilename)
 }
 
-// WorkspaceConfigPath 计算工作区级配置路径。
+// WorkspaceConfigPath 计算工作区级 Agent 定制路径。
 func WorkspaceConfigPath(workspace string) string {
 	return workspacepath.Path(workspace, WorkspaceConfigFilename)
 }
 
-// LoadLayered 读取用户级 + 工作区级配置并与默认值合并。
+// LoadLayered 读取用户设置 + 工作区 Agent 定制并与默认值合并。
 // novaDir 为空时使用默认 ./.denova（后端运行目录下），已有 ./.nova 时兼容沿用。
 func LoadLayered(novaDir, workspace string) (LayeredSettings, error) {
 	return LoadLayeredWithGlobal(novaDir, workspace, Settings{})
 }
 
-// LoadLayeredWithGlobal 读取用户级 + 工作区级配置，并加入全局启动配置层。
+// LoadLayeredWithGlobal 读取用户设置 + 工作区 Agent 定制，并加入全局启动配置层。
 func LoadLayeredWithGlobal(novaDir, workspace string, global Settings) (LayeredSettings, error) {
 	if strings.TrimSpace(novaDir) == "" {
 		novaDir = normalizePath(defaultNovaDir())
 	} else {
 		novaDir = normalizePath(novaDir)
 	}
+	global.AgentToolResultLimitKB = normalizeAgentToolResultLimitKB(global.AgentToolResultLimitKB)
 	user, err := ReadSettingsFile(UserConfigPath(novaDir))
 	if err != nil {
 		return LayeredSettings{}, err
@@ -489,20 +532,7 @@ func LoadLayeredWithGlobal(novaDir, workspace string, global Settings) (LayeredS
 		if err != nil {
 			return LayeredSettings{}, err
 		}
-		// Startup ports are decided before a workspace is opened, so workspace-level
-		// files must not override them. Remote access is also a process-level
-		// boundary and must stay user/global scoped.
-		ws.BackendPort = nil
-		ws.FrontendPort = nil
-		ws.AllowLANAccess = nil
-		ws.RemoteAccessUsername = ""
-		ws.RemoteAccessPasswordHash = ""
-		ws.RemoteAccessPassword = ""
-		ws.RemoteAccessPasswordSet = false
-		ws.LLMInputLogEnabled = nil
-		ws.TraceCaptureLevel = ""
-		ws.TraceExporter = ""
-		ws.TraceRetentionRuns = nil
+		ws = workspaceAgentSettings(ws)
 	}
 	def := DefaultSettings()
 	def.DenovaDir = novaDir
@@ -552,6 +582,33 @@ func LoadLayeredWithGlobal(novaDir, workspace string, global Settings) (LayeredS
 		},
 		Runtime: SettingsRuntime{GOOS: runtime.GOOS},
 	}, nil
+}
+
+// PrepareWorkspaceAgentSettingsForWrite replaces only the Agent overrides that
+// are intentionally workspace-scoped. Legacy general settings remain on disk so
+// the transition is reversible, but LoadLayered no longer applies them.
+func PrepareWorkspaceAgentSettingsForWrite(existing, incoming Settings) Settings {
+	scoped := workspaceAgentSettings(incoming)
+	existing.AgentTools = scoped.AgentTools
+	existing.AgentPrompts = scoped.AgentPrompts
+	existing.AgentSkills = scoped.AgentSkills
+	existing.AgentContexts = scoped.AgentContexts
+	existing.GeneralSubAgents = scoped.GeneralSubAgents
+	existing.SubAgents = scoped.SubAgents
+	return existing
+}
+
+// workspaceAgentSettings defines the narrow workspace configuration boundary.
+// Model selection and every setting shown on the Settings page are user-scoped.
+func workspaceAgentSettings(settings Settings) Settings {
+	return Settings{
+		AgentTools:       settings.AgentTools,
+		AgentPrompts:     settings.AgentPrompts,
+		AgentSkills:      settings.AgentSkills,
+		AgentContexts:    settings.AgentContexts,
+		GeneralSubAgents: settings.GeneralSubAgents,
+		SubAgents:        settings.SubAgents,
+	}
 }
 
 func sanitizeEditableSettings(s Settings) Settings {
@@ -612,6 +669,9 @@ func normalizeAgentToolResultLimitKB(limit *int) *int {
 	}
 	if *limit < 0 {
 		return nil
+	}
+	if *limit == 0 {
+		return intPtr(DefaultAgentToolResultLimitKB)
 	}
 	return limit
 }

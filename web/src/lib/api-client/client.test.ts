@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { toast } from 'sonner'
 import { setConfiguredLocale } from '@/i18n'
-import { clearRemoteAccessCredentials, fetchAPI, requestJSON, setRemoteAccessCredentials } from './client'
+import { APIError, clearRemoteAccessCredentials, fetchAPI, parseSSEStream, requestJSON, setRemoteAccessCredentials } from './client'
 
 vi.mock('sonner', () => ({
   toast: {
@@ -91,5 +91,55 @@ describe('api client backend availability toast', () => {
     expect(listener).toHaveBeenCalledTimes(1)
     clearRemoteAccessCredentials()
     window.removeEventListener('nova:remote-access-required', listener)
+  })
+
+  it('preserves status, domain code and details for structured conflicts', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: 'workspace revision changed',
+      code: 'revision_conflict',
+      details: { path: 'chapters/ch01.md', expected: 'sha256:old', actual: 'sha256:new' },
+    }), { status: 409, headers: { 'Content-Type': 'application/json' } })))
+
+    const error = await requestJSON('/api/workspace/change-groups/group-1/review').catch((reason) => reason)
+
+    expect(error).toBeInstanceOf(APIError)
+    expect(error).toMatchObject({
+      message: 'workspace revision changed',
+      status: 409,
+      code: 'revision_conflict',
+      details: { path: 'chapters/ch01.md', expected: 'sha256:old', actual: 'sha256:new' },
+    })
+  })
+})
+
+describe('parseSSEStream', () => {
+  it('preserves split boundaries, multiline data, CRLF, and a final unterminated event', async () => {
+    const source = [
+      'event: tool\ndata: first',
+      '\ndata: second\n\n',
+      'event: chunk\r\ndata: third\r\n\r',
+      '\nevent: done\ndata: {}',
+    ]
+    const encoder = new TextEncoder()
+    const body = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (const chunk of source) controller.enqueue(encoder.encode(chunk))
+        controller.close()
+      },
+    })
+
+    const reader = parseSSEStream(body).getReader()
+    const events = []
+    while (true) {
+      const result = await reader.read()
+      if (result.done) break
+      events.push(result.value)
+    }
+
+    expect(events).toEqual([
+      { event: 'tool', data: 'first\nsecond' },
+      { event: 'chunk', data: 'third' },
+      { event: 'done', data: '{}' },
+    ])
   })
 })

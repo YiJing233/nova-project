@@ -15,6 +15,7 @@ import (
 	"denova/internal/api/agentui"
 	runtimeapp "denova/internal/app"
 	"denova/internal/book"
+	"denova/internal/interactive"
 	"denova/internal/session"
 )
 
@@ -105,6 +106,65 @@ func TestSessionAPICRUDSwitchAndMessages(t *testing.T) {
 	decodeResponse(t, deleteResp.Body.Bytes(), &active)
 	if active.ID != defaultID || !active.Active {
 		t.Fatalf("删除非唯一会话后应保留默认会话激活: %#v", active)
+	}
+}
+
+func TestSessionMessagesAPIPaginatesNewestHistoryWithoutChangingLegacyResponse(t *testing.T) {
+	application := newTestApplication(t)
+	server := NewServer(application, "0")
+	for _, content := range []string{"消息 1", "消息 2", "消息 3", "消息 4", "消息 5"} {
+		if err := application.Session().Append(schema.UserMessage(content)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	latestResp := performJSONRequest(t, server, http.MethodGet, "/api/session/messages?limit=2", nil)
+	if latestResp.Code != http.StatusOK {
+		t.Fatalf("latest page status = %d body=%s", latestResp.Code, latestResp.Body.String())
+	}
+	var latest struct {
+		Messages []agentui.Message `json:"messages"`
+		Page     struct {
+			NextBefore string `json:"next_before"`
+			HasMore    bool   `json:"has_more"`
+			Total      int    `json:"total"`
+		} `json:"page"`
+	}
+	decodeResponse(t, latestResp.Body.Bytes(), &latest)
+	if len(latest.Messages) != 2 || testTextPartContent(t, latest.Messages[0]) != "消息 4" || testTextPartContent(t, latest.Messages[1]) != "消息 5" {
+		t.Fatalf("latest page should contain newest messages in display order: %#v", latest.Messages)
+	}
+	if latest.Page.NextBefore != "3" || !latest.Page.HasMore || latest.Page.Total != 5 {
+		t.Fatalf("unexpected latest page metadata: %#v", latest.Page)
+	}
+
+	earlierResp := performJSONRequest(t, server, http.MethodGet, "/api/session/messages?limit=2&before=3", nil)
+	var earlier struct {
+		Messages []agentui.Message `json:"messages"`
+		Page     struct {
+			NextBefore string `json:"next_before"`
+			HasMore    bool   `json:"has_more"`
+		} `json:"page"`
+	}
+	decodeResponse(t, earlierResp.Body.Bytes(), &earlier)
+	if len(earlier.Messages) != 2 || testTextPartContent(t, earlier.Messages[0]) != "消息 2" || testTextPartContent(t, earlier.Messages[1]) != "消息 3" {
+		t.Fatalf("earlier page should preserve chronological display order: %#v", earlier.Messages)
+	}
+	if earlier.Page.NextBefore != "1" || !earlier.Page.HasMore {
+		t.Fatalf("unexpected earlier page metadata: %#v", earlier.Page)
+	}
+
+	legacyResp := performJSONRequest(t, server, http.MethodGet, "/api/session/messages", nil)
+	legacy := decodeAgentUIMessages(t, legacyResp.Body.Bytes())
+	if len(legacy) != 5 {
+		t.Fatalf("legacy response should remain a full message array, got %d", len(legacy))
+	}
+	if latest.Messages[0].ID != legacy[3].ID || latest.Messages[1].ID != legacy[4].ID ||
+		earlier.Messages[0].ID != legacy[1].ID || earlier.Messages[1].ID != legacy[2].ID {
+		t.Fatalf("paged message IDs must stay identical to the legacy full-history response: latest=%v earlier=%v legacy=%v",
+			[]string{latest.Messages[0].ID, latest.Messages[1].ID},
+			[]string{earlier.Messages[0].ID, earlier.Messages[1].ID},
+			[]string{legacy[1].ID, legacy[2].ID, legacy[3].ID, legacy[4].ID})
 	}
 }
 
@@ -322,11 +382,15 @@ func newTestApplication(t *testing.T) *runtimeapp.App {
 		t.Fatal(err)
 	}
 	t.Cleanup(application.Close)
-	restoreDirector := application.SetInteractiveDirectorGeneratorForTest(func(_ context.Context, _ *config.Config, _ *book.State, toolContext agent.InteractiveStoryToolContext, _ string) (string, error) {
-		if toolContext.MaintenanceTask == "state_schema_initialization" {
-			return `{"summary":"测试保持预设状态结构","template_ops":[],"initial_actor_ops":[]}`, nil
+	restoreDirector := application.SetInteractiveDirectorGeneratorForTest(func(callCtx context.Context, _ *config.Config, _ *book.State, toolContext agent.InteractiveStoryToolContext, _ string) (string, error) {
+		if toolContext.MaintenanceTask == "director_plan_update" || toolContext.MaintenanceTask == "opening_plan" {
+			_, err := toolContext.SubmitDirectorPlanUpdate(callCtx, interactive.DirectorPlanUpdateSubmission{
+				Decision: interactive.PlanDecision{Mode: interactive.PlanDecisionKeep, Reason: "测试初始化导演规划完成。"},
+				Finalize: true,
+			})
+			return "测试导演规划审查完成。", err
 		}
-		return "测试初始化导演规划完成。", nil
+		return "测试后台维护完成。", nil
 	})
 	t.Cleanup(restoreDirector)
 	return application

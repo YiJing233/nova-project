@@ -8,6 +8,54 @@ import {
 import { agentViewToRenderMessage, buildAgentMessageViews } from './agent-message-view'
 
 describe('agent-ui', () => {
+  it('没有重复 part 时保留消息和 parts 引用，避免流式更新重渲染历史消息', () => {
+    const historyPart = { type: 'text', id: 'history-text', text: '已经渲染的历史正文' } as const
+    const streamingPart = { type: 'reasoning', id: 'active-reasoning', text: '正在继续分析', state: 'streaming' } as const
+    const historyMessage = {
+      id: 'history-assistant',
+      role: 'assistant',
+      parts: [historyPart],
+    } as AgentUIMessage
+    const streamingMessage = {
+      id: 'active-assistant',
+      role: 'assistant',
+      parts: [streamingPart],
+    } as AgentUIMessage
+
+    const normalized = normalizeAgentUIMessages([historyMessage, streamingMessage])
+
+    expect(normalized[0]).toBe(historyMessage)
+    expect(normalized[0].parts).toBe(historyMessage.parts)
+    expect(normalized[0].parts[0]).toBe(historyPart)
+    expect(normalized[1]).toBe(streamingMessage)
+    expect(normalized[1].parts).toBe(streamingMessage.parts)
+    expect(normalized[1].parts[0]).toBe(streamingPart)
+  })
+
+  it('不重复读取未变化历史消息的正文来生成去重指纹', () => {
+    let textReads = 0
+    const part = { type: 'text' } as Record<string, unknown>
+    Object.defineProperty(part, 'text', {
+      enumerable: true,
+      get: () => {
+        textReads += 1
+        return '稳定的历史正文'
+      },
+    })
+    const message = {
+      id: 'history-assistant',
+      role: 'assistant',
+      metadata: { run_id: 'run-history' },
+      parts: [part],
+    } as unknown as AgentUIMessage
+
+    normalizeAgentUIMessages([message])
+    const readsAfterFirstNormalization = textReads
+    normalizeAgentUIMessages([message])
+
+    expect(textReads).toBe(readsAfterFirstNormalization)
+  })
+
   it('保留单轮请求 extras，不回传完整 UI 历史', () => {
     expect(buildAgentChatRequestBody({
       references: ['chapters/a.md'],
@@ -19,6 +67,7 @@ describe('agent-ui', () => {
       writing_skill: 'draft',
       image_preset_id: 'preset-1',
       teller_id: 'teller-1',
+      review_feedback: [{ review_thread_id: 'review-1', comment_ids: ['comment-1', 'comment-1', 'comment-2'] }],
     })).toEqual({
       references: ['chapters/a.md'],
       lore_references: ['lore-1'],
@@ -29,7 +78,34 @@ describe('agent-ui', () => {
       writing_skill: 'draft',
       image_preset_id: 'preset-1',
       teller_id: 'teller-1',
+      review_feedback: [{ review_thread_id: 'review-1', comment_ids: ['comment-1', 'comment-2'] }],
     })
+  })
+
+  it('保留正文审阅来源并去重评论 ID', () => {
+    expect(buildAgentChatRequestBody({
+      review_feedback: [{
+        source: 'document',
+        review_thread_id: 'document-review-1',
+        comment_ids: ['comment-1', 'comment-1', 'comment-2'],
+      }],
+    }).review_feedback).toEqual([{
+      source: 'document',
+      review_thread_id: 'document-review-1',
+      comment_ids: ['comment-1', 'comment-2'],
+    }])
+  })
+
+  it('同时保留正文与 Diff 审阅来源', () => {
+    expect(buildAgentChatRequestBody({
+      review_feedback: [
+        { review_thread_id: 'diff-review-1', comment_ids: ['diff-comment'] },
+        { source: 'document', review_thread_id: 'document-review-1', comment_ids: ['document-comment'] },
+      ],
+    }).review_feedback).toEqual([
+      { review_thread_id: 'diff-review-1', comment_ids: ['diff-comment'] },
+      { source: 'document', review_thread_id: 'document-review-1', comment_ids: ['document-comment'] },
+    ])
   })
 
   it('通过唯一 view 模块将 AgentUIMessage parts 转为展示模型', () => {

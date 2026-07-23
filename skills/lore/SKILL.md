@@ -10,7 +10,7 @@ agent: ide,config_manager,interactive_story
 
 ## 工具顺序
 
-1. `list_lore_items`：先看索引。空参数返回全量极简索引；需要筛选时使用 `query`、`type`、`limit`。索引只用于判断相关性，不当作完整设定。
+1. `list_lore_items`：先看索引。空参数分页浏览全部启用资料；需要筛选时使用 `keywords`、`match`、`types` 和 `limit`。索引只用于判断相关性，不当作完整设定。
 2. `read_lore_items`：只读取本轮需要的少量 ID。不要无界读取全部正文。
 3. `write_lore_items`：只在当前 Agent 拥有该工具，且作者要求保存或长期设定确实变化时使用。互动叙事 Agent 默认只读，不要承诺已写入。
 
@@ -25,7 +25,7 @@ agent: ide,config_manager,interactive_story
 `list_lore_items` 按关键词或类型检索：
 
 ```json
-{"query":"林川 火光","type":"character","limit":10}
+{"keywords":["林川","火光"],"match":"any","types":["character"],"limit":10}
 ```
 
 `read_lore_items` 批量读取正文：
@@ -46,7 +46,7 @@ agent: ide,config_manager,interactive_story
       "name": "林川",
       "importance": "major",
       "tags": ["主角", "火光"],
-      "brief_description": "角色 林川。主视角幸存者，常被称为小林。关键事实包括他掌握火光能力，并与余烬城长期绑定。上下文出现林川、小林、火光或余烬城相关内容时，一定要参考本项详情。",
+      "brief_description": "角色 林川。主视角幸存者，常被称为小林。关键事实包括他掌握火光能力，并与余烬城长期绑定。",
       "keywords": ["林川", "小林", "火光"],
       "load_mode": "auto",
       "content": "## 核心设定\n\n林川是主视角幸存者，长期目标是在余烬城建立稳定据点。"
@@ -67,7 +67,7 @@ agent: ide,config_manager,interactive_story
 - `items` 必须是数组；创建或更新条目都填写完整字段，避免覆盖时丢失已有设定。
 - `delete_ids` 必须是数组，例如 `[]` 或 `["lore-id"]`；不要传字符串 `"[]"`。只有作者明确要求删除时才填写非空数组。
 - 更新已有条目必须填写准确 `id`；新建条目可留空自动生成。
-- `brief_description` 以“类型 名称。”开头，写清身份、别名、关键事实、适用场景和触发词，并以“上下文出现相关内容时，一定要参考本项详情。”收束。
+- `brief_description` 以”类型 名称。”开头，写清身份、别名、关键事实、适用场景和触发词。
 - `content` 使用中文 Markdown，只写稳定事实，不写章节规划、未来剧情或临时状态。
 - `load_mode` 默认使用 `auto`；只有短小且必须常驻的核心设定才用 `resident`。
 

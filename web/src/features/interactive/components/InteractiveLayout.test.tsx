@@ -1,9 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { Profiler } from 'react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { InteractiveLayout } from './InteractiveLayout'
 import { useInteractiveStore } from '../stores/interactive-store'
-import { createInteractiveStory, getInteractiveBranches, getInteractiveSnapshot, getInteractiveStories, getInteractiveTellers, getStoryDirectors, updateInteractiveStory } from '../api'
-import type { StoryDirector, StorySummary, Teller } from '../types'
+import { createInteractiveStory, deleteInteractiveStory, getInteractiveBranches, getInteractiveSnapshot, getInteractiveStories, getInteractiveTellers, getStoryDirectors, selectInteractiveStory, updateInteractiveStory } from '../api'
+import type { Snapshot, StoryDirector, StorySummary, Teller } from '../types'
 
 vi.mock('@/hooks/useIsMobile', () => ({
   useIsMobile: () => false,
@@ -23,6 +24,7 @@ vi.mock('../api', () => ({
   getInteractiveStories: vi.fn(),
   getInteractiveTellers: vi.fn(),
   getStoryDirectors: vi.fn(),
+  selectInteractiveStory: vi.fn(),
   switchInteractiveBranch: vi.fn(),
   updateInteractiveStory: vi.fn(),
 }))
@@ -31,20 +33,12 @@ vi.mock('./BranchTimeline', () => ({
   BranchTimeline: () => <div data-testid="branch-timeline" />,
 }))
 
-vi.mock('./MemoryPanel', () => ({
-  MemoryPanel: () => <div data-testid="memory-panel" />,
+vi.mock('./DirectorPanel', () => ({
+  DirectorPanel: () => <div data-testid="director-panel" />,
 }))
 
 vi.mock('./SettingPanel', () => ({
   SettingPanel: () => <div data-testid="setting-panel" />,
-}))
-
-vi.mock('./StoryMemoryView', () => ({
-  StoryMemoryView: ({ onBackToStory }: { onBackToStory?: () => void }) => (
-    <div data-testid="story-memory-view">
-      <button type="button" onClick={onBackToStory}>mock back to story</button>
-    </div>
-  ),
 }))
 
 vi.mock('./StoryPicker', () => ({
@@ -55,7 +49,9 @@ vi.mock('./StoryStage', () => ({
   StoryStage: (props: {
     stories: StorySummary[]
     storyId: string
-    onStoryCreate: (input: { title: string; origin?: string; story_teller_id: string; story_director_id?: string; reply_target_chars?: number }) => Promise<void>
+    onStoryCreate: (input: { title: string; origin?: string; story_teller_id: string; story_director_id?: string; choice_count: number; reply_target_chars?: number }) => Promise<void>
+    onStoryDelete: (storyIds: string[]) => Promise<void>
+    onStorySelect: (storyId: string) => void
     onDirectorChange: (directorId: string) => Promise<void>
   }) => (
     <div data-testid="story-stage-probe" data-story-id={props.storyId}>
@@ -66,6 +62,7 @@ vi.mock('./StoryStage', () => ({
           origin: '',
           story_teller_id: 'classic',
           story_director_id: 'default',
+          choice_count: 5,
           reply_target_chars: 2000,
         })}
       >
@@ -73,9 +70,18 @@ vi.mock('./StoryStage', () => ({
       </button>
       <button
         type="button"
+        onClick={() => void props.onStoryDelete(['st_1', 'st_2'])}
+      >
+        mock delete stories
+      </button>
+      <button
+        type="button"
         onClick={() => void props.onDirectorChange('director-alt')}
       >
         mock switch director
+      </button>
+      <button type="button" onClick={() => props.onStorySelect('st_2')}>
+        mock select story
       </button>
       <div data-testid="story-list">{props.stories.map((item) => item.title).join('|')}</div>
     </div>
@@ -96,34 +102,92 @@ beforeEach(() => {
     submode: 'story',
   })
   vi.mocked(createInteractiveStory).mockReset()
+  vi.mocked(deleteInteractiveStory).mockReset()
   vi.mocked(getInteractiveStories).mockReset()
   vi.mocked(getInteractiveTellers).mockReset()
   vi.mocked(getStoryDirectors).mockReset()
+  vi.mocked(selectInteractiveStory).mockReset()
   vi.mocked(getInteractiveSnapshot).mockReset()
   vi.mocked(getInteractiveBranches).mockReset()
   vi.mocked(updateInteractiveStory).mockReset()
+  vi.mocked(deleteInteractiveStory).mockResolvedValue(undefined)
   vi.mocked(getInteractiveTellers).mockResolvedValue([])
   vi.mocked(getStoryDirectors).mockResolvedValue([])
+  vi.mocked(selectInteractiveStory).mockResolvedValue(undefined)
   vi.mocked(getInteractiveSnapshot).mockResolvedValue({ story_id: 'st_new', branch_id: 'main', turns: [], state: {} })
   vi.mocked(getInteractiveBranches).mockResolvedValue([{ id: 'main', head: '', title: '主线', created_at: '2026-07-04T00:00:00Z', current: true }])
 })
 
-describe('InteractiveLayout story creation', () => {
-  it('returns from the Story Memory manager to the Story workspace', async () => {
-    vi.mocked(getInteractiveStories).mockResolvedValue({
-      current_story_id: 'st_1',
-      stories: [story('st_1', '故事线')],
+afterEach(() => {
+  vi.useRealTimers()
+})
+
+describe('InteractiveLayout polling lifecycle', () => {
+  it('does not poll a pending snapshot while the retained route is inactive', async () => {
+    vi.useFakeTimers()
+    const pendingSnapshot = pendingInteractiveSnapshot()
+    useInteractiveStore.setState({
+      stories: [story('st_new', '故事')],
+      currentStoryId: 'st_new',
+      currentBranchId: 'main',
+      snapshot: pendingSnapshot,
     })
-    useInteractiveStore.setState({ submode: 'memory' })
+    vi.mocked(getInteractiveStories).mockResolvedValue({ current_story_id: 'st_new', stories: useInteractiveStore.getState().stories })
+    vi.mocked(getInteractiveSnapshot).mockResolvedValue(pendingSnapshot)
 
-    render(<InteractiveLayout workspace="/workspace" />)
+    render(<InteractiveLayout workspace="/workspace" active={false} />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    const callsAfterInitialLoad = vi.mocked(getInteractiveSnapshot).mock.calls.length
 
-    await waitFor(() => expect(screen.getByTestId('story-memory-view')).toBeInTheDocument())
-    fireEvent.click(screen.getByRole('button', { name: 'mock back to story' }))
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000)
+    })
 
-    expect(screen.getByTestId('story-stage-probe')).toBeInTheDocument()
+    expect(vi.mocked(getInteractiveSnapshot)).toHaveBeenCalledTimes(callsAfterInitialLoad)
   })
 
+  it('waits for the previous pending snapshot poll before scheduling another', async () => {
+    vi.useFakeTimers()
+    const pendingSnapshot = pendingInteractiveSnapshot()
+    useInteractiveStore.setState({
+      stories: [story('st_new', '故事')],
+      currentStoryId: 'st_new',
+      currentBranchId: 'main',
+      snapshot: pendingSnapshot,
+    })
+    vi.mocked(getInteractiveStories).mockResolvedValue({ current_story_id: 'st_new', stories: useInteractiveStore.getState().stories })
+    vi.mocked(getInteractiveSnapshot).mockResolvedValue(pendingSnapshot)
+
+    render(<InteractiveLayout workspace="/workspace" active />)
+    await act(async () => {
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+
+    const poll = deferred<typeof pendingSnapshot>()
+    vi.mocked(getInteractiveSnapshot).mockClear()
+    vi.mocked(getInteractiveSnapshot).mockReturnValue(poll.promise)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000)
+      await vi.advanceTimersByTimeAsync(5000)
+    })
+    expect(vi.mocked(getInteractiveSnapshot)).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      poll.resolve(pendingSnapshot)
+      await poll.promise
+      await Promise.resolve()
+      await vi.advanceTimersByTimeAsync(1000)
+    })
+    expect(vi.mocked(getInteractiveSnapshot)).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('InteractiveLayout story creation', () => {
   it('selects and lists a newly created story even when stale story indexes resolve later', async () => {
     const initialIndex = deferred<{ current_story_id: string; stories: StorySummary[] }>()
     const afterCreateIndex = deferred<{ current_story_id: string; stories: StorySummary[] }>()
@@ -182,6 +246,75 @@ describe('InteractiveLayout story creation', () => {
       })
     })
   })
+
+  it('deletes multiple stories and reloads the story index only once', async () => {
+    vi.mocked(getInteractiveStories)
+      .mockResolvedValueOnce({
+        current_story_id: 'st_1',
+        stories: [story('st_1', '主线'), story('st_2', '黑暗线'), story('st_3', '光明线')],
+      })
+      .mockResolvedValueOnce({
+        current_story_id: 'st_3',
+        stories: [story('st_3', '光明线')],
+      })
+
+    render(<InteractiveLayout workspace="/workspace" />)
+
+    await waitFor(() => expect(screen.getByTestId('story-stage-probe')).toHaveAttribute('data-story-id', 'st_1'))
+    fireEvent.click(screen.getByRole('button', { name: 'mock delete stories' }))
+
+    await waitFor(() => {
+      expect(deleteInteractiveStory).toHaveBeenCalledTimes(2)
+      expect(deleteInteractiveStory).toHaveBeenNthCalledWith(1, 'st_1')
+      expect(deleteInteractiveStory).toHaveBeenNthCalledWith(2, 'st_2')
+      expect(getInteractiveStories).toHaveBeenCalledTimes(2)
+      expect(screen.getByTestId('story-list')).toHaveTextContent('光明线')
+    })
+  })
+})
+
+describe('InteractiveLayout story selection', () => {
+  it('persists the selected story for other browsers', async () => {
+    vi.mocked(getInteractiveStories).mockResolvedValue({
+      current_story_id: 'st_1',
+      stories: [story('st_1', '故事线 1'), story('st_2', '故事线 2')],
+    })
+
+    render(<InteractiveLayout workspace="/workspace" />)
+    await waitFor(() => expect(screen.getByTestId('story-stage-probe')).toHaveAttribute('data-story-id', 'st_1'))
+
+    fireEvent.click(screen.getByRole('button', { name: 'mock select story' }))
+
+    await waitFor(() => {
+      expect(screen.getByTestId('story-stage-probe')).toHaveAttribute('data-story-id', 'st_2')
+      expect(selectInteractiveStory).toHaveBeenCalledWith('st_2')
+    })
+  })
+})
+
+describe('InteractiveLayout store subscriptions', () => {
+  it('does not rerender for live messages owned by StoryStage', async () => {
+    vi.mocked(getInteractiveStories).mockResolvedValue({ current_story_id: '', stories: [] })
+    let commits = 0
+    render(
+      <Profiler id="interactive-layout" onRender={() => { commits += 1 }}>
+        <InteractiveLayout workspace="/workspace" />
+      </Profiler>,
+    )
+    await waitFor(() => expect(getInteractiveStories).toHaveBeenCalled())
+    await act(async () => undefined)
+    commits = 0
+
+    act(() => {
+      useInteractiveStore.getState().setStoryStageRun('other-stage', {
+        streaming: true,
+        activityContent: '',
+        liveMessages: [],
+      })
+    })
+
+    expect(commits).toBe(0)
+  })
 })
 
 function deferred<T>() {
@@ -194,6 +327,25 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
+function pendingInteractiveSnapshot(): Snapshot {
+  const turn = {
+    id: 'turn-1',
+    parent_id: null,
+    branch_id: 'main',
+    ts: '2026-07-04T00:00:00Z',
+    user: '继续',
+    narrative: '待处理',
+    state_status: 'pending' as const,
+  }
+  return {
+    story_id: 'st_new',
+    branch_id: 'main',
+    turns: [turn],
+    state: {},
+    current_turn: turn,
+  }
+}
+
 function story(id: string, title: string): StorySummary {
   return {
     id,
@@ -201,6 +353,7 @@ function story(id: string, title: string): StorySummary {
     origin: '',
     story_teller_id: 'classic',
     story_director_id: 'default',
+    choice_count: 5,
     reply_target_chars: 2000,
     opening: { mode: 'ai' },
     created_at: '2026-07-04T00:00:00Z',
@@ -233,9 +386,8 @@ function storyDirector(id: string, name: string, narrativeStyleId: string): Stor
     name,
     description: '',
     module_refs: { narrative_style_id: narrativeStyleId },
-    strategy: { enabled: true },
-    trpg_system: {},
-    opening_selector: { enabled: true },
-    custom: false,
+		strategy: { enabled: true },
+		trpg_system: {},
+		custom: false,
   }
 }

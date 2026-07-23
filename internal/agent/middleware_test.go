@@ -55,6 +55,20 @@ func TestInteractiveStoryToolMiddlewareBlocksWriteTools(t *testing.T) {
 	}
 }
 
+func TestInteractiveTurnReceiptRecordsDomainOutcomeSeparatelyFromTransport(t *testing.T) {
+	record := ToolExecutionRecord{ToolName: interactiveTurnSubmissionToolName, Status: "success"}
+	applyInteractiveTurnReceiptToExecutionRecord(&record, `{"ready":false,"module_status":{"state_changes":"rejected","choices":"accepted"},"diagnostics":[{"code":"invalid_module"}],"retry_modules":["state_changes"]}`)
+	if record.Status != "success" || record.DomainStatus != "rejected" || record.DomainDiagnosticCount != 1 || len(record.RetryModules) != 1 || record.RetryModules[0] != "state_changes" {
+		t.Fatalf("transport success should retain the rejected domain outcome: %#v", record)
+	}
+
+	accepted := ToolExecutionRecord{ToolName: interactiveTurnSubmissionToolName, Status: "success"}
+	applyInteractiveTurnReceiptToExecutionRecord(&accepted, `{"ready":true,"module_status":{"state_changes":"accepted","choices":"accepted"}}`)
+	if accepted.DomainStatus != "accepted" || accepted.DomainDiagnosticCount != 0 {
+		t.Fatalf("ready receipt should be recorded as domain accepted: %#v", accepted)
+	}
+}
+
 func TestInteractiveStoryToolMiddlewareAllowsReadTools(t *testing.T) {
 	middleware := newInteractiveStoryToolMiddleware()
 	called := false
@@ -78,9 +92,9 @@ func TestInteractiveStoryToolMiddlewareAllowsReadTools(t *testing.T) {
 	}
 }
 
-func TestInteractiveDirectorPlanFileMiddlewareBlocksStateAndMemoryTools(t *testing.T) {
-	middleware := newInteractiveDirectorPlanFileMiddleware([]string{"/tmp/story/director/main/director.md"})
-	for _, name := range []string{"apply_actor_state_patch", "apply_story_memory_patches"} {
+func TestInteractiveDirectorPlanFileMiddlewareBlocksStateTools(t *testing.T) {
+	middleware := newInteractiveDirectorPlanFileMiddleware()
+	for _, name := range []string{"apply_actor_state_patch"} {
 		called := false
 		endpoint, err := middleware.WrapInvokableToolCall(
 			context.Background(),
@@ -97,21 +111,21 @@ func TestInteractiveDirectorPlanFileMiddlewareBlocksStateAndMemoryTools(t *testi
 		if err != nil {
 			t.Fatal(err)
 		}
-		if called || !strings.Contains(result, "不能写 Actor State 或 Story Memory") {
+		if called || !strings.Contains(result, "不能写 Actor State") {
 			t.Fatalf("%s should be blocked, called=%v result=%s", name, called, result)
 		}
 	}
 }
 
-func TestInteractiveMemoryRecorderMiddlewareAllowsMemoryToolOnly(t *testing.T) {
-	middleware := newInteractiveDirectorPlanFileMiddleware(nil, "memory_update")
+func TestInteractiveDirectorPlanMiddlewareAllowsStructuredSubmitAndBlocksFiles(t *testing.T) {
+	middleware := newInteractiveDirectorPlanFileMiddleware()
 	for _, tc := range []struct {
 		name    string
 		allowed bool
 	}{
-		{name: "apply_story_memory_patches", allowed: true},
-		{name: "apply_actor_state_patch", allowed: false},
+		{name: submitDirectorPlanUpdateToolName, allowed: true},
 		{name: "read_file", allowed: false},
+		{name: "write_file", allowed: false},
 	} {
 		called := false
 		endpoint, err := middleware.WrapInvokableToolCall(
@@ -132,14 +146,14 @@ func TestInteractiveMemoryRecorderMiddlewareAllowsMemoryToolOnly(t *testing.T) {
 		if tc.allowed && (!called || result != "ok") {
 			t.Fatalf("%s should pass through, called=%v result=%s", tc.name, called, result)
 		}
-		if !tc.allowed && (called || !strings.Contains(result, "只能使用 apply_story_memory_patches")) {
-			t.Fatalf("%s should be blocked, called=%v result=%s", tc.name, called, result)
+		if !tc.allowed && (called || !strings.Contains(result, submitDirectorPlanUpdateToolName)) {
+			t.Fatalf("%s should be blocked in favor of structured submit, called=%v result=%s", tc.name, called, result)
 		}
 	}
 }
 
 func TestInteractiveDirectorPlanFileMiddlewareBlocksUnauthorizedTools(t *testing.T) {
-	middleware := newInteractiveDirectorPlanFileMiddleware([]string{"/tmp/story/director/main/director.md"})
+	middleware := newInteractiveDirectorPlanFileMiddleware()
 	called := false
 	endpoint, err := middleware.WrapInvokableToolCall(
 		context.Background(),
@@ -239,7 +253,7 @@ func TestToolOrchestratorAllowsIDEWriteAndFiltersResult(t *testing.T) {
 		t.Fatalf("result should include filtered metadata: %s", result)
 	}
 	if !strings.Contains(result, content) {
-		t.Fatalf("result should include full tool output by default")
+		t.Fatalf("result below the high default limit should stay complete")
 	}
 }
 

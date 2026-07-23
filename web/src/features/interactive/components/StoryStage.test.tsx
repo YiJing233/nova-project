@@ -1,16 +1,19 @@
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { useState } from 'react'
+import { Profiler, StrictMode, useState } from 'react'
 import { VirtuosoMockContext } from 'react-virtuoso'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { StoryStage } from './StoryStage'
 import { mergeInteractiveTurnPersistedSnapshot, useInteractiveStore } from '../stores/interactive-store'
 import type { InteractiveTurnPersistedEvent, Snapshot, StorySummary, TurnEvent } from '../types'
 
-const { generateInteractiveImageMock, runInteractiveDirectorMock, sendInteractiveMessageMock, useSkillCommandsMock } = vi.hoisted(() => ({
+const { generateInteractiveImageMock, getActiveInteractiveChatMock, runInteractiveDirectorMock, sendInteractiveMessageMock, streamActiveInteractiveChatMock, updateInteractiveTurnNarrativeMock, useSkillCommandsMock } = vi.hoisted(() => ({
   generateInteractiveImageMock: vi.fn(),
+  getActiveInteractiveChatMock: vi.fn(),
   runInteractiveDirectorMock: vi.fn(),
   sendInteractiveMessageMock: vi.fn(),
+  streamActiveInteractiveChatMock: vi.fn(),
+  updateInteractiveTurnNarrativeMock: vi.fn(),
   useSkillCommandsMock: vi.fn(),
 }))
 
@@ -27,10 +30,13 @@ vi.mock('../api', () => ({
   analyzeInteractiveContext: vi.fn(),
   compactInteractiveContext: vi.fn(),
   generateInteractiveImage: generateInteractiveImageMock,
+  getActiveInteractiveChat: getActiveInteractiveChatMock,
   removeInteractiveContextCompaction: vi.fn(),
   runInteractiveDirector: runInteractiveDirectorMock,
   sendInteractiveMessage: sendInteractiveMessageMock,
+  streamActiveInteractiveChat: streamActiveInteractiveChatMock,
   switchInteractiveTurnVersion: vi.fn(),
+  updateInteractiveTurnNarrative: updateInteractiveTurnNarrativeMock,
 }))
 
 beforeEach(() => {
@@ -38,14 +44,62 @@ beforeEach(() => {
   useInteractiveStore.setState({ storyStageRuns: {} })
   generateInteractiveImageMock.mockReset()
   generateInteractiveImageMock.mockResolvedValue({ enabled: false, skipped: true })
+  getActiveInteractiveChatMock.mockReset()
+  getActiveInteractiveChatMock.mockResolvedValue({ active: false })
   runInteractiveDirectorMock.mockReset()
   runInteractiveDirectorMock.mockResolvedValue(directorStatus('running', { completed_docs: 1 }))
   sendInteractiveMessageMock.mockReset()
+  streamActiveInteractiveChatMock.mockReset()
+  updateInteractiveTurnNarrativeMock.mockReset()
   useSkillCommandsMock.mockReset()
   useSkillCommandsMock.mockReturnValue([])
 })
 
+describe('StoryStage store subscriptions', () => {
+  it('does not rerender when unrelated interactive store state changes', async () => {
+    let commits = 0
+    render(
+      <Profiler id="story-stage" onRender={() => { commits += 1 }}>
+        <StoryStageHarness />
+      </Profiler>,
+    )
+    await waitFor(() => expect(getActiveInteractiveChatMock).toHaveBeenCalled())
+    await act(async () => undefined)
+    commits = 0
+
+    act(() => {
+      useInteractiveStore.getState().setTellers([])
+    })
+
+    expect(commits).toBe(0)
+  })
+})
+
 describe('StoryStage TurnResult choices', () => {
+	it('places the model selector before the choice control and send action', async () => {
+		render(
+			<VirtuosoMockContext.Provider value={{ viewportHeight: 1200, itemHeight: 120 }}>
+				<StoryStage
+					workspace="/tmp/book"
+					stories={[story()]}
+					story={story()}
+					tellers={[]}
+					storyId="story-1"
+					branchId="main"
+					snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [], state: {} }}
+					onDone={() => undefined}
+				/>
+			</VirtuosoMockContext.Provider>,
+		)
+
+		const modelSelector = await screen.findByRole('button', { name: /切换模型/ })
+		const choiceControl = screen.getByRole('button', { name: '获取行动选择' })
+		const sendAction = screen.getByRole('button', { name: '发送' })
+
+		expect(modelSelector.compareDocumentPosition(choiceControl)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+		expect(choiceControl.compareDocumentPosition(sendAction)).toBe(Node.DOCUMENT_POSITION_FOLLOWING)
+	})
+
 	it('uses persisted TurnResult choices and only reveals them after the user opens the panel', async () => {
 		const user = userEvent.setup()
 		const turn = {
@@ -56,10 +110,8 @@ describe('StoryStage TurnResult choices', () => {
 			user: '检查钟楼',
 			narrative: '钟楼上有反光一闪。',
 			state_status: 'ready' as const,
-			memory_status: 'running' as const,
 			turn_result: {
-				contract: { player_intent: '检查钟楼', scene_goal: '确认反光来源' },
-				scene_result: { status: 'continued', scene_id: '旧城钟楼', summary: '发现钟楼上的可疑反光', next_scene_goal: '找到观察角度' },
+				state_updates: [],
 				choices: ['绕到钟楼背面', '询问附近守夜人'],
 			},
 		}
@@ -89,7 +141,7 @@ describe('StoryStage TurnResult choices', () => {
     const stream = controllableInteractiveStream()
     const persisted = persistedTurnEvent()
     persisted.turn.turn_result = {
-      contract: { player_intent: '推门', scene_goal: '确认门外情况' },
+      state_updates: [],
       choices: ['沿墙观察', '询问守夜人'],
     }
     sendInteractiveMessageMock.mockResolvedValue(stream.readable)
@@ -121,6 +173,71 @@ describe('StoryStage TurnResult choices', () => {
     }
   })
 
+})
+
+describe('StoryStage AI reply editing', () => {
+  it('edits persisted AI prose without regenerating the turn', async () => {
+    const user = userEvent.setup()
+    render(<ReplyEditHarness />)
+
+    await user.click(screen.getByRole('button', { name: '编辑 AI 回复' }))
+    const editor = screen.getByRole('textbox', { name: 'AI 回复正文' })
+    expect(editor).toHaveValue('朋友住在 3 楼 403 室。')
+    expect(screen.getByText(/不会重新生成/)).toBeInTheDocument()
+
+    await user.clear(editor)
+    await user.type(editor, '朋友住在 4 楼 403 室。')
+    await user.click(screen.getByRole('button', { name: '保存' }))
+
+    await waitFor(() => {
+      expect(updateInteractiveTurnNarrativeMock).toHaveBeenCalledWith('story-1', 'turn-edit', {
+        branch_id: 'main',
+        narrative: '朋友住在 4 楼 403 室。',
+        expected_narrative: '朋友住在 3 楼 403 室。',
+      })
+    })
+    expect(await screen.findByText('朋友住在 4 楼 403 室。')).toBeInTheDocument()
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(sendInteractiveMessageMock).not.toHaveBeenCalled()
+  })
+})
+
+describe('StoryStage current state ledger', () => {
+  it('places the collapsed state after the latest prose and reveals World State as a peer tab on demand', async () => {
+    const user = userEvent.setup()
+    const turn: TurnEvent = {
+      id: 'turn-state',
+      parent_id: null,
+      branch_id: 'main',
+      ts: '2026-07-13T00:00:00Z',
+      user: '观察天色',
+      narrative: '远山压着一线沉云。',
+      state_status: 'ready',
+    }
+    render(
+      <VirtuosoMockContext.Provider value={{ viewportHeight: 1200, itemHeight: 120 }}>
+        <StoryStage
+          workspace="/tmp/book"
+          stories={[story()]}
+          story={story()}
+          tellers={[]}
+          storyId="story-1"
+          branchId="main"
+          snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [turn], current_turn: turn, state: { scene: { weather: '暴雨将至' } } }}
+          stateDisplayPreference="collapsed"
+          onDone={() => undefined}
+        />
+      </VirtuosoMockContext.Provider>,
+    )
+
+    const prose = screen.getByText('远山压着一线沉云。')
+    const state = screen.getByRole('region', { name: '当前状态' })
+    expect(prose.compareDocumentPosition(state) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(within(state).queryByRole('tab', { name: '世界状态' })).not.toBeInTheDocument()
+    await user.click(within(state).getByRole('button', { name: '展开状态面板' }))
+    expect(within(state).getByRole('tab', { name: '世界状态' })).toHaveAttribute('aria-selected', 'true')
+    expect(within(state).getByText('暴雨将至')).toBeInTheDocument()
+  })
 })
 
 describe('StoryStage composer', () => {
@@ -206,7 +323,7 @@ describe('StoryStage composer', () => {
     expect(screen.getByText('潜入检定')).toBeInTheDocument()
     expect(screen.getByText('总值 6 / 目标 18')).toBeInTheDocument()
     expect(screen.getByText(/失败会损失体力并暴露行踪/)).toBeInTheDocument()
-    expect(screen.getByText('actors.protagonist.state.resources.hp -10')).toBeInTheDocument()
+    expect(screen.getByText('protagonist / 当前生命 -10')).toBeInTheDocument()
     expect(screen.getByText('守阁长老拦在门前。')).toBeInTheDocument()
   })
 
@@ -276,7 +393,7 @@ describe('StoryStage composer', () => {
             ts: '2026-06-28T00:00:00Z',
             user: '开局',
             narrative: '雨停了。',
-            turn_result: { contract: { player_intent: '开局', scene_goal: '观察环境' }, choices: ['继续观察', '询问路人'] },
+            turn_result: { state_updates: [], choices: ['继续观察', '询问路人'] },
           }],
           current_turn: {
             id: 'turn-1',
@@ -285,7 +402,7 @@ describe('StoryStage composer', () => {
             ts: '2026-06-28T00:00:00Z',
             user: '开局',
             narrative: '雨停了。',
-            turn_result: { contract: { player_intent: '开局', scene_goal: '观察环境' }, choices: ['继续观察', '询问路人'] },
+            turn_result: { state_updates: [], choices: ['继续观察', '询问路人'] },
           },
           director_plan_status: directorStatus('running', { completed_docs: 1, blocking: true }),
         }}
@@ -443,6 +560,108 @@ describe('StoryStage composer', () => {
 })
 
 describe('StoryStage streaming rendering', () => {
+	it('opens only one recovery subscription during the React Strict Mode effect probe', async () => {
+		const stream = controllableInteractiveStream()
+		getActiveInteractiveChatMock.mockResolvedValue({
+			active: true,
+			status: 'running',
+			task_id: 'task-1',
+			story_id: 'story-1',
+			branch_id: 'main',
+			message: '检查石门',
+		})
+		streamActiveInteractiveChatMock.mockResolvedValue(stream.readable)
+
+		try {
+			render(<StrictMode><StoryStageHarness /></StrictMode>)
+			await waitFor(() => expect(streamActiveInteractiveChatMock).toHaveBeenCalledTimes(1))
+			expect(getActiveInteractiveChatMock).toHaveBeenCalledTimes(1)
+		} finally {
+			stream.close()
+		}
+	})
+
+	it('reconnects to the active story stream after refresh without resubmitting the player message', async () => {
+		const stream = controllableInteractiveStream()
+		const handleDone = vi.fn().mockResolvedValue(undefined)
+		getActiveInteractiveChatMock.mockResolvedValue({
+			active: true,
+			status: 'running',
+			task_id: 'task-1',
+			story_id: 'story-1',
+			branch_id: 'main',
+			message: '推开石门',
+		})
+		streamActiveInteractiveChatMock.mockResolvedValue(stream.readable)
+
+		try {
+			render(<PersistedTurnHarness onDone={handleDone} />)
+
+			await waitFor(() => {
+				expect(getActiveInteractiveChatMock).toHaveBeenCalledWith('story-1', 'main')
+				expect(streamActiveInteractiveChatMock).toHaveBeenCalledWith({
+					storyId: 'story-1',
+					branchId: 'main',
+					taskId: 'task-1',
+					signal: expect.any(AbortSignal),
+				})
+			})
+			expect(screen.getByText('推开石门')).toBeInTheDocument()
+			expect(sendInteractiveMessageMock).not.toHaveBeenCalled()
+
+			await act(async () => {
+				stream.enqueue({ event: 'thinking', data: JSON.stringify({ content: '正在回忆石门后的布局。' }) })
+				stream.enqueue({ event: 'chunk', data: JSON.stringify({ content: '石门后亮起一盏灯。' }) })
+				await Promise.resolve()
+			})
+			await expectVisibleText('正在回忆石门后的布局。')
+			await waitFor(() => expect(screen.getByText('石门后亮起一盏灯。')).toBeInTheDocument())
+
+			const persisted = persistedTurnEvent()
+			persisted.turn.user = '推开石门'
+			persisted.turn.narrative = '石门后亮起一盏灯。'
+			await act(async () => {
+				stream.enqueue({ event: 'interactive_turn_persisted', data: JSON.stringify(persisted) })
+				stream.enqueue({ event: 'done', data: '{}' })
+				stream.close()
+				await Promise.resolve()
+			})
+
+			await waitFor(() => expect(handleDone).toHaveBeenCalledWith({ silent: true }))
+			expect(sendInteractiveMessageMock).not.toHaveBeenCalled()
+		} finally {
+			stream.close()
+		}
+	})
+
+	it('retries an unpersisted failed turn with the original player input', async () => {
+		const user = userEvent.setup()
+		const firstStream = controllableInteractiveStream()
+		const retryStream = controllableInteractiveStream()
+		sendInteractiveMessageMock
+			.mockResolvedValueOnce(firstStream.readable)
+			.mockResolvedValueOnce(retryStream.readable)
+
+		try {
+			render(<StoryStageHarness onDone={vi.fn().mockResolvedValue(undefined)} />)
+			await user.type(screen.getByPlaceholderText('你要做什么？'), '推开石门')
+			await user.click(screen.getByRole('button', { name: '发送' }))
+			await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalledTimes(1))
+
+			act(() => {
+				firstStream.enqueue({ event: 'error', data: JSON.stringify({ message: '[NodeRunError] 400 Bad Request' }) })
+				firstStream.close()
+			})
+
+			await user.click(await screen.findByRole('button', { name: '重新生成这一轮' }))
+			await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalledTimes(2))
+			expect(sendInteractiveMessageMock.mock.calls[1][0]).toMatchObject({ message: '推开石门' })
+		} finally {
+			firstStream.close()
+			retryStream.close()
+		}
+	})
+
 	it('discards optimistic narrative when done arrives without persistence confirmation', async () => {
 		const user = userEvent.setup()
 		const stream = controllableInteractiveStream()
@@ -466,7 +685,7 @@ describe('StoryStage streaming rendering', () => {
 		}
 	})
 
-  it('batches fast interactive chunks into one animation frame without slicing text', async () => {
+  it('batches fast interactive chunks into one frame and renders one complete text tree', async () => {
     const user = userEvent.setup()
     const stream = controllableInteractiveStream()
     const originalRequestAnimationFrame = window.requestAnimationFrame
@@ -499,12 +718,12 @@ describe('StoryStage streaming rendering', () => {
 
       act(() => runAnimationFrames(frames))
 
-      expect(container.querySelector('.nova-streaming-markdown-reserve')).toHaveTextContent('青石镇外风声忽然停了。')
-      expect(container.querySelector('.nova-streaming-markdown-overlay')).not.toHaveTextContent('青石镇外风声忽然停了。')
+      expect(container.querySelector('.nova-streaming-content-stage')).toBeNull()
+      expect(await screen.findByText('青石镇外风声忽然停了。')).toBeInTheDocument()
 
       act(() => runAnimationFrames(frames))
 
-      expect(await screen.findByText('青石镇外风声忽然停了。')).toBeInTheDocument()
+			expect(screen.getByText('青石镇外风声忽然停了。')).toBeInTheDocument()
 			stream.enqueue({ event: 'interactive_turn_persisted', data: JSON.stringify(persistedTurnEvent()) })
       stream.enqueue({ event: 'done', data: '{}' })
       stream.close()
@@ -515,7 +734,80 @@ describe('StoryStage streaming rendering', () => {
     }
   })
 
+  it('renders live thinking from one complete text tree after the batched frame', async () => {
+    const user = userEvent.setup()
+    const stream = controllableInteractiveStream()
+    const originalRequestAnimationFrame = window.requestAnimationFrame
+    const originalCancelAnimationFrame = window.cancelAnimationFrame
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrameId = 1
+    window.requestAnimationFrame = vi.fn((callback: FrameRequestCallback) => {
+      const id = nextFrameId
+      nextFrameId += 1
+      frames.set(id, callback)
+      return id
+    })
+    window.cancelAnimationFrame = vi.fn((id: number) => {
+      frames.delete(id)
+    })
+
+    try {
+      sendInteractiveMessageMock.mockResolvedValue(stream.readable)
+      const { container } = render(<StoryStageHarness />)
+
+      await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
+      await user.click(screen.getByRole('button', { name: '发送' }))
+
+      await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
+      act(() => runAnimationFrames(frames))
+      stream.enqueue({ event: 'thinking', data: JSON.stringify({ content: '正在检查门后的动静。' }) })
+      await waitFor(() => expect(frames.size).toBeGreaterThan(0))
+
+      act(() => runAnimationFrames(frames))
+
+      expect(container.querySelector('.nova-streaming-content-stage')).toBeNull()
+      expect(await screen.findByText('正在检查门后的动静。')).toBeInTheDocument()
+
+      act(() => runAnimationFrames(frames))
+
+      expect(screen.getByText('正在检查门后的动静。')).toBeInTheDocument()
+    } finally {
+      stream.close()
+      window.requestAnimationFrame = originalRequestAnimationFrame
+      window.cancelAnimationFrame = originalCancelAnimationFrame
+    }
+  })
+
   it('keeps live thinking visible while narrative output starts', async () => {
+    const user = userEvent.setup()
+    const stream = controllableInteractiveStream()
+    const providerThinking = `正在判断门后的声响。${'继续核对现场线索。'.repeat(300)}供应商思考尾部必须完整展示。`
+
+    try {
+      sendInteractiveMessageMock.mockResolvedValue(stream.readable)
+      render(<StoryStageHarness />)
+
+      await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
+      await user.click(screen.getByRole('button', { name: '发送' }))
+      await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
+
+      act(() => {
+        stream.enqueue({ event: 'thinking', data: JSON.stringify({ content: providerThinking }) })
+      })
+      await expectVisibleText(providerThinking)
+
+      act(() => {
+        stream.enqueue({ event: 'chunk', data: JSON.stringify({ content: '门后传来脚步声。' }) })
+      })
+
+      await waitFor(() => expect(screen.getByText('门后传来脚步声。')).toBeInTheDocument())
+      expect(screen.getByText(providerThinking)).toBeInTheDocument()
+    } finally {
+      stream.close()
+    }
+  })
+
+  it('moves a streamed tool preamble from narrative into thinking immediately', async () => {
     const user = userEvent.setup()
     const stream = controllableInteractiveStream()
 
@@ -528,16 +820,24 @@ describe('StoryStage streaming rendering', () => {
       await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
 
       act(() => {
-        stream.enqueue({ event: 'thinking', data: JSON.stringify({ content: '正在判断门后的声响。' }) })
+        stream.enqueue({ event: 'chunk', data: JSON.stringify({ content: '我先检查资料，再开始写正文。' }) })
       })
-      expect(await screen.findByText('正在判断门后的声响。')).toBeInTheDocument()
+      await waitFor(() => {
+        const liveMessages = useInteractiveStore.getState().storyStageRuns['/tmp/book:story-1:main']?.liveMessages || []
+        expect(liveMessages.some((message) => message.role === 'assistant' && message.streaming_target_content === '我先检查资料，再开始写正文。')).toBe(true)
+      })
+      expect(screen.queryByRole('button', { name: /思考过程/ })).not.toBeInTheDocument()
 
       act(() => {
-        stream.enqueue({ event: 'chunk', data: JSON.stringify({ content: '门后传来脚步声。' }) })
+        stream.enqueue({ event: 'interactive_content_reclassified', data: JSON.stringify({ content: '我先检查资料，再开始写正文。' }) })
+        stream.enqueue({ event: 'tool_call', data: JSON.stringify({ id: 'call-lore', name: 'list_lore_items', args: '{}' }) })
       })
 
-      await waitFor(() => expect(screen.getByText('门后传来脚步声。')).toBeInTheDocument())
-      expect(screen.getByText('正在判断门后的声响。')).toBeInTheDocument()
+      const trace = await screen.findByRole('button', { name: /思考过程.*1 次工具调用/ })
+      expect(trace).toBeInTheDocument()
+      expect(screen.getAllByText('我先检查资料，再开始写正文。')).toHaveLength(1)
+      const liveMessages = useInteractiveStore.getState().storyStageRuns['/tmp/book:story-1:main']?.liveMessages || []
+      expect(liveMessages.some((message) => message.role === 'assistant' && (message.streaming_target_content || message.content))).toBe(false)
     } finally {
       stream.close()
     }
@@ -675,9 +975,135 @@ describe('StoryStage streaming rendering', () => {
     expect(screen.queryByText('write_file')).not.toBeInTheDocument()
   })
 
+  it('folds submission tool cards after the narrative into one collapsed trace group when the turn has a narrative anchor', async () => {
+    const user = userEvent.setup()
+    const turn: TurnEvent = {
+      id: 'turn-1',
+      parent_id: null,
+      branch_id: 'main',
+      ts: '2026-07-11T00:00:00Z',
+      user: '推开石门',
+      narrative: '石门后传来锁链拖地的声音。',
+      display_events: [
+        {
+          id: 'game-thinking',
+          role: 'thinking' as const,
+          content: '正在判断石门后的威胁。',
+          agent_kind: 'interactive_story',
+        },
+        {
+          id: 'narrative-anchor',
+          role: 'narrative' as const,
+        },
+        {
+          id: 'submit-patches',
+          role: 'tool_call' as const,
+          name: 'submit_actor_state_patches',
+          content: 'submit_actor_state_patches',
+          status: 'success' as const,
+          agent_kind: 'interactive_story',
+        },
+        {
+          id: 'submit-choices',
+          role: 'tool_call' as const,
+          name: 'submit_choices',
+          content: 'submit_choices',
+          status: 'success' as const,
+          agent_kind: 'interactive_story',
+        },
+      ],
+    }
+
+    render(
+      <VirtuosoMockContext.Provider value={{ viewportHeight: 1200, itemHeight: 120 }}>
+        <StoryStage
+          workspace="/tmp/book"
+          stories={[story()]}
+          story={story()}
+          tellers={[]}
+          storyId="story-1"
+          branchId="main"
+          snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [turn], current_turn: turn, state: {} }}
+          onDone={() => undefined}
+        />
+      </VirtuosoMockContext.Provider>,
+    )
+
+    const narrative = screen.getByText('石门后传来锁链拖地的声音。')
+    expect(narrative).toBeInTheDocument()
+    // 正文之后的提交结果工具统一折叠为一个分组，不再逐张卡片交叉展示
+    expect(screen.queryByText('submit_actor_state_patches')).not.toBeInTheDocument()
+    expect(screen.queryByText('submit_choices')).not.toBeInTheDocument()
+    const postNarrativeGroup = screen.getByRole('button', { name: /^2 次工具调用$/ })
+    expect(narrative.compareDocumentPosition(postNarrativeGroup) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // 正文前的思考分组只包含思考内容，不吞掉提交结果工具
+    const preNarrativeGroup = screen.getByRole('button', { name: /^思考过程$/ })
+    expect(preNarrativeGroup.compareDocumentPosition(narrative) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    // 展开正文后的分组可以看到全部提交工具
+    await user.click(postNarrativeGroup)
+    expect(screen.getByText('submit_actor_state_patches')).toBeInTheDocument()
+    expect(screen.getByText('submit_choices')).toBeInTheDocument()
+  })
+
+  it('keeps submission tools inside the trace group for turns persisted without a narrative anchor', async () => {
+    const turn: TurnEvent = {
+      id: 'turn-1',
+      parent_id: null,
+      branch_id: 'main',
+      ts: '2026-07-11T00:00:00Z',
+      user: '推开石门',
+      narrative: '石门后传来锁链拖地的声音。',
+      display_events: [
+        {
+          id: 'game-thinking',
+          role: 'thinking' as const,
+          content: '正在判断石门后的威胁。',
+          agent_kind: 'interactive_story',
+        },
+        {
+          id: 'submit-patches',
+          role: 'tool_call' as const,
+          name: 'submit_actor_state_patches',
+          content: 'submit_actor_state_patches',
+          status: 'success' as const,
+          agent_kind: 'interactive_story',
+        },
+        {
+          id: 'submit-choices',
+          role: 'tool_call' as const,
+          name: 'submit_choices',
+          content: 'submit_choices',
+          status: 'success' as const,
+          agent_kind: 'interactive_story',
+        },
+      ],
+    }
+
+    render(
+      <VirtuosoMockContext.Provider value={{ viewportHeight: 1200, itemHeight: 120 }}>
+        <StoryStage
+          workspace="/tmp/book"
+          stories={[story()]}
+          story={story()}
+          tellers={[]}
+          storyId="story-1"
+          branchId="main"
+          snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [turn], current_turn: turn, state: {} }}
+          onDone={() => undefined}
+        />
+      </VirtuosoMockContext.Provider>,
+    )
+
+    expect(screen.getByText('石门后传来锁链拖地的声音。')).toBeInTheDocument()
+    // 旧数据没有锚点：保持旧布局，提交结果工具仍在思考折叠分组内（默认折叠不渲染）
+    expect(screen.getByRole('button', { name: /思考过程.*2 次工具调用/ })).toBeInTheDocument()
+    expect(screen.queryByText('submit_choices')).not.toBeInTheDocument()
+  })
+
   it('updates a live tool card when an index-based call later receives an id', async () => {
     const user = userEvent.setup()
     const stream = controllableInteractiveStream()
+    const completeArgs = JSON.stringify({ command: `printf '${'工具输入'.repeat(9000)}尾部必须完整展示'` })
 
     try {
       sendInteractiveMessageMock.mockResolvedValue(stream.readable)
@@ -689,7 +1115,7 @@ describe('StoryStage streaming rendering', () => {
 
       act(() => {
         stream.enqueue({ event: 'tool_call', data: JSON.stringify({ index: 0, name: 'execute', args: '' }) })
-        stream.enqueue({ event: 'tool_args_delta', data: JSON.stringify({ id: 'call-execute', index: 0, name: 'execute', delta: '{"command":"pwd"}' }) })
+        stream.enqueue({ event: 'tool_args_delta', data: JSON.stringify({ id: 'call-execute', index: 0, name: 'execute', delta: completeArgs }) })
         stream.enqueue({ event: 'tool_result', data: JSON.stringify({ id: 'call-execute', index: 0, name: 'execute', content: 'command done' }) })
       })
 
@@ -698,13 +1124,62 @@ describe('StoryStage streaming rendering', () => {
         const executeMessages = liveMessages.filter((message) => message.role === 'tool_call' && message.name === 'execute')
         expect(executeMessages).toHaveLength(1)
         expect(executeMessages[0]).toMatchObject({
-          args: '{"command":"pwd"}',
+          args: completeArgs,
           status: 'success',
           result: 'command done',
           streaming: false,
         })
       })
     } finally {
+      stream.close()
+    }
+  })
+
+  it('batches consecutive tool argument deltas into one frame update', async () => {
+    const user = userEvent.setup()
+    const stream = controllableInteractiveStream()
+    sendInteractiveMessageMock.mockResolvedValue(stream.readable)
+    let scheduledFrame: FrameRequestCallback | null = null
+    let unsubscribe: () => void = () => {}
+
+    try {
+      render(<StoryStageHarness />)
+      await user.type(screen.getByPlaceholderText('你要做什么？'), '继续前进')
+      await user.click(screen.getByRole('button', { name: '发送' }))
+      await waitFor(() => expect(sendInteractiveMessageMock).toHaveBeenCalled())
+      act(() => {
+        stream.enqueue({ event: 'tool_call', data: JSON.stringify({ id: 'call-execute', name: 'execute', args: '' }) })
+      })
+      await waitFor(() => {
+        const messages = useInteractiveStore.getState().storyStageRuns['/tmp/book:story-1:main']?.liveMessages || []
+        expect(messages.some((message) => message.id === 'call-execute')).toBe(true)
+      })
+
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation((callback: FrameRequestCallback) => {
+        scheduledFrame = callback
+        return 91
+      })
+      let storeUpdates = 0
+      unsubscribe = useInteractiveStore.subscribe(() => { storeUpdates += 1 })
+
+      await act(async () => {
+        stream.enqueue({ event: 'tool_args_delta', data: JSON.stringify({ id: 'call-execute', name: 'execute', delta: 'first' }) })
+        stream.enqueue({ event: 'tool_args_delta', data: JSON.stringify({ id: 'call-execute', name: 'execute', delta: '-last' }) })
+        await Promise.resolve()
+        await Promise.resolve()
+      })
+
+      expect(storeUpdates).toBe(0)
+      expect(scheduledFrame).not.toBeNull()
+      act(() => {
+        ;(scheduledFrame as FrameRequestCallback)(0)
+      })
+      const messages = useInteractiveStore.getState().storyStageRuns['/tmp/book:story-1:main']?.liveMessages || []
+      expect(storeUpdates).toBe(1)
+      expect(messages.find((message) => message.id === 'call-execute')?.args).toBe('first-last')
+    } finally {
+      unsubscribe()
+      vi.restoreAllMocks()
       stream.close()
     }
   })
@@ -867,7 +1342,7 @@ describe('StoryStage interactive image rendering', () => {
 })
 
 describe('StoryStage opening panel', () => {
-  it('starts the current book preset from the book preset button', async () => {
+  it('shows preset content in its tab and starts the selected preset', async () => {
     const user = userEvent.setup()
     sendInteractiveMessageMock.mockResolvedValue(interactiveStream([
       { event: 'done', data: '{}' },
@@ -886,7 +1361,9 @@ describe('StoryStage opening panel', () => {
       />,
     )
 
-    expect(screen.getByPlaceholderText('写下你想使用的开局。生成时会作为有界来源传给游戏 Agent。')).toHaveValue('')
+    expect(screen.getByRole('tab', { name: /AI 编排/ })).toHaveAttribute('data-state', 'active')
+    await user.click(screen.getByRole('tab', { name: /书籍预设/ }))
+    expect(screen.getAllByText('青石镇的雨刚刚停。').length).toBeGreaterThan(0)
     await user.click(screen.getByRole('button', { name: '使用书籍预设' }))
 
     await waitFor(() => {
@@ -921,8 +1398,9 @@ describe('StoryStage opening panel', () => {
       />,
     )
 
-    await user.click(screen.getByRole('combobox', { name: '选择书籍预设' }))
-    await user.click(await screen.findByRole('option', { name: '雪夜开场' }))
+    await user.click(screen.getByRole('tab', { name: /书籍预设/ }))
+    await user.click(screen.getByRole('option', { name: '选择书籍预设：雪夜开场' }))
+    expect(screen.getAllByText('雪夜里，山门外只剩一盏灯。').length).toBeGreaterThan(0)
     await user.click(screen.getByRole('button', { name: '使用书籍预设' }))
 
     await waitFor(() => {
@@ -934,7 +1412,69 @@ describe('StoryStage opening panel', () => {
       }))
     })
   })
+
+  it('keeps custom opening input inside the custom tab', async () => {
+    const user = userEvent.setup()
+    render(
+      <StoryStage
+        workspace="/tmp/book"
+        stories={[story()]}
+        story={story()}
+        tellers={[]}
+        storyId="story-1"
+        branchId="main"
+        snapshot={{ story_id: 'story-1', branch_id: 'main', turns: [], state: {} }}
+        onDone={() => {}}
+      />,
+    )
+
+    expect(screen.queryByPlaceholderText('写下你想使用的开局。生成时会作为有界来源传给游戏 Agent。')).not.toBeInTheDocument()
+    await user.click(screen.getByRole('tab', { name: '自定义' }))
+    const input = screen.getByPlaceholderText('写下你想使用的开局。生成时会作为有界来源传给游戏 Agent。')
+    await user.type(input, '山门外传来三声钟响。')
+    expect(screen.getByText('10 字')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '使用自定义开局' })).toBeEnabled()
+  })
 })
+
+function ReplyEditHarness() {
+  const initialTurn: TurnEvent = {
+    id: 'turn-edit',
+    parent_id: null,
+    branch_id: 'main',
+    ts: '2026-06-28T00:00:00Z',
+    user: '去找朋友',
+    narrative: '朋友住在 3 楼 403 室。',
+  }
+  const [snapshot, setSnapshot] = useState<Snapshot>({
+    story_id: 'story-1',
+    branch_id: 'main',
+    turns: [initialTurn],
+    current_turn: initialTurn,
+    state: {},
+  })
+
+  return (
+    <VirtuosoMockContext.Provider value={{ viewportHeight: 1200, itemHeight: 120 }}>
+      <StoryStage
+        workspace="/tmp/book"
+        stories={[story()]}
+        story={story()}
+        tellers={[]}
+        storyId="story-1"
+        branchId="main"
+        snapshot={snapshot}
+        onDone={() => {
+          const narrative = updateInteractiveTurnNarrativeMock.mock.calls.at(-1)?.[2]?.narrative || initialTurn.narrative
+          const turn = { ...snapshot.turns[0], narrative }
+          const nextSnapshot = { ...snapshot, turns: [turn], current_turn: turn }
+          setSnapshot(nextSnapshot)
+          return Promise.resolve(nextSnapshot)
+        }}
+      />
+    </VirtuosoMockContext.Provider>
+  )
+}
 
 function StoryStageHarness({ onDone }: { onDone?: (options?: { silent?: boolean }) => Promise<Snapshot | void> } = {}) {
   const [snapshot, setSnapshot] = useState<Snapshot>({ story_id: 'story-1', branch_id: 'main', turns: [], state: {} })
@@ -1096,6 +1636,13 @@ function runAnimationFrames(frames: Map<number, FrameRequestCallback>) {
   }
 }
 
+async function expectVisibleText(text: string) {
+  await waitFor(() => {
+    const visible = screen.getAllByText(text).find((element) => !element.closest('[aria-hidden="true"]'))
+    expect(visible).toBeVisible()
+  })
+}
+
 function deferred<T>() {
   let resolve!: (value: T) => void
   let reject!: (reason?: unknown) => void
@@ -1113,6 +1660,7 @@ function story(): StorySummary {
     origin: '',
     story_teller_id: 'classic',
     story_director_id: 'default',
+    choice_count: 5,
     reply_target_chars: 2000,
     image_settings: { mode: 'manual', interval_turns: 3 },
     opening: { mode: 'ai' },
@@ -1132,10 +1680,9 @@ function storyDirector(ruleVisibilityMode: string) {
     strategy: {
       enabled: true,
       rule_visibility_mode: ruleVisibilityMode,
-    },
-    trpg_system: { rule_templates: [] },
-    opening_selector: { enabled: true },
-    custom: false,
+		},
+		trpg_system: { rule_templates: [] },
+		custom: false,
   }
 }
 
@@ -1166,7 +1713,7 @@ function snapshotWithRuleResolution(): Snapshot {
           outcomes: {
             critical_success: { result: '无声潜入。' },
             success: { result: '成功潜入。' },
-            failure: { result: '强闯失败导致主线中断', state_changes: [{ path: 'actors.protagonist.state.resources.hp', change: -10, reason: '被禁制反震' }] },
+            failure: { result: '强闯失败导致主线中断', state_changes: [{ actor_id: 'protagonist', field_id: '当前生命', change: -10, reason: '被禁制反震' }] },
             critical_failure: { result: '被当场抓住。' },
           },
         },
@@ -1183,7 +1730,7 @@ function snapshotWithRuleResolution(): Snapshot {
           total: 6,
           outcome: 'failure',
           result: '强闯失败导致主线中断',
-          state_changes: [{ path: 'actors.protagonist.state.resources.hp', change: -10, reason: '被禁制反震' }],
+          state_changes: [{ actor_id: 'protagonist', field_id: '当前生命', change: -10, reason: '被禁制反震' }],
         },
       },
     }],

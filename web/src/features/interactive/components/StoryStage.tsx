@@ -1,11 +1,9 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
-import { Activity, Archive, BarChart3, BookOpen, Check, ChevronDown, ChevronUp, Command as CommandIcon, Compass, ImagePlus, List, Loader2, PanelRight, Pencil, Plus, RefreshCw, ScrollText, Send, SlidersHorizontal, Sparkles, Square, X } from 'lucide-react'
+import { Activity, Archive, BarChart3, Check, ChevronDown, ChevronUp, Command as CommandIcon, Compass, ImagePlus, List, Loader2, PanelRight, Pencil, Plus, RefreshCw, ScrollText, Send, SlidersHorizontal, Sparkles, Square, X } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { Textarea } from '@/components/ui/textarea'
-import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Command, CommandEmpty, CommandGroup, CommandItem, CommandList } from '@/components/ui/command'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuSeparator, DropdownMenuSub, DropdownMenuSubContent, DropdownMenuSubTrigger, DropdownMenuTrigger } from '@/components/ui/dropdown-menu'
@@ -19,26 +17,36 @@ import { AgentTracePanel } from '@/components/Chat/AgentTracePanel'
 import { AgentSubAgentSessionPanel } from '@/components/Chat/AgentSubAgentSessionPanel'
 import { ComposerTokenInput, type ComposerTokenInputHandle, type ComposerTokenSpec, type ComposerTrigger } from '@/components/Chat/composer-token-input'
 import { buildContextCompactionMessage, createContextCompactionMessageId, upsertContextCompactionMessage } from '@/components/Chat/context-compaction-message'
-import { subAgentSessionKey } from '@/components/Chat/subagent-session'
 import { MOBILE_NAVIGATION_OPEN_EVENT } from '@/components/layout/workspace-mobile-layout'
 import type { ChatMessage, ContextAnalysis, InteractiveImage, InteractiveImageError, PublicRuleRoll } from '@/lib/api'
 import { chatMessagesToAgentUIMessages } from '@/lib/agent-legacy-message'
 import { agentSubAgentSessionKey, agentViewToRenderMessage, type AgentMessageView } from '@/lib/agent-message-view'
 import { fetchSettings } from '@/features/settings/api'
 import { useSkillCommands } from '@/hooks/useSkillCommands'
-import { abortInteractiveChat, analyzeInteractiveContext, compactInteractiveContext, generateInteractiveImage, removeInteractiveContextCompaction, runInteractiveDirector, sendInteractiveMessage, switchInteractiveTurnVersion } from '../api'
+import { abortInteractiveChat, analyzeInteractiveContext, compactInteractiveContext, generateInteractiveImage, removeInteractiveContextCompaction, runInteractiveDirector, sendInteractiveMessage, streamActiveInteractiveChat, switchInteractiveTurnVersion, updateInteractiveTurnNarrative } from '../api'
+import type { ActiveInteractiveChat } from '../api'
 import { createInteractiveNarrativeFilter, sanitizeStoredNarrative } from '../stream-parser'
 import { emptyStoryStageRun, useInteractiveStore } from '../stores/interactive-store'
 import type { StoryStageRunState } from '../stores/interactive-store'
-import { DEFAULT_INTERACTIVE_REPLY_TARGET_CHARS, buildOpeningPrompt, truncateStoryOpeningText, type BookOpeningPreset, type StoryCreateInput } from '../opening'
-import type { ImagePreset, InteractiveTurnPersistedEvent, RuleResolution, Snapshot, StoryDirector, StoryImageSettings, StorySummary, Teller, TokenUsageEvent } from '../types'
+import { buildOpeningPrompt, truncateStoryOpeningText, type BookOpeningPreset, type StoryCreateInput } from '../opening'
+import type { ImagePreset, InteractiveSSEEvent, InteractiveTurnPersistedEvent, RuleResolution, Snapshot, StoryDirector, StoryImageSettings, StorySummary, Teller, TokenUsageEvent, TurnEvent } from '../types'
+import { abortStoryRunStream, clearStoryRunAbortController, registerStoryRunAbortController, useActiveStoryRunRecovery } from '../use-active-story-run'
 import { StoryPicker } from './StoryPicker'
+import { NewStorySetupPanel } from './NewStorySetupPanel'
+import { StoryOpeningPanel } from './StoryOpeningPanel'
 import { StoryDirectorPicker } from './StoryDirectorPicker'
+import { ReplyTargetCharsControl } from './ReplyTargetCharsControl'
 import { TurnNavigator, type TurnNavigationItem } from './TurnNavigator'
 import { isDirectorDisplayEvent } from './director-console/utils'
+import { DEFAULT_STORY_STATE_DISPLAY, type StoryStateDisplayPreference } from './story-state/display-preference'
+import { StoryStateLedger } from './story-state/StoryStateLedger'
+import { buildStoryStateModel } from './story-state/model'
+import { EditInteractiveReplyDialog } from './EditInteractiveReplyDialog'
+import { appendBufferedLiveMessage, bindLiveToolEventKeys, findMappedLiveToolId, findToolMessageIndexForPayload, liveToolEventKeys, promoteMessageTarget, promoteMessageTargets, streamMetadataFromPayload, type BufferedLiveMessage } from './story-stage/live-stream-messages'
 import { useIsMobile } from '@/hooks/useIsMobile'
 import { useKeyboardInset } from '@/hooks/useKeyboardInset'
 import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { createRafUpdateBatcher } from '@/lib/streaming/raf-update-batcher'
 
 interface StoryStageProps {
   workspace?: string
@@ -54,16 +62,20 @@ interface StoryStageProps {
   snapshotLoading?: boolean
   loreEmpty?: boolean
   bookOpeningPresets?: BookOpeningPreset[]
-  sceneMemoryVisible?: boolean
+  directorPanelVisible?: boolean
+  stateDisplayPreference?: StoryStateDisplayPreference
   onStorySelect?: (storyId: string) => void
-  onStoryCreate?: (input: StoryCreateInput) => void
-  onStoryDelete?: (storyId: string) => void
+  onStoryCreate?: (input: StoryCreateInput) => void | Promise<void>
+  onStorySetupUpdate?: (input: StoryCreateInput) => void | Promise<void>
+  onStoryDelete?: (storyIds: string[]) => void | Promise<void>
   onDirectorChange?: (directorId: string) => void
   onReplyTargetCharsChange?: (replyTargetChars: number) => void | Promise<void>
   onImageSettingsChange?: (settings: StoryImageSettings) => void | Promise<void>
   onRequestLoreInit?: () => void
   onOpenDirectorConfig?: () => void
-  onToggleSceneMemory?: () => void
+  onToggleDirectorPanel?: () => void
+  onOpenDirectorState?: () => void
+  onStateDisplayPreferenceChange?: (value: StoryStateDisplayPreference) => void
   onTurnPersisted?: (event: InteractiveTurnPersistedEvent) => Snapshot | void
   onDone: (options?: { silent?: boolean }) => void | Promise<Snapshot | void>
 }
@@ -72,23 +84,23 @@ const DEFAULT_READING_FONT_SIZE = 18
 const DEFAULT_STAGE_LINE_HEIGHT = 1.78
 const EMPTY_STAGE_RUN = emptyStoryStageRun()
 const DEFAULT_IMAGE_INTERVAL_TURNS = 3
-const stageAbortControllers = new Map<string, AbortController>()
-
-type BufferedLiveMessage = {
-  role: 'assistant' | 'thinking'
-  content: string
-  metadata: Partial<ChatMessage>
-}
 
 type LiveTurnRenderKeys = {
   user: string
   assistant: string
 }
 
-export function StoryStage({ workspace, styleSceneSuggestions = [], stories = [], story, tellers = [], storyDirectors = [], imagePresets = [], storyId, branchId, snapshot, snapshotLoading = false, loreEmpty = false, bookOpeningPresets = [], sceneMemoryVisible = true, onStorySelect = noop, onStoryCreate = noop, onStoryDelete = noop, onDirectorChange = noop, onReplyTargetCharsChange, onImageSettingsChange, onRequestLoreInit, onOpenDirectorConfig, onToggleSceneMemory, onTurnPersisted = noopTurnPersisted, onDone }: StoryStageProps) {
+type InteractiveStreamOutcome = {
+  finishedNormally: boolean
+  receivedPersistedTurn: boolean
+  persistedSnapshot?: Snapshot
+}
+
+export function StoryStage({ workspace, styleSceneSuggestions = [], stories = [], story, tellers = [], storyDirectors = [], imagePresets = [], storyId, branchId, snapshot, snapshotLoading = false, loreEmpty = false, bookOpeningPresets = [], directorPanelVisible = true, stateDisplayPreference = DEFAULT_STORY_STATE_DISPLAY, onStorySelect = noop, onStoryCreate = noop, onStorySetupUpdate = noop, onStoryDelete = noop, onDirectorChange = noop, onReplyTargetCharsChange, onImageSettingsChange, onRequestLoreInit, onOpenDirectorConfig, onToggleDirectorPanel, onOpenDirectorState, onStateDisplayPreferenceChange = noopStateDisplayPreferenceChange, onTurnPersisted = noopTurnPersisted, onDone }: StoryStageProps) {
   const { t } = useTranslation()
   const isMobile = useIsMobile()
   const keyboardInset = useKeyboardInset()
+  const storyStateModel = useMemo(() => buildStoryStateModel(snapshot), [snapshot])
   const [input, setInput] = useState('')
   const [stageControlsOpen, setStageControlsOpen] = useState(false)
   const [styleScenes, setStyleScenes] = useState<string[]>([])
@@ -108,8 +120,9 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
   })
   const snapshotKey = storyStageSnapshotKey(storyId, branchId, snapshot)
   const stageKey = `${workspace || 'current'}:${storyId || 'none'}:${branchId || snapshot?.branch_id || 'main'}`
-  const { storyStageRuns, setStoryStageRun, clearStoryStageRun } = useInteractiveStore()
-  const stageRun = storyStageRuns[stageKey] || EMPTY_STAGE_RUN
+  const stageRun = useInteractiveStore((state) => state.storyStageRuns[stageKey] || EMPTY_STAGE_RUN)
+  const setStoryStageRun = useInteractiveStore((state) => state.setStoryStageRun)
+  const clearStoryStageRun = useInteractiveStore((state) => state.clearStoryStageRun)
   const streaming = stageRun.streaming
   const activityContent = stageRun.activityContent
   const liveMessages = stageRun.liveMessages
@@ -119,6 +132,12 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
   useEffect(() => {
     setOptimisticInteractiveImages({})
   }, [stageKey])
+  const [replyEditTarget, setReplyEditTarget] = useState<{
+    turnId: string
+    branchId: string
+    initialContent: string
+    expectedNarrative: string
+  } | null>(null)
   const [editingTurn, setEditingTurn] = useState<{
     id: string
     content: string
@@ -128,6 +147,8 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
   const [generatingImageTurnId, setGeneratingImageTurnId] = useState<string | null>(null)
   const [customOpeningText, setCustomOpeningText] = useState('')
   const [selectedBookOpeningPresetId, setSelectedBookOpeningPresetId] = useState('')
+  const [creatingStory, setCreatingStory] = useState(false)
+  const [editingStorySetup, setEditingStorySetup] = useState(false)
   const [directorRetrying, setDirectorRetrying] = useState(false)
   const [directorRetryError, setDirectorRetryError] = useState('')
   const [contextAnalysisOpen, setContextAnalysisOpen] = useState(false)
@@ -142,6 +163,10 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
   const [turnScrollRequest, setTurnScrollRequest] = useState<TurnScrollRequest>()
   const currentCompactionMessageIdRef = useRef<string | null>(null)
   const compactionIdCounterRef = useRef(0)
+
+  useEffect(() => {
+    setReplyEditTarget(null)
+  }, [stageKey])
   const liveMessageBufferRef = useRef<BufferedLiveMessage[]>([])
   const liveMessageRafRef = useRef<number | null>(null)
   const liveMessagePromoteRafRef = useRef<number | null>(null)
@@ -206,6 +231,11 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
       }))
     },
     [updateStageRun],
+  )
+
+  const toolArgsBatcher = useMemo(
+    () => createRafUpdateBatcher<ChatMessage[]>(setStageLiveMessages),
+    [setStageLiveMessages],
   )
 
   const latestLiveTurn = useMemo(() => {
@@ -279,8 +309,9 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         liveMessagePromoteRafRef.current = null
       }
       liveMessageBufferRef.current = []
+      toolArgsBatcher.discard()
     }
-  }, [])
+  }, [toolArgsBatcher])
 
   useEffect(() => {
     if (activeSkillCommandIndex >= filteredSkillCommands.length) setActiveSkillCommandIndex(0)
@@ -326,9 +357,19 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         })
       }
       const deferredImageMessages: ChatMessage[] = []
+      // narrative 锚点标记正文在事件流中的真实位置：锚点前的思考/工具留在正文之前，
+      // 提交结果等锚点后事件渲染在正文之后；旧回合没有锚点，正文兜底排在最后。
+      const preNarrativeMessages: ChatMessage[] = []
+      const postNarrativeMessages: ChatMessage[] = []
+      let narrativeAnchored = false
       for (const [index, event] of displayEvents.entries()) {
+        if (event.role === 'narrative') {
+          narrativeAnchored = true
+          continue
+        }
+        const timeline = narrativeAnchored ? postNarrativeMessages : preNarrativeMessages
         if (event.role === 'thinking') {
-          messages.push({
+          timeline.push({
             id: event.id || `${turn.id}-thinking-${index}`,
             role: 'thinking',
             content: event.content || '',
@@ -375,12 +416,12 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
           if (event.name === 'generate_interactive_image') {
             deferredImageMessages.push(toolMessage)
           } else {
-            messages.push(toolMessage)
+            timeline.push(toolMessage)
           }
           continue
         }
         if (event.role === 'assistant') {
-          messages.push({
+          timeline.push({
             id: event.id || `${turn.id}-subagent-${index}`,
             role: 'assistant',
             content: event.content || '',
@@ -397,6 +438,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
           })
         }
       }
+      messages.push(...preNarrativeMessages)
       const ruleRoll = publicRuleRollVisible ? publicRuleRollFromResolution(turn.rule_resolution) : null
       if (ruleRoll) {
         messages.push({
@@ -424,6 +466,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         interactive_image_error: latestInteractiveImageError(deferredImageMessages),
         interactive_image_status: mergedImages?.length ? 'success' : latestInteractiveImageStatus(deferredImageMessages),
       })
+      messages.push(...postNarrativeMessages)
       return messages
     })
   }, [optimisticInteractiveImages, publicRuleRollVisible, storyPathTurns])
@@ -485,8 +528,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
     () =>
       (snapshot?.current_turn?.turn_result?.choices || snapshot?.current_turn?.hot_state?.choices || [])
         .map((choice) => choice.trim())
-        .filter(Boolean)
-        .slice(0, 4),
+        .filter(Boolean),
     [snapshot?.current_turn?.hot_state?.choices, snapshot?.current_turn?.turn_result?.choices],
   )
   const directorPlanStatus = snapshot?.director_plan_status
@@ -501,9 +543,9 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
     [availableBookOpeningPresets, selectedBookOpeningPresetId],
   )
   const turnsById = useMemo(() => {
-    const result = new Map<string, { user: string }>()
+    const result = new Map<string, TurnEvent>()
     for (const turn of snapshot?.turns || []) {
-      result.set(turn.id, { user: turn.user })
+      result.set(turn.id, turn)
     }
     return result
   }, [snapshot?.turns])
@@ -547,6 +589,15 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
     setHotChoicesExpanded(false)
   }, [snapshotKey])
 
+  useActiveStoryRunRecovery({
+    stageKey,
+    storyId,
+    branchId,
+    isStreaming: () => Boolean(useInteractiveStore.getState().storyStageRuns[stageKey]?.streaming),
+    onResume: resumeActiveStoryRun,
+    onDetach: () => updateStageRun({ streaming: false, activityContent: '' }),
+  })
+
   const send = async (override?: { message?: string; rewindTurnId?: string }) => {
     const sourceMessage = override?.message ?? input
     const message = sourceMessage.trim()
@@ -565,24 +616,9 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
     setShowSkillCommands(false)
     setSkillCommandQuery(null)
     setActiveSkillCommandIndex(0)
-    setStageActivityContent(t('storyStage.activity.connecting'))
-    flushLiveMessageBuffer()
-    liveToolKeyToMessageIdRef.current = {}
-    nonNarrativeLiveMessageStreamingRef.current = false
-    const liveTurnRenderKeys = createLiveTurnRenderKeys()
-    currentLiveTurnRenderKeysRef.current = liveTurnRenderKeys
-    setStageLiveMessages([{ role: 'user', content: message, render_key: liveTurnRenderKeys.user, navigation_turn_id: liveTurnNavigationAnchorId }])
-    currentCompactionMessageIdRef.current = null
-    updateStageRun({ rewindTurnId: nextRewindTurnId || undefined })
-    liveStageKeyRef.current = stageKey
-    setStageStreaming(true)
+    prepareLiveStoryRun(message, nextRewindTurnId)
     const abortController = new AbortController()
-    stageAbortControllers.set(stageKey, abortController)
-    const narrativeFilter = createInteractiveNarrativeFilter()
-    let finishedNormally = false
-    let streamFailed = false
-    let receivedPersistedTurn = false
-    let persistedSnapshot: Snapshot | undefined = undefined
+    registerStoryRunAbortController(stageKey, abortController)
     try {
       const stream = await sendInteractiveMessage({
         mode: 'story',
@@ -593,159 +629,215 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         regenerate_from_turn_id: nextRewindTurnId || undefined,
         signal: abortController.signal,
       })
-      const reader = stream.getReader()
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        switch (value.event) {
-          case 'chunk': {
-            const data = JSON.parse(value.data)
-            if (data.subagent) {
-              appendAssistantMessage(data.content || '', streamMetadataFromPayload(data))
-              setStageActivityContent('')
-              break
-            }
-            const { text, reset } = narrativeFilter.push(data.content || '')
-            if (reset) resetAssistantMessage()
-            if (text) {
-              collapseNonNarrativeMessages()
-              appendAssistantMessage(text)
-            }
+      await completeInteractiveStream(await consumeInteractiveStream(stream))
+    } catch (error) {
+      handleInteractiveStreamError(error)
+    } finally {
+      finishLiveStoryRun(abortController)
+    }
+  }
+
+  async function resumeActiveStoryRun(active: ActiveInteractiveChat, abortController: AbortController, isDisposed: () => boolean) {
+    const message = active.message?.trim() || ''
+    if (!message) return
+    prepareLiveStoryRun(message, active.regenerate_from_turn_id)
+    try {
+      const stream = await streamActiveInteractiveChat({
+        storyId,
+        branchId,
+        taskId: active.task_id,
+        signal: abortController.signal,
+      })
+      if (isDisposed()) return
+      await completeInteractiveStream(await consumeInteractiveStream(stream))
+    } catch (error) {
+      if (!isDisposed()) handleInteractiveStreamError(error)
+    } finally {
+      finishLiveStoryRun(abortController)
+    }
+  }
+
+  function prepareLiveStoryRun(message: string, nextRewindTurnId?: string) {
+    setStageActivityContent(t('storyStage.activity.thinking'))
+    flushLiveUpdates()
+    liveToolKeyToMessageIdRef.current = {}
+    nonNarrativeLiveMessageStreamingRef.current = false
+    const liveTurnRenderKeys = createLiveTurnRenderKeys()
+    currentLiveTurnRenderKeysRef.current = liveTurnRenderKeys
+    setStageLiveMessages([{ role: 'user', content: message, render_key: liveTurnRenderKeys.user, navigation_turn_id: liveTurnNavigationAnchorId }])
+    currentCompactionMessageIdRef.current = null
+    updateStageRun({ rewindTurnId: nextRewindTurnId || undefined, retryMessage: message })
+    liveStageKeyRef.current = stageKey
+    setStageStreaming(true)
+  }
+
+  async function consumeInteractiveStream(stream: ReadableStream<InteractiveSSEEvent>): Promise<InteractiveStreamOutcome> {
+    const narrativeFilter = createInteractiveNarrativeFilter()
+    let finishedNormally = false
+    let streamFailed = false
+    let receivedPersistedTurn = false
+    let persistedSnapshot: Snapshot | undefined
+    const reader = stream.getReader()
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      switch (value.event) {
+        case 'chunk': {
+          const data = JSON.parse(value.data)
+          if (data.subagent) {
+            appendAssistantMessage(data.content || '', streamMetadataFromPayload(data))
             setStageActivityContent('')
             break
           }
-          case 'thinking': {
-            const data = JSON.parse(value.data)
-            appendThinkingMessage(data.content || '', streamMetadataFromPayload(data))
-            setStageActivityContent(t('storyStage.activity.thinking'))
-            break
+          const { text, reset } = narrativeFilter.push(data.content || '')
+          if (reset) resetAssistantMessage()
+          if (text) {
+            collapseNonNarrativeMessages()
+            appendAssistantMessage(text)
           }
-          case 'tool_call': {
-            const data = JSON.parse(value.data)
-            flushLiveMessageBuffer()
-            appendToolCallMessage(data)
-            setStageActivityContent(
-              t('storyStage.activity.processingTool', {
-                name: data.name || t('storyStage.activity.toolCall'),
-              }),
-            )
-            break
+          setStageActivityContent('')
+          break
+        }
+        case 'thinking': {
+          const data = JSON.parse(value.data)
+          appendThinkingMessage(data.content || '', streamMetadataFromPayload(data))
+          setStageActivityContent(t('storyStage.activity.thinking'))
+          break
+        }
+        case 'interactive_content_reclassified': {
+          const data = JSON.parse(value.data)
+          resetAssistantMessage()
+          appendThinkingMessage(data.content || '', streamMetadataFromPayload(data))
+          setStageActivityContent(t('storyStage.activity.thinking'))
+          break
+        }
+        case 'tool_call': {
+          const data = JSON.parse(value.data)
+          flushLiveUpdates()
+          appendToolCallMessage(data)
+          setStageActivityContent(t('storyStage.activity.processingTool', {
+            name: data.name || t('storyStage.activity.toolCall'),
+          }))
+          break
+        }
+        case 'tool_args_delta': {
+          const data = JSON.parse(value.data)
+          flushLiveMessageBuffer()
+          appendToolArgsDelta(data)
+          break
+        }
+        case 'tool_result': {
+          const data = JSON.parse(value.data)
+          flushLiveUpdates()
+          updateToolCallMessage(data, 'success', data.content || '')
+          appendLiveRuleRollMessage(data)
+          setStageActivityContent('')
+          break
+        }
+        case 'context_compaction': {
+          const data = JSON.parse(value.data)
+          flushLiveUpdates()
+          appendContextCompactionMessage(data)
+          setStageActivityContent('')
+          if (data.status === 'completed' || data.status === 'failed') currentCompactionMessageIdRef.current = null
+          break
+        }
+        case 'token_usage': {
+          const data = JSON.parse(value.data)
+          flushLiveUpdates()
+          setStageLiveMessages((prev) => upsertTokenUsageMessage(prev, buildTokenUsageMessage(data)))
+          break
+        }
+        case 'interactive_turn_persisted': {
+          const data = JSON.parse(value.data) as InteractiveTurnPersistedEvent
+          flushLiveUpdates()
+          receivedPersistedTurn = true
+          if (data.turn?.id && currentLiveTurnRenderKeysRef.current) {
+            turnRenderKeysRef.current[data.turn.id] = currentLiveTurnRenderKeysRef.current
           }
-          case 'tool_args_delta': {
-            const data = JSON.parse(value.data)
-            flushLiveMessageBuffer()
-            appendToolArgsDelta(data)
-            break
-          }
-          case 'tool_result': {
-            const data = JSON.parse(value.data)
-            flushLiveMessageBuffer()
-            updateToolCallMessage(data, 'success', data.content || '')
-            appendLiveRuleRollMessage(data)
-            setStageActivityContent('')
-            break
-          }
-          case 'context_compaction': {
-            const data = JSON.parse(value.data)
-            flushLiveMessageBuffer()
-            appendContextCompactionMessage(data)
-            setStageActivityContent('')
-            if (data.status === 'completed' || data.status === 'failed') {
-              currentCompactionMessageIdRef.current = null
-            }
-            break
-          }
-          case 'token_usage': {
-            const data = JSON.parse(value.data)
-            flushLiveMessageBuffer()
-            setStageLiveMessages((prev) => upsertTokenUsageMessage(prev, buildTokenUsageMessage(data)))
-            break
-          }
-          case 'interactive_turn_persisted': {
-            const data = JSON.parse(value.data) as InteractiveTurnPersistedEvent
-            flushLiveMessageBuffer()
-            receivedPersistedTurn = true
-            if (data.turn?.id && currentLiveTurnRenderKeysRef.current) {
-              turnRenderKeysRef.current[data.turn.id] = currentLiveTurnRenderKeysRef.current
-            }
-            persistedSnapshot = onTurnPersisted(data) || persistedSnapshot
-            setStageActivityContent('')
-            break
-          }
-          case 'error': {
-            const data = JSON.parse(value.data)
-            flushLiveMessageBuffer()
-            finishLiveMessages()
-            setStageActivityContent('')
+          persistedSnapshot = onTurnPersisted(data) || persistedSnapshot
+          setStageActivityContent('')
+          break
+        }
+        case 'error': {
+          const data = JSON.parse(value.data)
+          flushLiveUpdates()
+          finishLiveMessages()
+          setStageActivityContent('')
+          streamFailed = true
+          setStageLiveMessages((prev) => [
+            ...prev,
+            { role: 'error', content: data.message || data.error || t('storyStage.activity.unknownError') },
+          ])
+          break
+        }
+        case 'done': {
+          const { text, reset } = narrativeFilter.flush()
+          if (reset) resetAssistantMessage()
+          collapseNonNarrativeMessages()
+          if (text) appendAssistantMessage(text)
+          finishLiveMessages()
+          if (!receivedPersistedTurn && !streamFailed) {
             streamFailed = true
-            setStageLiveMessages((prev) => [
-              ...prev,
-              {
-                role: 'error',
-                content: data.message || data.error || t('storyStage.activity.unknownError'),
-              },
-            ])
-            break
+            setStageLiveMessages([{ role: 'error', content: t('storyStage.activity.persistenceMissing') }])
+          } else if (!streamFailed) {
+            finishedNormally = true
           }
-          case 'done': {
-            const { text, reset } = narrativeFilter.flush()
-            if (reset) resetAssistantMessage()
-            collapseNonNarrativeMessages()
-            if (text) appendAssistantMessage(text)
-            finishLiveMessages()
-            if (!receivedPersistedTurn && !streamFailed) {
-              streamFailed = true
-              setStageLiveMessages([{
-                role: 'error',
-                content: t('storyStage.activity.persistenceMissing'),
-              }])
-            } else if (!streamFailed) {
-              finishedNormally = true
-            }
-            setStageActivityContent('')
-            break
-          }
-          case 'aborted': {
-            const { text, reset } = narrativeFilter.flush()
-            if (reset) resetAssistantMessage()
-            collapseNonNarrativeMessages()
-            if (text) appendAssistantMessage(text)
-            finishLiveMessages()
-            setStageActivityContent(t('storyStage.activity.aborted'))
-            break
-          }
+          setStageActivityContent('')
+          break
+        }
+        case 'aborted': {
+          const { text, reset } = narrativeFilter.flush()
+          if (reset) resetAssistantMessage()
+          collapseNonNarrativeMessages()
+          if (text) appendAssistantMessage(text)
+          finishLiveMessages()
+          setStageLiveMessages((prev) => [
+            ...prev,
+            { role: 'error', content: t('storyStage.activity.aborted') },
+          ])
+          setStageActivityContent('')
+          break
         }
       }
-      let nextSnapshot: Snapshot | void = persistedSnapshot
-      if (persistedSnapshot) {
-        void Promise.resolve(onDone({ silent: true })).catch((error) => {
-          console.warn('[interactive-stage] 静默刷新互动快照失败', error)
-        })
-      } else {
-        nextSnapshot = await onDone(receivedPersistedTurn ? { silent: true } : undefined)
-      }
-      if (finishedNormally) await maybeGenerateAutoImage(nextSnapshot)
-    } catch (error) {
-      if (!isAbortError(error)) {
-        flushLiveMessageBuffer()
-        finishLiveMessages()
-        setStageActivityContent('')
-        setStageLiveMessages((prev) => [
-          ...prev,
-          {
-            role: 'error',
-            content: error instanceof Error ? error.message : t('storyStage.activity.runFailed'),
-          },
-        ])
-      }
-    } finally {
-      setStageStreaming(false)
-      stageAbortControllers.delete(stageKey)
-      liveToolKeyToMessageIdRef.current = {}
-      currentCompactionMessageIdRef.current = null
-      currentLiveTurnRenderKeysRef.current = null
-      setStageActivityContent('')
     }
+    return { finishedNormally, receivedPersistedTurn, persistedSnapshot }
+  }
+
+  async function completeInteractiveStream({ finishedNormally, receivedPersistedTurn, persistedSnapshot }: InteractiveStreamOutcome) {
+    let nextSnapshot: Snapshot | void = persistedSnapshot
+    if (persistedSnapshot) {
+      void Promise.resolve(onDone({ silent: true })).catch((error) => {
+        console.warn('[interactive-stage] 静默刷新互动快照失败', error)
+      })
+    } else {
+      nextSnapshot = await onDone(receivedPersistedTurn ? { silent: true } : undefined)
+    }
+    if (finishedNormally) await maybeGenerateAutoImage(nextSnapshot)
+  }
+
+  function handleInteractiveStreamError(error: unknown) {
+    flushLiveUpdates()
+    finishLiveMessages()
+    setStageActivityContent('')
+    setStageLiveMessages((prev) => [
+      ...prev,
+      {
+        role: 'error',
+        content: isAbortError(error)
+          ? t('storyStage.activity.aborted')
+          : error instanceof Error ? error.message : t('storyStage.activity.runFailed'),
+      },
+    ])
+  }
+
+  function finishLiveStoryRun(abortController: AbortController) {
+    if (!clearStoryRunAbortController(stageKey, abortController)) return
+    setStageStreaming(false)
+    liveToolKeyToMessageIdRef.current = {}
+    currentCompactionMessageIdRef.current = null
+    currentLiveTurnRenderKeysRef.current = null
+    setStageActivityContent('')
   }
 
   const compactCurrentContext = async () => {
@@ -823,7 +915,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
 
   const stop = () => {
     void abortInteractiveChat()
-    stageAbortControllers.get(stageKey)?.abort()
+    abortStoryRunStream(stageKey)
     setStageActivityContent(t('storyStage.activity.aborting'))
   }
 
@@ -841,7 +933,12 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
   }
 
   const regenerateMessage = (message: ChatMessage) => {
-    if (!message.turn_id || streaming) return
+    if (streaming) return
+    if (!message.turn_id) {
+      const source = stageRun.retryMessage || [...liveMessages].reverse().find((item) => item.role === 'user')?.content || ''
+      if (source.trim()) void send({ message: source })
+      return
+    }
     const source = turnsById.get(message.turn_id)?.user || message.content || ''
     void send({ message: source, rewindTurnId: message.turn_id })
   }
@@ -989,6 +1086,20 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
     if (message) startEditingMessage(message)
   }
 
+  const startEditingAssistantReply = (view: AgentMessageView) => {
+    if (streaming || generatingImageTurnId || switchingVersionTurnId) return
+    const message = agentViewToRenderMessage(view)
+    if (!message?.turn_id) return
+    const turn = turnsById.get(message.turn_id)
+    if (!turn) return
+    setReplyEditTarget({
+      turnId: turn.id,
+      branchId: turn.branch_id || branchId,
+      initialContent: sanitizeStoredNarrative(turn.narrative),
+      expectedNarrative: turn.narrative,
+    })
+  }
+
   const regenerateView = (view: AgentMessageView) => {
     const message = agentViewToRenderMessage(view)
     if (message) regenerateMessage(message)
@@ -1060,13 +1171,13 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
 
   const stageControls = (
     <>
-      <StoryPicker stories={stories} currentStoryId={storyId} tellers={tellers} storyDirectors={storyDirectors} onSelect={onStorySelect} onCreate={onStoryCreate} onDelete={onStoryDelete} />
-      <StoryDirectorPicker story={story} storyDirectors={storyDirectors} onChange={onDirectorChange} />
-      <ReplyTargetCharsControl story={story} onChange={onReplyTargetCharsChange} />
-      {onToggleSceneMemory && (
-        <Button type="button" variant="outline" size="sm" className={`h-7 gap-1.5 border-[var(--nova-border)] bg-[var(--nova-surface)] px-2 text-[11px] hover:bg-[var(--nova-hover)] ${sceneMemoryVisible ? 'text-[var(--nova-text)]' : 'text-[var(--nova-text-muted)]'}`} onClick={onToggleSceneMemory} aria-label={sceneMemoryVisible ? t('storyStage.hideSceneMemory') : t('storyStage.showSceneMemory')} title={sceneMemoryVisible ? t('storyStage.hideSceneMemory') : t('storyStage.showSceneMemory')}>
+      <StoryPicker stories={stories} currentStoryId={storyId} onSelect={(id) => { setStageControlsOpen(false); setCreatingStory(false); setEditingStorySetup(false); onStorySelect(id) }} onCreate={() => { setStageControlsOpen(false); setEditingStorySetup(false); setCreatingStory(true) }} onDeleteStories={onStoryDelete} />
+      {isMobile ? <StoryDirectorPicker story={story} storyDirectors={storyDirectors} onChange={onDirectorChange} /> : null}
+      {isMobile ? <ReplyTargetCharsControl story={story} onChange={onReplyTargetCharsChange} /> : null}
+      {onToggleDirectorPanel && (
+        <Button type="button" variant="outline" size="sm" className={`h-7 gap-1.5 border-[var(--nova-border)] bg-[var(--nova-surface)] px-2 text-[11px] hover:bg-[var(--nova-hover)] ${directorPanelVisible ? 'text-[var(--nova-text)]' : 'text-[var(--nova-text-muted)]'}`} onClick={onToggleDirectorPanel} aria-label={directorPanelVisible ? t('storyStage.hideDirectorPanel') : t('storyStage.showDirectorPanel')} title={directorPanelVisible ? t('storyStage.hideDirectorPanel') : t('storyStage.showDirectorPanel')}>
           <PanelRight className="h-3.5 w-3.5" />
-          {t('storyStage.sceneMemory')}
+          {t('storyStage.directorPanel')}
         </Button>
       )}
     </>
@@ -1108,7 +1219,22 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
         <div className="nova-story-stage-content flex min-h-0 flex-1 overflow-hidden bg-[var(--nova-surface-2)]">
           <TurnNavigator items={turnNavigationItems} activeAnchorId={activeTurnAnchorId} onSelect={handleTurnNavigationSelect} />
           <section className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-[var(--nova-surface-2)]">
-            {snapshotLoading && messages.length === 0 && !streaming ? (
+            {creatingStory ? (
+              <NewStorySetupPanel
+                stories={stories}
+                tellers={tellers}
+                directors={storyDirectors}
+                imagePresets={imagePresets}
+                story={editingStorySetup ? story : undefined}
+                onCancel={() => { setCreatingStory(false); setEditingStorySetup(false) }}
+                onCreate={async (input) => {
+                  if (editingStorySetup) await onStorySetupUpdate(input)
+                  else await onStoryCreate(input)
+                  setCreatingStory(false)
+                  setEditingStorySetup(false)
+                }}
+              />
+            ) : snapshotLoading && messages.length === 0 && !streaming ? (
               <div className="m-5 flex min-h-0 flex-1 items-center justify-center rounded-[var(--nova-radius)] border border-dashed border-[var(--nova-border)] bg-[var(--nova-surface)] px-6 text-center text-sm text-[var(--nova-text-faint)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
                 <div className="flex max-w-md flex-col items-center gap-3">
                   <RefreshCw className="h-4 w-4 animate-spin text-[var(--nova-text-muted)]" />
@@ -1116,63 +1242,24 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
                 </div>
               </div>
             ) : messages.length === 0 && !streaming ? (
-              <div className="m-5 flex min-h-0 flex-1 items-center justify-center rounded-[var(--nova-radius)] border border-dashed border-[var(--nova-border)] bg-[var(--nova-surface)] px-6 text-center text-sm text-[var(--nova-text-faint)] shadow-[inset_0_1px_0_rgba(255,255,255,0.03)]">
-                <div className="flex w-full max-w-xl flex-col items-center gap-3">
-                  <Sparkles className="h-4 w-4 text-[var(--nova-text-muted)]" />
-                  <div className="space-y-1">
-                    <div className="text-sm font-medium text-[var(--nova-text)]">{t('storyStage.opening.emptyTitle')}</div>
-                    <div className="text-xs leading-5 text-[var(--nova-text-faint)]">{t('storyStage.opening.emptyDescription')}</div>
-                  </div>
-                  {loreEmpty && onRequestLoreInit ? (
-                    <div className="rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-center">
-                      <div className="text-xs font-medium text-[var(--nova-text)]">{t('loreInit.interactiveTitle')}</div>
-                      <div className="mt-1 text-[11px] leading-5 text-[var(--nova-text-faint)]">{t('loreInit.interactiveDescription')}</div>
-                      <button type="button" className="nova-nav-item mt-2 rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface)] px-3 py-1.5 text-xs text-[var(--nova-text-muted)] hover:text-[var(--nova-text)]" onClick={onRequestLoreInit}>
-                        {t('loreInit.openAgent')}
-                      </button>
-                    </div>
-                  ) : null}
-                  <div className="w-full space-y-2">
-                    <Textarea autoResize className="nova-field min-h-24 resize-none text-xs" placeholder={t('storyStage.opening.customPlaceholder')} value={customOpeningText} onChange={(event) => setCustomOpeningText(event.target.value)} />
-                    <div className="flex w-full min-w-0 flex-wrap items-center justify-center gap-2">
-                      <Button type="button" size="sm" className="gap-1.5" disabled={!storyId || streaming} onClick={startAIOpening}>
-                        <Sparkles data-icon="inline-start" />
-                        {t('storyStage.opening.startAI')}
-                      </Button>
-                      {onOpenDirectorConfig ? (
-                        <Button type="button" variant="outline" size="sm" className="gap-1.5 border-[var(--nova-border)] bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]" onClick={onOpenDirectorConfig}>
-                          <SlidersHorizontal data-icon="inline-start" />
-                          {t('storyStage.opening.configureDirector')}
-                        </Button>
-                      ) : null}
-                      <Button type="button" variant="outline" size="sm" className="gap-1.5 border-[var(--nova-border)] bg-[var(--nova-surface-2)] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]" disabled={!storyId || streaming || !customOpeningText.trim()} onClick={startOpening}>
-                        <Pencil data-icon="inline-start" />
-                        {t('storyStage.opening.startCustom')}
-                      </Button>
-                      <div className="flex min-w-0 max-w-full flex-wrap items-center justify-center gap-1 rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] p-1">
-                        <Select disabled={!storyId || streaming || availableBookOpeningPresets.length === 0} value={selectedBookOpeningPreset?.id || ''} onValueChange={setSelectedBookOpeningPresetId}>
-                          <SelectTrigger size="sm" aria-label={t('storyStage.opening.bookPresetSelect')} className="min-w-0 max-w-full border-[var(--nova-border)] bg-[var(--nova-surface)] text-xs text-[var(--nova-text)] hover:bg-[var(--nova-hover)] sm:w-48">
-                            <SelectValue placeholder={t('storyStage.opening.noBookPreset')} />
-                          </SelectTrigger>
-                          <SelectContent className="border-[var(--nova-border)] bg-[var(--nova-surface)] text-[var(--nova-text)]">
-                            <SelectGroup>
-                              {availableBookOpeningPresets.map((preset) => (
-                                <SelectItem key={preset.id} value={preset.id} className="text-xs focus:bg-[var(--nova-hover)] focus:text-[var(--nova-text)]">
-                                  {preset.title || t('storyStage.opening.bookPresetUntitled')}
-                                </SelectItem>
-                              ))}
-                            </SelectGroup>
-                          </SelectContent>
-                        </Select>
-                        <Button type="button" variant="ghost" size="sm" className="gap-1.5 text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]" disabled={!storyId || streaming || !selectedBookOpeningPreset} onClick={startBookPresetOpening} title={selectedBookOpeningPreset ? selectedBookOpeningPreset.title || t('storyStage.opening.bookPresetUntitled') : t('storyStage.opening.bookPresetMissing')}>
-                          <BookOpen data-icon="inline-start" />
-                          {selectedBookOpeningPreset ? t('storyStage.opening.startBookPreset') : t('storyStage.opening.noBookPreset')}
-                        </Button>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              </div>
+              <StoryOpeningPanel
+                story={story}
+                storyId={storyId}
+                streaming={streaming}
+                presets={availableBookOpeningPresets}
+                selectedPreset={selectedBookOpeningPreset}
+                customText={customOpeningText}
+                bottomInset={inputFloatHeight}
+                loreEmpty={loreEmpty}
+                onSelectPreset={setSelectedBookOpeningPresetId}
+                onCustomTextChange={setCustomOpeningText}
+                onStartAI={startAIOpening}
+                onStartPreset={startBookPresetOpening}
+                onStartCustom={startOpening}
+                onConfigureDirector={onOpenDirectorConfig}
+                onRequestLoreInit={onRequestLoreInit}
+                onBackToSetup={() => { setEditingStorySetup(true); setCreatingStory(true) }}
+              />
             ) : (
               <MessageList
                 messages={agentMessages}
@@ -1182,11 +1269,21 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
                 scrollResetKey={scrollResetKey}
                 bottomPaddingClassName="pb-36"
                 bottomPaddingPx={messageListBottomPadding}
+                afterContent={!streaming && storyStateModel.hasState && stateDisplayPreference !== 'director-only' ? (
+                  <StoryStateLedger
+                    snapshot={snapshot}
+                    displayPreference={stateDisplayPreference}
+                    onDisplayPreferenceChange={onStateDisplayPreferenceChange}
+                    onOpenDirectorState={onOpenDirectorState}
+                  />
+                ) : undefined}
+                afterContentKey={`${snapshot?.current_turn?.id || ''}:${snapshot?.current_turn?.state_status || ''}:${stateDisplayPreference}`}
                 messageStyle={stageTextStyle}
-                collapseTraceBeforeAssistant
+                collapseTraceGroups
                 turnScrollRequest={turnScrollRequest}
                 onVisibleTurnAnchorChange={handleVisibleTurnAnchorChange}
                 onEditMessage={startEditingView}
+                onEditAssistantReply={generatingImageTurnId || switchingVersionTurnId ? undefined : startEditingAssistantReply}
                 onRegenerateMessage={regenerateView}
                 onSwitchMessageVersion={switchViewVersion}
                 onGenerateInteractiveImage={generateImageForView}
@@ -1210,7 +1307,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
           </section>
         </div>
       </div>
-      <div ref={inputFloatRef} style={{ bottom: keyboardInset }} className="nova-story-input-float pointer-events-none absolute inset-x-0 bottom-0 z-20 p-3">
+      {!creatingStory ? <div ref={inputFloatRef} style={{ bottom: keyboardInset }} className="nova-story-input-float pointer-events-none absolute inset-x-0 bottom-0 z-20 p-3">
         <div className="pointer-events-auto mx-auto max-w-5xl">
           {editingTurn && !streaming ? (
             <div className="mb-3 flex min-w-0 items-center gap-2 rounded-[var(--nova-radius)] border border-[var(--nova-border)] bg-[var(--nova-surface-2)] px-3 py-2 text-xs text-[var(--nova-text-muted)]">
@@ -1432,7 +1529,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
                         variant="outline"
                         size="icon-sm"
                         className="nova-agent-composer-icon h-8 w-8 shrink-0 rounded-[10px] border border-[var(--nova-border)] bg-[var(--nova-surface)] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)] disabled:opacity-45"
-                        disabled={streaming || branchTerminal || directorBlocking || (!storyId && tokenUsageMessages.length === 0 && !workspace)}
+                        disabled={streaming || branchTerminal || directorBlocking || (!storyId && tokenUsageMessages.length === 0)}
                         aria-label={t('chat.input.actions')}
                         title={t('chat.input.actions')}
                       >
@@ -1440,7 +1537,6 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
                       </Button>
                     </DropdownMenuTrigger>
                     <DropdownMenuContent align="start" side="top" className="w-80 border-[var(--nova-border)] bg-[var(--nova-surface-2)] p-2 text-[var(--nova-text)]">
-                      <ModelProfileSwitcher agentKey="interactive_story" workspace={workspace} disabled={streaming || directorBlocking} />
                       <InteractiveImageSettingsMenu story={story} disabled={!storyId || streaming || directorBlocking || !onImageSettingsChange} onChange={onImageSettingsChange} />
                       <StoryImagePresetMenu story={story} presets={imagePresets} disabled={!storyId || streaming || directorBlocking || !onImageSettingsChange} onChange={onImageSettingsChange} />
                       <DropdownMenuItem
@@ -1466,6 +1562,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
               }
               toolbarEnd={
                 <>
+                  <ModelProfileSwitcher agentKey="interactive_story" workspace={workspace} disabled={streaming || directorBlocking} />
                   <Button type="button" variant="outline" className={`nova-agent-composer-pill h-8 shrink-0 rounded-[10px] border-[var(--nova-border)] bg-[var(--nova-surface)] px-2.5 text-[11px] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)] ${hotChoicesExpanded ? 'text-[var(--nova-text)]' : ''}`} disabled={!canUseHotChoices} onMouseDown={(event) => event.preventDefault()} onClick={toggleHotChoices} aria-label={hotChoicesExpanded ? t('storyStage.hotChoices.collapse') : t('storyStage.hotChoices.get')} title={hotChoicesExpanded ? t('storyStage.hotChoices.collapse') : t('storyStage.hotChoices.get')}>
                     <Compass className="h-3.5 w-3.5" />
                     {!isMobile ? t('storyStage.hotChoices.button') : null}
@@ -1513,8 +1610,24 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
               </div>
             </DialogContent>
           </Dialog>
+          {replyEditTarget ? (
+            <EditInteractiveReplyDialog
+              key={replyEditTarget.turnId}
+              turnId={replyEditTarget.turnId}
+              initialContent={replyEditTarget.initialContent}
+              onClose={() => setReplyEditTarget(null)}
+              onSave={async (narrative) => {
+                await updateInteractiveTurnNarrative(storyId, replyEditTarget.turnId, {
+                  branch_id: replyEditTarget.branchId,
+                  narrative,
+                  expected_narrative: replyEditTarget.expectedNarrative,
+                })
+                await onDone({ silent: true })
+              }}
+            />
+          ) : null}
         </div>
-      </div>
+      </div> : null}
     </main>
   )
 
@@ -1527,7 +1640,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
 
   // 思考前言被误当正文显示时（孤立 </think>），丢弃这条流式 assistant 消息，正文随后另起。
   function resetAssistantMessage() {
-    flushLiveMessageBuffer()
+    flushLiveUpdates()
     setStageLiveMessages((prev) => {
       const last = prev[prev.length - 1]
       if (last?.role === 'assistant' && last.streaming) {
@@ -1561,9 +1674,14 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
     if (buffered.length === 0) return
     liveMessageBufferRef.current = []
     setStageLiveMessages((prev) => buffered.reduce(appendBufferedLiveMessage, prev))
-    if (buffered.some((message) => message.role === 'assistant')) {
+    if (buffered.some((message) => message.role === 'assistant' || message.role === 'thinking')) {
       scheduleLiveMessagePromotion()
     }
+  }
+
+  function flushLiveUpdates() {
+    flushLiveMessageBuffer()
+    toolArgsBatcher.flush()
   }
 
   function scheduleLiveMessagePromotion() {
@@ -1605,7 +1723,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
 
   function appendToolArgsDelta(payload: Record<string, unknown> & { id?: string; name?: string; args?: string; delta?: string }) {
     if (!payload.id && !payload.name && liveToolEventKeys(payload).length === 0) return
-    setStageLiveMessages((prev) => {
+    toolArgsBatcher.enqueue((prev) => {
       const targetIndex = findToolMessageIndexForPayload(prev, payload, liveToolKeyToMessageIdRef.current)
       if (targetIndex < 0) return prev
       const matchedId = prev[targetIndex].id
@@ -1656,42 +1774,6 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
     })
   }
 
-  function findToolMessageIndex(messages: ChatMessage[], id?: string, name?: string) {
-    if (id) {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const message = messages[i]
-        if (message.role === 'tool_call' && message.id === id) return i
-      }
-      return -1
-    }
-    if (name) {
-      let match = -1
-      for (let i = messages.length - 1; i >= 0; i--) {
-        const message = messages[i]
-        if (message.role === 'tool_call' && message.name === name) {
-          if (match >= 0) return -1
-          match = i
-        }
-      }
-      return match
-    }
-    if (!id && !name) {
-      for (let i = messages.length - 1; i >= 0; i--) {
-        if (messages[i].role === 'tool_call') return i
-      }
-    }
-    return -1
-  }
-
-  function findToolMessageIndexForPayload(messages: ChatMessage[], payload: Record<string, unknown> & { id?: string; name?: string }, keyToMessageId: Record<string, string>) {
-    const toolKeys = liveToolEventKeys(payload)
-    const mappedId = findMappedLiveToolId(toolKeys, keyToMessageId)
-    if (mappedId) return findToolMessageIndex(messages, mappedId, undefined)
-    if (payload.id) return findToolMessageIndex(messages, payload.id, undefined)
-    if (toolKeys.length > 0) return -1
-    return findToolMessageIndex(messages, undefined, payload.name)
-  }
-
   function appendContextCompactionMessage(data: Record<string, unknown>) {
     const compactionId = currentCompactionMessageIdRef.current || createContextCompactionMessageId(compactionIdCounterRef)
     currentCompactionMessageIdRef.current = compactionId
@@ -1701,7 +1783,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
 
   function collapseNonNarrativeMessages() {
     if (!nonNarrativeLiveMessageStreamingRef.current) return
-    flushLiveMessageBuffer()
+    flushLiveUpdates()
     nonNarrativeLiveMessageStreamingRef.current = false
     setStageLiveMessages((prev) =>
       prev.map((msg) =>
@@ -1716,7 +1798,7 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
   }
 
   function finishLiveMessages() {
-    flushLiveMessageBuffer()
+    flushLiveUpdates()
     if (liveMessagePromoteRafRef.current !== null) {
       window.cancelAnimationFrame(liveMessagePromoteRafRef.current)
       liveMessagePromoteRafRef.current = null
@@ -1734,179 +1816,6 @@ export function StoryStage({ workspace, styleSceneSuggestions = [], stories = []
       ),
     )
   }
-}
-
-function appendBufferedLiveMessage(messages: ChatMessage[], { role, content, metadata }: BufferedLiveMessage) {
-  if (!content) return messages
-  const last = messages[messages.length - 1]
-  if (role === 'assistant' && last?.role === 'assistant' && last.streaming && sameLiveMessageSource(last, metadata)) {
-    return [...messages.slice(0, -1), { ...last, streaming_target_content: `${last.streaming_target_content || last.content || ''}${content}` }]
-  }
-  if (role === 'thinking' && last?.role === 'thinking' && sameLiveMessageSource(last, metadata)) {
-    return [
-      ...messages.slice(0, -1),
-      {
-        ...last,
-        content: `${last.content || ''}${content}`,
-        streaming: true,
-      },
-    ]
-  }
-  if (role === 'assistant') {
-    return [...messages, { role, content: '', streaming_target_content: content, streaming: true, ...metadata }]
-  }
-  return [...messages, { role, content, streaming: true, ...metadata }]
-}
-
-function promoteMessageTargets(messages: ChatMessage[]) {
-  let changed = false
-  const nextMessages = messages.map((message) => {
-    if (message.streaming_target_content === undefined) return message
-    changed = true
-    return promoteMessageTarget(message)
-  })
-  return changed ? nextMessages : messages
-}
-
-function promoteMessageTarget(message: ChatMessage): ChatMessage {
-  if (message.streaming_target_content === undefined) return message
-  const { streaming_target_content, ...rest } = message
-  return { ...rest, content: streaming_target_content }
-}
-
-function streamMetadataFromPayload(payload: Record<string, unknown>): Partial<ChatMessage> {
-  const runPath = Array.isArray(payload.run_path) ? payload.run_path.filter((item): item is string => typeof item === 'string') : undefined
-  return {
-    run_id: typeof payload.run_id === 'string' ? payload.run_id : undefined,
-    agent_name: typeof payload.agent_name === 'string' ? payload.agent_name : undefined,
-    root_agent_name: typeof payload.root_agent_name === 'string' ? payload.root_agent_name : undefined,
-    run_path: runPath,
-    subagent: readStreamBool(payload.subagent),
-    subagent_session_id: typeof payload.subagent_session_id === 'string' ? payload.subagent_session_id : undefined,
-    subagent_type: typeof payload.subagent_type === 'string' ? payload.subagent_type : undefined,
-  }
-}
-
-function sameLiveMessageSource(message: ChatMessage, metadata: Partial<ChatMessage>) {
-  if (Boolean(message.subagent) !== Boolean(metadata.subagent)) return false
-  if (message.subagent || metadata.subagent) {
-    return subAgentSessionKey(message) === subAgentSessionKey(metadata)
-  }
-  return true
-}
-
-function liveToolEventKeys(payload: Record<string, unknown>) {
-  const metadata = streamMetadataFromPayload(payload)
-  const path = metadata.run_path?.join('/') || ''
-  const source = `${metadata.subagent ? 'sub' : 'root'}:${metadata.subagent_session_id || ''}:${metadata.agent_name || ''}:${path}`
-  const keys: string[] = []
-  if (typeof payload.id === 'string' && payload.id) keys.push(`${source}:id:${payload.id}`)
-  if (typeof payload.index === 'number') keys.push(`${source}:index:${payload.index}`)
-  if (typeof payload.index === 'string' && payload.index) keys.push(`${source}:index:${payload.index}`)
-  return keys
-}
-
-function findMappedLiveToolId(keys: string[], keyToMessageId: Record<string, string>) {
-  for (const key of keys) {
-    if (keyToMessageId[key]) return keyToMessageId[key]
-  }
-  return undefined
-}
-
-function bindLiveToolEventKeys(keys: string[], keyToMessageId: Record<string, string>, toolId: string) {
-  if (keys.length === 0) return keyToMessageId
-  let changed = false
-  const next = { ...keyToMessageId }
-  for (const key of keys) {
-    if (next[key] === toolId) continue
-    next[key] = toolId
-    changed = true
-  }
-  return changed ? next : keyToMessageId
-}
-
-function readStreamBool(value: unknown) {
-  if (typeof value === 'boolean') return value
-  if (typeof value === 'string') return value === 'true'
-  return false
-}
-
-function ReplyTargetCharsControl({ story, onChange }: { story?: StorySummary; onChange?: (replyTargetChars: number) => void | Promise<void> }) {
-  const { t } = useTranslation()
-  const [open, setOpen] = useState(false)
-  const [draft, setDraft] = useState(String(normalizeReplyTargetChars(story?.reply_target_chars)))
-  const [saving, setSaving] = useState(false)
-  const [error, setError] = useState('')
-  const currentValue = normalizeReplyTargetChars(story?.reply_target_chars)
-
-  useEffect(() => {
-    if (!open) {
-      setDraft(String(currentValue))
-      setError('')
-    }
-  }, [currentValue, open])
-
-  const save = async () => {
-    const nextValue = Number(draft)
-    if (!Number.isFinite(nextValue) || nextValue <= 0) {
-      setError(t('storyStage.replyTarget.invalid'))
-      return
-    }
-    setSaving(true)
-    setError('')
-    try {
-      await onChange?.(Math.floor(nextValue))
-      setOpen(false)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : t('storyStage.replyTarget.saveFailed'))
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  return (
-    <Popover open={open} onOpenChange={setOpen}>
-      <PopoverTrigger asChild>
-        <Button type="button" variant="outline" size="sm" disabled={!story || !onChange} className="h-7 gap-1.5 border-[var(--nova-border)] bg-[var(--nova-surface)] px-2 text-[11px] text-[var(--nova-text-muted)] hover:bg-[var(--nova-hover)] hover:text-[var(--nova-text)]" aria-label={t('storyStage.replyTarget.open')}>
-          <Pencil className="h-3.5 w-3.5 text-[var(--nova-text-faint)]" />
-          {t('storyStage.replyTarget.compact', { count: currentValue })}
-        </Button>
-      </PopoverTrigger>
-      <PopoverContent align="end" sideOffset={6} className="nova-panel w-64 border border-[var(--nova-border)] p-3 text-[var(--nova-text)] shadow-[var(--nova-shadow)]">
-        <div className="mb-2 text-xs font-medium">{t('storyStage.replyTarget.title')}</div>
-        <Input
-          className="nova-field text-xs"
-          type="number"
-          min={1}
-          value={draft}
-          onChange={(event) => {
-            setDraft(event.target.value)
-            setError('')
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault()
-              void save()
-            }
-          }}
-        />
-        {error && <div className="mt-2 text-[11px] leading-4 text-[var(--nova-danger)]">{error}</div>}
-        <div className="mt-3 flex justify-end gap-2">
-          <Button variant="ghost" size="xs" onClick={() => setOpen(false)}>
-            {t('common.cancel')}
-          </Button>
-          <Button size="xs" disabled={saving} onClick={() => void save()}>
-            {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-            {t('common.save')}
-          </Button>
-        </div>
-      </PopoverContent>
-    </Popover>
-  )
-}
-
-function normalizeReplyTargetChars(value?: number) {
-  return value && value > 0 ? value : DEFAULT_INTERACTIVE_REPLY_TARGET_CHARS
 }
 
 function InteractiveImageSettingsMenu({ story, disabled, onChange }: { story?: StorySummary; disabled?: boolean; onChange?: (settings: StoryImageSettings) => void | Promise<void> }) {
@@ -2099,6 +2008,8 @@ function imageSettingsSummary(settings: StoryImageSettings, t: (key: string, opt
 
 function noop() {}
 
+function noopStateDisplayPreferenceChange(_value: StoryStateDisplayPreference) {}
+
 function noopTurnPersisted() {
   return undefined
 }
@@ -2116,7 +2027,7 @@ function publicRuleRollFromResolution(resolution?: RuleResolution): PublicRuleRo
     resolution_id: resolution.id,
     label: result.label || resolution.request?.rule?.label || resolution.request?.challenge || resolution.request?.action,
     difficulty: resolution.request?.difficulty,
-    dice: result.dice || resolution.request?.rule?.dice,
+    dice: result.dice,
     roll_mode: result.roll_mode || resolution.request?.rule?.roll_mode,
     rolls: result.rolls,
     kept_roll: result.kept_roll,
@@ -2139,13 +2050,12 @@ function publicRuleRollFromToolOutput(content: string): PublicRuleRoll | null {
   const stateChanges = Array.isArray(parsed.state_changes)
     ? parsed.state_changes
       .map((item) => isPlainRecord(item) ? {
-				actor_id: String(item.actor_id || '').trim() || undefined,
-				field_id: String(item.field_id || '').trim() || undefined,
-				path: String(item.path || '').trim() || undefined,
+        actor_id: String(item.actor_id || '').trim(),
+        field_id: String(item.field_id || '').trim(),
         change: Number(item.change),
         reason: typeof item.reason === 'string' ? item.reason : undefined,
       } : null)
-			.filter((item): item is NonNullable<typeof item> => Boolean(item && (item.field_id || item.path) && Number.isFinite(item.change)))
+      .filter((item): item is NonNullable<typeof item> => Boolean(item && item.actor_id && item.field_id && Number.isFinite(item.change)))
     : undefined
   return {
     resolution_id: stringFromRecord(parsed, 'resolution_id'),

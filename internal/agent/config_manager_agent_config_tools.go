@@ -120,6 +120,7 @@ func newListAgentConfigsTool(cfg *config.Config) (tool.BaseTool, error) {
 			SubAgentIndex: agentConfigSubAgentIndex(layered),
 			Notes: []string{
 				"write_agent_configs 必须显式指定 scope=user 或 scope=workspace。",
+				"Agent 模型选择是用户级配置；workspace 只承载提示词、工具、Skill、上下文和 SubAgent 定制。",
 				"model_profiles 已脱敏，不包含模型密钥；本工具不负责创建或编辑模型配置。",
 				"image_api_profiles 已脱敏，不包含图像模型密钥；本工具不负责创建或编辑图像模型配置。",
 				"delete_sub_agent 只删除目标层配置；如需屏蔽继承来的 SubAgent，请 upsert 同 ID 且 enabled=false 的覆盖项。",
@@ -130,32 +131,22 @@ func newListAgentConfigsTool(cfg *config.Config) (tool.BaseTool, error) {
 }
 
 func newWriteAgentConfigsTool(cfg *config.Config) (tool.BaseTool, error) {
-	return utils.InferTool("write_agent_configs", "批量写入 Agent 页配置。必须显式指定 scope=user 或 scope=workspace；只修改 agent_models、agent_tools、agent_prompts、agent_skills、agent_context、general_sub_agents 和 sub_agents。", func(ctx context.Context, input agentConfigWriteInput) (string, error) {
+	return utils.InferTool("write_agent_configs", "批量写入 Agent 页配置。必须显式指定 scope=user 或 scope=workspace；Agent 模型选择只能写入 user，workspace 只支持提示词、工具、Skill、上下文和 SubAgent 定制。", func(ctx context.Context, input agentConfigWriteInput) (string, error) {
 		_ = ctx
 		scope := strings.TrimSpace(input.Scope)
 		if scope != "user" && scope != "workspace" {
 			return "", fmt.Errorf("scope 必须显式指定为 user 或 workspace")
 		}
+		path, err := writableAgentConfigPath(cfg, scope)
+		if err != nil {
+			return "", err
+		}
 		layered, err := loadAgentConfigLayered(cfg)
 		if err != nil {
 			return "", err
 		}
-		path, settings, err := loadWritableAgentConfigSettings(cfg, scope)
+		result, err := mutateAgentConfigSettings(path, scope, layered, input.Operations)
 		if err != nil {
-			return "", err
-		}
-		result := map[string][]string{
-			"agent_overrides":     {},
-			"general_sub_agents":  {},
-			"upserted_sub_agents": {},
-			"deleted_sub_agents":  {},
-		}
-		for index, op := range input.Operations {
-			if err := applyAgentConfigWriteOperation(&settings, layered, op, result); err != nil {
-				return "", fmt.Errorf("Agent 配置操作 #%d 失败: %w", index+1, err)
-			}
-		}
-		if err := config.WriteSettingsFile(path, settings); err != nil {
 			return "", err
 		}
 		return formatBatchResult(firstConfigNonEmpty(input.Message, "Agent 配置已更新"), result), nil
@@ -166,7 +157,7 @@ func loadAgentConfigLayered(cfg *config.Config) (config.LayeredSettings, error) 
 	novaDir := ""
 	workspace := ""
 	if cfg != nil {
-		novaDir = cfg.NovaDir
+		novaDir = cfg.DataDir()
 		workspace = cfg.Workspace
 	}
 	layered, err := config.LoadLayeredWithStartupConfig(novaDir, workspace)
@@ -176,28 +167,55 @@ func loadAgentConfigLayered(cfg *config.Config) (config.LayeredSettings, error) 
 	return layered, nil
 }
 
-func loadWritableAgentConfigSettings(cfg *config.Config, scope string) (string, config.Settings, error) {
+func writableAgentConfigPath(cfg *config.Config, scope string) (string, error) {
 	novaDir := ""
 	workspace := ""
 	if cfg != nil {
-		novaDir = cfg.NovaDir
+		novaDir = cfg.DataDir()
 		workspace = cfg.Workspace
 	}
 	switch scope {
 	case "user":
-		path := config.UserConfigPath(novaDir)
-		settings, err := config.ReadSettingsFile(path)
-		return path, settings, err
+		return config.UserConfigPath(novaDir), nil
 	case "workspace":
 		if strings.TrimSpace(workspace) == "" {
-			return "", config.Settings{}, fmt.Errorf("当前没有打开的工作区，无法写入 workspace 配置")
+			return "", fmt.Errorf("当前没有打开的工作区，无法写入 workspace 配置")
 		}
-		path := config.WorkspaceConfigPath(workspace)
-		settings, err := config.ReadSettingsFile(path)
-		return path, settings, err
+		return config.WorkspaceConfigPath(workspace), nil
 	default:
-		return "", config.Settings{}, fmt.Errorf("不支持的配置层级: %s", scope)
+		return "", fmt.Errorf("不支持的配置层级: %s", scope)
 	}
+}
+
+// mutateAgentConfigSettings applies an Agent operation batch to the latest
+// target layer while the settings file mutation lock is held.
+func mutateAgentConfigSettings(
+	path string,
+	scope string,
+	layered config.LayeredSettings,
+	operations []agentConfigWriteOperation,
+) (map[string][]string, error) {
+	result := map[string][]string{
+		"agent_overrides":     {},
+		"general_sub_agents":  {},
+		"upserted_sub_agents": {},
+		"deleted_sub_agents":  {},
+	}
+	_, err := config.MutateSettingsFile(path, "", func(settings config.Settings) (config.Settings, error) {
+		for index, op := range operations {
+			if scope == "workspace" && op.Model != nil {
+				return config.Settings{}, fmt.Errorf("Agent 模型选择是用户级配置，不能写入 workspace")
+			}
+			if err := applyAgentConfigWriteOperation(&settings, layered, op, result); err != nil {
+				return config.Settings{}, fmt.Errorf("Agent 配置操作 #%d 失败: %w", index+1, err)
+			}
+		}
+		return settings, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return result, nil
 }
 
 func applyAgentConfigWriteOperation(settings *config.Settings, layered config.LayeredSettings, op agentConfigWriteOperation, result map[string][]string) error {

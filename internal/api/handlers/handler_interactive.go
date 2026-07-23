@@ -67,6 +67,14 @@ func (h *Handlers) HandleInteractiveStoryUpdate(ctx context.Context, c *app.Requ
 	writeJSON(c, consts.StatusOK, story)
 }
 
+func (h *Handlers) HandleInteractiveStorySelect(ctx context.Context, c *app.RequestContext) {
+	if err := h.app.SelectInteractiveStory(c.Param("id")); err != nil {
+		writeError(c, consts.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(c, consts.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (h *Handlers) HandleInteractiveStoryDelete(ctx context.Context, c *app.RequestContext) {
 	if err := h.app.DeleteInteractiveStory(c.Param("id")); err != nil {
 		writeError(c, consts.StatusBadRequest, err.Error())
@@ -195,134 +203,6 @@ func (h *Handlers) HandleInteractiveDirectorContextAnalysis(ctx context.Context,
 	writeJSON(c, consts.StatusOK, analysis)
 }
 
-func (h *Handlers) HandleInteractiveMemory(ctx context.Context, c *app.RequestContext) {
-	includeArchived := strings.EqualFold(c.Query("archived"), "true") || strings.EqualFold(c.Query("include_archived"), "true")
-	state, err := h.app.InteractiveMemory(c.Param("id"), c.Query("branch"), includeArchived)
-	if err != nil {
-		writeError(c, consts.StatusNotFound, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, state)
-}
-
-func (h *Handlers) HandleStoryMemory(ctx context.Context, c *app.RequestContext) {
-	includeArchived := strings.EqualFold(c.Query("archived"), "true") || strings.EqualFold(c.Query("include_archived"), "true")
-	state, err := h.app.StoryMemory(c.Param("id"), c.Query("branch"), includeArchived)
-	if err != nil {
-		writeError(c, consts.StatusNotFound, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, state)
-}
-
-func (h *Handlers) HandleStoryMemorySettingsUpdate(ctx context.Context, c *app.RequestContext) {
-	var body interactive.StoryMemorySettingsUpdateRequest
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	settings, err := h.app.UpdateStoryMemorySettings(c.Param("id"), body)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, settings)
-}
-
-func (h *Handlers) HandleStoryMemoryStructureSave(ctx context.Context, c *app.RequestContext) {
-	var body interactive.StoryMemoryStructureRequest
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	if id := strings.TrimSpace(c.Param("structure_id")); id != "" {
-		body.ID = id
-	}
-	structure, err := h.app.SaveStoryMemoryStructure(c.Param("id"), body)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, structure)
-}
-
-func (h *Handlers) HandleStoryMemoryStructureDelete(ctx context.Context, c *app.RequestContext) {
-	if err := h.app.DeleteStoryMemoryStructure(c.Param("id"), c.Param("structure_id")); err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (h *Handlers) HandleStoryMemoryRecordSave(ctx context.Context, c *app.RequestContext) {
-	var body interactive.StoryMemoryRecordRequest
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	if id := strings.TrimSpace(c.Param("record_id")); id != "" {
-		body.ID = id
-	}
-	record, err := h.app.SaveStoryMemoryRecord(c.Param("id"), body)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, record)
-}
-
-func (h *Handlers) HandleStoryMemoryRecordArchive(ctx context.Context, c *app.RequestContext) {
-	var body interactive.StoryMemoryRecordArchiveRequest
-	if err := c.BindJSON(&body); err != nil && len(c.Request.Body()) > 0 {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	archived := true
-	if body.Archived != nil {
-		archived = *body.Archived
-	}
-	record, err := h.app.SetStoryMemoryRecordArchived(c.Param("id"), c.Param("record_id"), c.Query("branch"), archived)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, record)
-}
-
-func (h *Handlers) HandleStoryMemoryGenerate(ctx context.Context, c *app.RequestContext) {
-	var body interactive.StoryMemoryGenerateRequest
-	if err := c.BindJSON(&body); err != nil && len(c.Request.Body()) > 0 {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	if body.BranchID == "" {
-		body.BranchID = c.Query("branch")
-	}
-	state, err := h.app.GenerateStoryMemory(ctx, c.Param("id"), body.BranchID)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, state)
-}
-
-func (h *Handlers) HandleStoryMemoryGenerateStream(ctx context.Context, c *app.RequestContext) {
-	var body interactive.StoryMemoryGenerateRequest
-	if err := c.BindJSON(&body); err != nil && len(c.Request.Body()) > 0 {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	if body.BranchID == "" {
-		body.BranchID = c.Query("branch")
-	}
-	task := h.app.StartStoryMemoryGenerateTask(c.Param("id"), body.BranchID, body.Source)
-	if task == nil {
-		writeErrorKey(c, consts.StatusConflict, "api.workspace.noWorkspace")
-		return
-	}
-	sse.StreamTask(c, task)
-}
-
 func (h *Handlers) HandleInteractiveImageGenerate(ctx context.Context, c *app.RequestContext) {
 	var body interactive.InteractiveImageGenerateRequest
 	if err := c.BindJSON(&body); err != nil && len(c.Request.Body()) > 0 {
@@ -338,52 +218,6 @@ func (h *Handlers) HandleInteractiveImageGenerate(ctx context.Context, c *app.Re
 		return
 	}
 	writeJSON(c, consts.StatusOK, result)
-}
-
-func (h *Handlers) HandleInteractiveMemoryCreate(ctx context.Context, c *app.RequestContext) {
-	var body interactive.InteractiveMemoryCreateRequest
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	entry, err := h.app.CreateInteractiveMemory(c.Param("id"), body)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, entry)
-}
-
-func (h *Handlers) HandleInteractiveMemoryUpdate(ctx context.Context, c *app.RequestContext) {
-	var body interactive.InteractiveMemoryUpdateRequest
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	entry, err := h.app.UpdateInteractiveMemory(c.Param("id"), c.Param("memory_id"), body)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, entry)
-}
-
-func (h *Handlers) HandleInteractiveMemoryArchive(ctx context.Context, c *app.RequestContext) {
-	var body interactive.InteractiveMemoryArchiveRequest
-	if err := c.BindJSON(&body); err != nil && len(c.Request.Body()) > 0 {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	archived := true
-	if body.Archived != nil {
-		archived = *body.Archived
-	}
-	entry, err := h.app.SetInteractiveMemoryArchived(c.Param("id"), c.Param("memory_id"), archived)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, entry)
 }
 
 func (h *Handlers) HandleInteractiveBranches(ctx context.Context, c *app.RequestContext) {
@@ -445,6 +279,25 @@ func (h *Handlers) HandleInteractiveTurnVersionSwitch(ctx context.Context, c *ap
 	writeJSON(c, consts.StatusOK, map[string]string{"status": "ok"})
 }
 
+func (h *Handlers) HandleInteractiveTurnNarrativeUpdate(ctx context.Context, c *app.RequestContext) {
+	var body interactive.UpdateTurnNarrativeRequest
+	if err := c.BindJSON(&body); err != nil {
+		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
+		return
+	}
+	body.TurnID = c.Param("turn_id")
+	if strings.TrimSpace(body.Narrative) == "" {
+		writeError(c, consts.StatusBadRequest, "AI 回复不能为空 / AI reply cannot be empty")
+		return
+	}
+	result, err := h.app.UpdateInteractiveTurnNarrative(c.Param("id"), body)
+	if err != nil {
+		writeError(c, consts.StatusConflict, err.Error())
+		return
+	}
+	writeJSON(c, consts.StatusOK, result)
+}
+
 func (h *Handlers) HandleInteractiveChat(ctx context.Context, c *app.RequestContext) {
 	var body struct {
 		Mode               string   `json:"mode"`
@@ -474,9 +327,9 @@ func (h *Handlers) HandleInteractiveChat(ctx context.Context, c *app.RequestCont
 	var task *novaApp.Task
 	locale := requestLocale(c)
 	if strings.TrimSpace(body.RegenerateFromTurn) != "" {
-		task = h.app.StartInteractiveRegenerateTask(body.StoryID, body.Branch, body.RegenerateFromTurn, body.Message, body.StyleScenes, locale)
+		task = h.app.StartInteractiveRegenerateTask(ctx, body.StoryID, body.Branch, body.RegenerateFromTurn, body.Message, body.StyleScenes, locale)
 	} else {
-		task = h.app.StartInteractiveTask(body.StoryID, body.Branch, body.Message, body.StyleScenes, locale)
+		task = h.app.StartInteractiveTask(ctx, body.StoryID, body.Branch, body.Message, body.StyleScenes, locale)
 	}
 	if task == nil {
 		writeErrorKey(c, consts.StatusConflict, "api.workspace.noWorkspace")
@@ -515,6 +368,51 @@ func (h *Handlers) HandleInteractiveChatContextAnalysis(ctx context.Context, c *
 		return
 	}
 	writeJSON(c, consts.StatusOK, analysis)
+}
+
+// HandleInteractiveChatStream reconnects to the active game-mode turn and
+// replays its buffered SSE events before following live output.
+func (h *Handlers) HandleInteractiveChatStream(ctx context.Context, c *app.RequestContext) {
+	storyID := strings.TrimSpace(c.Query("story_id"))
+	branchID := strings.TrimSpace(c.Query("branch"))
+	taskID := strings.TrimSpace(c.Query("task_id"))
+	if storyID == "" {
+		writeErrorKey(c, consts.StatusBadRequest, "api.interactive.storyIDRequired")
+		return
+	}
+	task, info := h.app.ActiveInteractiveTaskFor(storyID, branchID)
+	if task == nil || (taskID != "" && info.TaskID != taskID) {
+		writeErrorKey(c, consts.StatusNotFound, "api.chat.noActiveTask")
+		return
+	}
+	log.Printf("[interactive-agent-sse] attach active task_id=%s story_id=%s branch_id=%s status=%s", task.ID(), info.StoryID, info.BranchID, task.Status())
+	sse.StreamTask(c, task)
+}
+
+// HandleInteractiveChatActive reports the active turn identity and original
+// player message so a refreshed stage can reconstruct its optimistic turn.
+func (h *Handlers) HandleInteractiveChatActive(ctx context.Context, c *app.RequestContext) {
+	storyID := strings.TrimSpace(c.Query("story_id"))
+	branchID := strings.TrimSpace(c.Query("branch"))
+	if storyID == "" {
+		writeErrorKey(c, consts.StatusBadRequest, "api.interactive.storyIDRequired")
+		return
+	}
+	task, info := h.app.ActiveInteractiveTaskFor(storyID, branchID)
+	if task == nil {
+		writeJSON(c, consts.StatusOK, map[string]any{"active": false})
+		return
+	}
+	status := task.Status()
+	writeJSON(c, consts.StatusOK, map[string]any{
+		"active":                  status == novaApp.TaskRunning,
+		"status":                  status,
+		"task_id":                 info.TaskID,
+		"story_id":                info.StoryID,
+		"branch_id":               info.BranchID,
+		"message":                 info.Message,
+		"regenerate_from_turn_id": info.RegenerateFromTurnID,
+	})
 }
 
 func (h *Handlers) HandleInteractiveContextCompaction(ctx context.Context, c *app.RequestContext) {
@@ -875,71 +773,6 @@ func (h *Handlers) HandleActorStateUpdate(ctx context.Context, c *app.RequestCon
 
 func (h *Handlers) HandleActorStateDelete(ctx context.Context, c *app.RequestContext) {
 	if err := h.app.DeleteActorState(c.Param("id")); err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (h *Handlers) HandleStoryMemoryStructures(ctx context.Context, c *app.RequestContext) {
-	items, err := h.app.StoryMemoryStructures()
-	if err != nil {
-		writeError(c, consts.StatusInternalServerError, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, map[string]any{"story_memory_structures": items})
-}
-
-func (h *Handlers) HandleStoryMemoryStructure(ctx context.Context, c *app.RequestContext) {
-	item, err := h.app.StoryMemoryStructure(c.Param("id"))
-	if err != nil {
-		writeError(c, consts.StatusNotFound, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, item)
-}
-
-func (h *Handlers) HandleStoryMemoryStructureCreate(ctx context.Context, c *app.RequestContext) {
-	var body interactive.StoryMemoryStructureModule
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	item, err := h.app.CreateStoryMemoryStructure(body)
-	if err != nil {
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, item)
-}
-
-func (h *Handlers) HandleStoryMemoryStructureUpdate(ctx context.Context, c *app.RequestContext) {
-	var body struct {
-		interactive.StoryMemoryStructureModule
-		BaseRevision string `json:"base_revision"`
-		Workspace    string `json:"workspace"`
-	}
-	if err := c.BindJSON(&body); err != nil {
-		writeErrorKey(c, consts.StatusBadRequest, "api.common.invalidRequestWithDetail", "detail", err.Error())
-		return
-	}
-	if !h.ensurePresetMutationWorkspace(c, body.Workspace) {
-		return
-	}
-	item, err := h.app.UpdateStoryMemoryStructure(c.Param("id"), body.StoryMemoryStructureModule, body.BaseRevision)
-	if err != nil {
-		if errors.Is(err, interactive.ErrStoryMemoryStructureRevisionConflict) {
-			writeErrorKey(c, consts.StatusConflict, "api.resource.revisionConflict")
-			return
-		}
-		writeError(c, consts.StatusBadRequest, err.Error())
-		return
-	}
-	writeJSON(c, consts.StatusOK, item)
-}
-
-func (h *Handlers) HandleStoryMemoryStructurePresetDelete(ctx context.Context, c *app.RequestContext) {
-	if err := h.app.DeleteStoryMemoryStructurePreset(c.Param("id")); err != nil {
 		writeError(c, consts.StatusBadRequest, err.Error())
 		return
 	}

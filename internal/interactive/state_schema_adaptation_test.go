@@ -16,8 +16,8 @@ func TestApplyActorStateSchemaAdaptationSupportsStorySpecificDimensions(t *testi
 			name:       "romance ensemble",
 			templateID: ActorStateImportantCharacterTemplateID,
 			fields: []ActorStateField{
-				{Name: "好感度", Type: "number", Default: float64(0), Min: floatPointer(-100), Max: floatPointer(100), Visibility: "spoiler"},
-				{Name: "关系阶段", Type: "enum", Default: "陌生", Options: []string{"陌生", "熟悉", "暧昧", "恋人"}, Visibility: "spoiler"},
+				{Name: "好感度", Type: "number", Default: float64(0), Min: floatPointer(-100), Max: floatPointer(100)},
+				{Name: "关系阶段", Type: "enum", Default: "陌生", Options: []string{"陌生", "熟悉", "暧昧", "恋人"}},
 			},
 			want: []string{"好感度", "关系阶段"},
 		},
@@ -25,10 +25,10 @@ func TestApplyActorStateSchemaAdaptationSupportsStorySpecificDimensions(t *testi
 			name:       "cultivation progression",
 			templateID: DefaultActorID,
 			fields: []ActorStateField{
-				{Name: "境界", Type: "string", Default: "炼气一层", Visibility: "visible"},
-				{Name: "法宝", Type: "list", Default: []any{}, Visibility: "visible"},
-				{Name: "功法", Type: "list", Default: []any{}, Visibility: "visible"},
-				{Name: "能力", Type: "list", Default: []any{}, Visibility: "visible"},
+				{Name: "境界", Type: "string", Default: "炼气一层"},
+				{Name: "法宝", Type: "list", Default: []any{}},
+				{Name: "功法", Type: "list", Default: []any{}},
+				{Name: "能力", Type: "list", Default: []any{}},
 			},
 			want: []string{"境界", "法宝", "功法", "能力"},
 		},
@@ -36,20 +36,20 @@ func TestApplyActorStateSchemaAdaptationSupportsStorySpecificDimensions(t *testi
 			name:       "numeric trpg character sheet",
 			templateID: DefaultActorID,
 			fields: []ActorStateField{
-				{Name: "力量", Type: "number", Default: float64(10), Min: floatPointer(1), Max: floatPointer(20), Visibility: "visible"},
-				{Name: "等级", Type: "number", Default: float64(1), Min: floatPointer(1), Visibility: "visible"},
-				{Name: "生命值", Type: "number", Default: float64(10), Min: floatPointer(0), Visibility: "visible"},
-				{Name: "法术位", Type: "number", Default: float64(0), Min: floatPointer(0), Visibility: "visible"},
+				{Name: "幸运", Type: "number", Default: float64(10), Min: floatPointer(1), Max: floatPointer(20)},
+				{Name: "先攻", Type: "number", Default: float64(0), Min: floatPointer(-10), Max: floatPointer(20)},
+				{Name: "护盾值", Type: "number", Default: float64(0), Min: floatPointer(0)},
+				{Name: "法术位", Type: "number", Default: float64(0), Min: floatPointer(0)},
 			},
-			want: []string{"力量", "等级", "生命值", "法术位"},
+			want: []string{"幸运", "先攻", "护盾值", "法术位"},
 		},
 		{
 			name:       "adult relationship state",
 			templateID: ActorStateImportantCharacterTemplateID,
 			fields: []ActorStateField{
-				{Name: "亲密边界", Type: "string", Visibility: "hidden"},
-				{Name: "欲望状态", Type: "enum", Options: []string{"平静", "波动", "强烈"}, Default: "平静", Visibility: "hidden"},
-				{Name: "亲密特质", Type: "list", Default: []any{}, Visibility: "hidden"},
+				{Name: "亲密边界", Type: "string"},
+				{Name: "欲望状态", Type: "enum", Options: []string{"平静", "波动", "强烈"}, Default: "平静"},
+				{Name: "亲密特质", Type: "list", Default: []any{}},
 			},
 			want: []string{"亲密边界", "欲望状态", "亲密特质"},
 		},
@@ -68,7 +68,7 @@ func TestApplyActorStateSchemaAdaptationSupportsStorySpecificDimensions(t *testi
 			if err != nil {
 				t.Fatalf("ApplyActorStateSchemaAdaptation failed: %v", err)
 			}
-			if record.FieldOps != len(tt.fields) || record.Source != "director_agent" {
+			if record.FieldOps != len(tt.fields) || record.Source != "game_agent" {
 				t.Fatalf("unexpected adaptation record: %#v", record)
 			}
 			template := actorStateTemplateByID(system, tt.templateID)
@@ -83,8 +83,6 @@ func TestApplyActorStateSchemaAdaptationSupportsStorySpecificDimensions(t *testi
 
 func TestApplyActorStateSchemaAdaptationRejectsBrokenTRPGBinding(t *testing.T) {
 	base := defaultActorStateSystem()
-	index := actorStateTemplateIndex(base.Templates, DefaultActorID)
-	base.Templates[index].Fields = append(base.Templates[index].Fields, ActorStateField{Name: "力量", Type: "number", Default: float64(10), Visibility: "visible"})
 	trpg := StoryDirectorTRPGSystem{RuleTemplates: []RuleCheck{{
 		ID: "attribute-check",
 		StateBindings: []RuleStateBinding{{
@@ -111,6 +109,23 @@ func TestApplyActorStateSchemaAdaptationProtectsRuntimeFoundation(t *testing.T) 
 	if err == nil || !strings.Contains(err.Error(), "不可删除") {
 		t.Fatalf("expected protected actor error, got %v", err)
 	}
+	for _, actorID := range []string{DefaultActorID, DefaultStoryContextActorID} {
+		_, _, err = ApplyActorStateSchemaAdaptation(defaultActorStateSystem(), StoryDirectorTRPGSystem{}, ActorStateSchemaAdaptation{ActorOps: []ActorStateRuntimeSchemaOp{{Op: "remove", ActorID: actorID}}})
+		if err == nil || !strings.Contains(err.Error(), "基础运行时 Actor 不可删除") {
+			t.Fatalf("expected protected runtime actor error for %s, got %v", actorID, err)
+		}
+	}
+}
+
+func TestApplyActorStateSchemaAdaptationRejectsNullInitialActorValue(t *testing.T) {
+	base := defaultActorStateSystem()
+	_, _, err := ApplyActorStateSchemaAdaptation(base, StoryDirectorTRPGSystem{}, ActorStateSchemaAdaptation{InitialActorOps: []ActorStateInitialActorSchemaOp{{
+		Op: "replace", ActorID: DefaultActorID,
+		Actor: ActorStateInitialActor{ID: DefaultActorID, Name: "主角", TemplateID: DefaultActorID, Role: "protagonist", State: map[string]any{"生命": nil}},
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "状态值不能为空") {
+		t.Fatalf("initial Actor JSON null must be rejected instead of frozen: %v", err)
+	}
 }
 
 func TestApplyActorStateSchemaAdaptationRemovesUnusedTemplateAndInitialActorTogether(t *testing.T) {
@@ -134,6 +149,15 @@ func TestApplyActorStateSchemaAdaptationRejectsInvalidFieldContract(t *testing.T
 	}}})
 	if err == nil || !strings.Contains(err.Error(), "type 无效") {
 		t.Fatalf("expected invalid field type error, got %v", err)
+	}
+}
+
+func TestApplyActorStateSchemaAdaptationRejectsPathSeparatorFieldName(t *testing.T) {
+	_, _, err := ApplyActorStateSchemaAdaptation(defaultActorStateSystem(), StoryDirectorTRPGSystem{}, ActorStateSchemaAdaptation{TemplateOps: []ActorStateTemplateSchemaOp{{
+		Op: "fields", TemplateID: DefaultActorID, FieldOps: []ActorStateFieldSchemaOp{{Op: "add", Field: ActorStateField{Name: "专注/意志", Type: "string"}}},
+	}}})
+	if err == nil || !strings.Contains(err.Error(), "路径分隔符") {
+		t.Fatalf("AI schema adaptation must reject slash-delimited field names, got %v", err)
 	}
 }
 

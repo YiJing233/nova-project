@@ -31,13 +31,6 @@ func TestGoGitVersionCreateDiffAndRestore(t *testing.T) {
 	writeFile(t, dir, ".nova/sessions/internal.txt", "内部数据")
 	writeFile(t, dir, ".nova/lore/items.json", "[]")
 	writeFile(t, dir, ".gitignore", ".nova\n")
-	files, err := service.commitFiles(first.Version.ID)
-	if err != nil {
-		t.Fatalf("commitFiles failed: %v", err)
-	}
-	if _, ok := files[".nova/sessions/internal.txt"]; ok {
-		t.Fatalf("first commit should not include .nova file created later: %v", sortedVersionFilePaths(files))
-	}
 
 	writeFile(t, dir, "chapters/ch0001.md", "第二版")
 	writeFile(t, dir, "chapters/ch0002.md", "新增章节")
@@ -61,28 +54,6 @@ func TestGoGitVersionCreateDiffAndRestore(t *testing.T) {
 		t.Fatalf("unexpected diff: %#v", diff)
 	}
 
-	second, err := service.Create("第二版本", VersionSourceManual, settings)
-	if err != nil {
-		t.Fatalf("Create second failed: %v", err)
-	}
-	if second.Version == nil || second.Version.ID == first.Version.ID {
-		t.Fatalf("expected distinct second git commit: first=%#v second=%#v", first.Version, second.Version)
-	}
-	secondFiles, err := service.commitFiles(second.Version.ID)
-	if err != nil {
-		t.Fatalf("commitFiles second failed: %v", err)
-	}
-	if _, ok := secondFiles[".nova/sessions/internal.txt"]; !ok {
-		t.Fatalf("second commit should include .nova creative state: %v", sortedVersionFilePaths(secondFiles))
-	}
-	if _, ok := secondFiles[".nova/lore/items.json"]; !ok {
-		t.Fatalf("second commit should include .nova lore state: %v", sortedVersionFilePaths(secondFiles))
-	}
-	if _, ok := secondFiles[".gitignore"]; !ok {
-		t.Fatalf("second commit should include workspace .gitignore: %v", sortedVersionFilePaths(secondFiles))
-	}
-
-	writeFile(t, dir, "chapters/ch0001.md", "临时改动")
 	if _, err := service.Restore(first.Version.ID, settings); err != nil {
 		t.Fatalf("Restore failed: %v", err)
 	}
@@ -117,9 +88,8 @@ func TestGoGitVersionCreateDiffAndRestore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("History failed: %v", err)
 	}
-	if len(history) != 3 ||
+	if len(history) != 2 ||
 		!historyContains(history, first.Version.ID) ||
-		!historyContains(history, second.Version.ID) ||
 		!historyContainsSource(history, VersionSourceRollbackBackup) {
 		t.Fatalf("history should come from git commits, history=%#v latest=%#v", history, cleanStatus.Latest)
 	}
@@ -204,6 +174,53 @@ func TestGoGitVersionExcludesRunLedgers(t *testing.T) {
 	}
 }
 
+func TestGoGitVersionExcludesAndPreservesReviewJournals(t *testing.T) {
+	dir := t.TempDir()
+	service := NewService(dir)
+	settings := DefaultAutoSettings()
+	writeFile(t, dir, "chapters/ch0001.md", "第一版")
+	writeFile(t, dir, ".denova/changes/ledger.jsonl", `{"type":"change_applied"}`)
+	writeFile(t, dir, ".nova/changes/legacy.jsonl", `{"type":"comment_added"}`)
+	writeFile(t, dir, ".denova/reviews/ledger.jsonl", `{"type":"comments_upserted"}`)
+	writeFile(t, dir, ".nova/reviews/legacy.jsonl", `{"type":"comments_upserted"}`)
+
+	first, err := service.Create("初始版本", VersionSourceManual, settings)
+	if err != nil {
+		t.Fatalf("Create first failed: %v", err)
+	}
+	files, err := service.commitFiles(first.Version.ID)
+	if err != nil {
+		t.Fatalf("commitFiles first failed: %v", err)
+	}
+	for _, path := range []string{
+		".denova/changes/ledger.jsonl",
+		".nova/changes/legacy.jsonl",
+		".denova/reviews/ledger.jsonl",
+		".nova/reviews/legacy.jsonl",
+	} {
+		if _, ok := files[path]; ok {
+			t.Fatalf("review journal must not be committed: path=%s files=%v", path, sortedVersionFilePaths(files))
+		}
+	}
+
+	writeFile(t, dir, "chapters/ch0001.md", "第二版")
+	if _, err := service.Restore(first.Version.ID, settings); err != nil {
+		t.Fatalf("Restore failed: %v", err)
+	}
+	if got := readFile(t, dir, ".denova/changes/ledger.jsonl"); got != `{"type":"change_applied"}` {
+		t.Fatalf("current change journal should survive restore: %q", got)
+	}
+	if got := readFile(t, dir, ".nova/changes/legacy.jsonl"); got != `{"type":"comment_added"}` {
+		t.Fatalf("legacy change journal should survive restore: %q", got)
+	}
+	if got := readFile(t, dir, ".denova/reviews/ledger.jsonl"); got != `{"type":"comments_upserted"}` {
+		t.Fatalf("current document review journal should survive restore: %q", got)
+	}
+	if got := readFile(t, dir, ".nova/reviews/legacy.jsonl"); got != `{"type":"comments_upserted"}` {
+		t.Fatalf("legacy document review journal should survive restore: %q", got)
+	}
+}
+
 func TestGoGitVersionExcludesInteractiveData(t *testing.T) {
 	dir := t.TempDir()
 	service := NewService(dir)
@@ -239,7 +256,7 @@ func TestGoGitVersionExcludesInteractiveData(t *testing.T) {
 		t.Fatalf("interactive data should survive version restore: %v", err)
 	}
 	if _, err := os.Stat(filepath.Join(dir, ".nova", "interactive", "memory", "book.json")); err != nil {
-		t.Fatalf("interactive memory should survive version restore: %v", err)
+		t.Fatalf("legacy interactive data should survive version restore: %v", err)
 	}
 
 	writeFile(t, dir, ".nova/interactive/stories/story-2.json", `{"title":"新故事"}`)

@@ -13,7 +13,6 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
 
-	"denova/config"
 	"denova/internal/book"
 )
 
@@ -140,13 +139,13 @@ func (h *Handlers) HandleNovelImport(ctx context.Context, c *app.RequestContext)
 		writeError(c, consts.StatusInternalServerError, err.Error())
 		return
 	}
-	if layered.Paths.NovaDir == "" {
+	if layered.Paths.DenovaDir == "" {
 		writeErrorKey(c, consts.StatusInternalServerError, "api.books.novaDirMissing")
 		return
 	}
 
 	log.Printf("[api] 导入小说 filename=%q size=%d title=%q strategy=%s regex=%q chapters=%d", filename, len(data), title, preview.SplitStrategy, preview.SplitRegex, preview.ChapterCount)
-	workspace, meta, err := h.app.CreateBook(ctx, layered.Paths.NovaDir, title, author, description)
+	workspace, meta, err := h.app.CreateBook(ctx, layered.Paths.DenovaDir, title, author, description)
 	if err != nil {
 		status := consts.StatusInternalServerError
 		if strings.Contains(err.Error(), "已存在") {
@@ -155,16 +154,6 @@ func (h *Handlers) HandleNovelImport(ctx context.Context, c *app.RequestContext)
 		writeErrorKey(c, status, "api.novelImport.importFailed", "detail", err.Error())
 		return
 	}
-	if preview.ChapterFilenameFormat != "" || preview.VolumeDirFormat != "" {
-		settings := config.Settings{
-			ChapterFilenameFormat: preview.ChapterFilenameFormat,
-			VolumeDirFormat:       preview.VolumeDirFormat,
-		}
-		if _, settingsErr := h.app.UpdateWorkspaceSettings(settings); settingsErr != nil {
-			log.Printf("[api] 小说导入写入章节/分卷文件名模板失败 workspace=%q chapter_format=%q volume_format=%q err=%v", workspace, preview.ChapterFilenameFormat, preview.VolumeDirFormat, settingsErr)
-		}
-	}
-
 	importPreview, paths, err := book.ImportNovelToWorkspace(workspace, filename, data, opts)
 	if err != nil {
 		log.Printf("[api] 小说导入确认 import failed filename=%q workspace=%q err=%v", filename, workspace, err)

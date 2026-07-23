@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { act, render } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import { StrictMode } from 'react'
 import type { LayeredSettings, Settings } from './types'
 import { useAutoSaveSettings } from './use-auto-save-settings'
@@ -7,6 +7,39 @@ import { useAutoSaveSettings } from './use-auto-save-settings'
 describe('useAutoSaveSettings', () => {
   afterEach(() => {
     vi.useRealTimers()
+  })
+
+  it('exposes pending, saving, and saved states for page-level feedback', async () => {
+    vi.useFakeTimers()
+    const pendingSave = deferred<LayeredSettings>()
+    const view = render(
+      <HookHarness
+        draft={{ language: 'zh-CN' }}
+        saved={{ language: 'zh-CN' }}
+        save={() => pendingSave.promise}
+        onSaved={() => undefined}
+      />,
+    )
+
+    expect(screen.getByTestId('autosave-status')).toHaveTextContent('saved')
+    view.rerender(
+      <HookHarness
+        draft={{ language: 'en-US' }}
+        saved={{ language: 'zh-CN' }}
+        save={() => pendingSave.promise}
+        onSaved={() => undefined}
+      />,
+    )
+    expect(screen.getByTestId('autosave-status')).toHaveTextContent('pending')
+
+    await advanceAutoSaveTimer()
+    expect(screen.getByTestId('autosave-status')).toHaveTextContent('saving')
+
+    await act(async () => {
+      pendingSave.resolve(layered({ language: 'en-US' }))
+      await pendingSave.promise
+    })
+    expect(screen.getByTestId('autosave-status')).toHaveTextContent('saved')
   })
 
   it('waits for draft to sync before saving user edits', async () => {
@@ -142,6 +175,56 @@ describe('useAutoSaveSettings', () => {
     expect(onSavingChange).toHaveBeenLastCalledWith(false)
   })
 
+  it('advances the revision before a manual flush continues an in-flight save', async () => {
+    vi.useFakeTimers()
+    const firstSave = deferred<LayeredSettings>()
+    const save = vi.fn((settings: Settings, _revision?: string) => {
+      if (settings.language === 'en-US') return firstSave.promise
+      return Promise.resolve({ ...layered(settings), revisions: { user: 'r3' } })
+    })
+    const view = render(
+      <HookHarness
+        draft={{ language: 'zh-CN' }}
+        saved={{ language: 'zh-CN' }}
+        baseRevision="r1"
+        savedRevision={(next) => next.revisions?.user}
+        save={save}
+        onSaved={() => undefined}
+      />,
+    )
+
+    view.rerender(
+      <HookHarness
+        draft={{ language: 'en-US' }}
+        saved={{ language: 'zh-CN' }}
+        baseRevision="r1"
+        savedRevision={(next) => next.revisions?.user}
+        save={save}
+        onSaved={() => undefined}
+      />,
+    )
+    await advanceAutoSaveTimer()
+    view.rerender(
+      <HookHarness
+        draft={{ language: 'auto' }}
+        saved={{ language: 'zh-CN' }}
+        baseRevision="r1"
+        savedRevision={(next) => next.revisions?.user}
+        save={save}
+        onSaved={() => undefined}
+      />,
+    )
+    screen.getByRole('button', { name: 'flush' }).click()
+
+    await act(async () => {
+      firstSave.resolve({ ...layered({ language: 'en-US' }), revisions: { user: 'r2' } })
+      await firstSave.promise
+      await Promise.resolve()
+    })
+
+    expect(save).toHaveBeenLastCalledWith({ language: 'auto' }, 'r2')
+  })
+
   it('resets saving state after StrictMode remount checks', async () => {
     vi.useFakeTimers()
     const save = vi.fn(async (settings: Settings) => layered(settings))
@@ -224,36 +307,224 @@ describe('useAutoSaveSettings', () => {
     await advanceAutoSaveTimer()
     expect(save).toHaveBeenCalledTimes(2)
   })
+
+  it('cancels a pending save when the draft scope changes', async () => {
+    vi.useFakeTimers()
+    const save = vi.fn(async (settings: Settings) => layered(settings))
+    const view = render(
+      <HookHarness
+        draft={{ language: 'zh-CN' }}
+        saved={{ language: 'zh-CN' }}
+        resetKey="user"
+        save={save}
+        onSaved={() => undefined}
+      />,
+    )
+
+    view.rerender(
+      <HookHarness
+        draft={{ language: 'en-US' }}
+        saved={{ language: 'zh-CN' }}
+        resetKey="user"
+        save={save}
+        onSaved={() => undefined}
+      />,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500)
+    })
+
+    view.rerender(
+      <HookHarness
+        draft={{ language: 'en-US' }}
+        saved={{ theme: 'dark' }}
+        ready={false}
+        resetKey="workspace"
+        save={save}
+        onSaved={() => undefined}
+      />,
+    )
+    view.rerender(
+      <HookHarness
+        draft={{ theme: 'dark' }}
+        saved={{ theme: 'dark' }}
+        resetKey="workspace"
+        save={save}
+        onSaved={() => undefined}
+      />,
+    )
+    await advanceAutoSaveTimer()
+
+    expect(save).not.toHaveBeenCalled()
+  })
+
+  it('treats an explicit server snapshot sync as the new baseline', async () => {
+    vi.useFakeTimers()
+    const save = vi.fn(async (settings: Settings) => layered(settings))
+    const view = render(
+      <HookHarness
+        draft={{ language: 'zh-CN' }}
+        saved={{ language: 'zh-CN' }}
+        syncKey={1}
+        save={save}
+        onSaved={() => undefined}
+      />,
+    )
+
+    view.rerender(
+      <HookHarness
+        draft={{ language: 'en-US' }}
+        saved={{ language: 'en-US' }}
+        syncKey={2}
+        save={save}
+        onSaved={() => undefined}
+      />,
+    )
+    await advanceAutoSaveTimer()
+
+    expect(save).not.toHaveBeenCalled()
+  })
+
+  it('reconciles a successful in-flight write after its scope is superseded', async () => {
+    vi.useFakeTimers()
+    const pending = deferred<LayeredSettings>()
+    const save = vi.fn(() => pending.promise)
+    const onSaved = vi.fn()
+    const onStaleSuccess = vi.fn()
+    const view = render(
+      <HookHarness
+        draft={{ language: 'zh-CN' }}
+        saved={{ language: 'zh-CN' }}
+        resetKey="user"
+        save={save}
+        onSaved={onSaved}
+        onStaleSuccess={onStaleSuccess}
+      />,
+    )
+
+    view.rerender(
+      <HookHarness
+        draft={{ language: 'en-US' }}
+        saved={{ language: 'zh-CN' }}
+        resetKey="user"
+        save={save}
+        onSaved={onSaved}
+        onStaleSuccess={onStaleSuccess}
+      />,
+    )
+    await advanceAutoSaveTimer()
+    expect(save).toHaveBeenCalledOnce()
+
+    view.rerender(
+      <HookHarness
+        draft={{ theme: 'dark' }}
+        saved={{ theme: 'dark' }}
+        resetKey="workspace"
+        save={save}
+        onSaved={onSaved}
+        onStaleSuccess={onStaleSuccess}
+      />,
+    )
+    const response = layered({ language: 'en-US' })
+    await act(async () => {
+      pending.resolve(response)
+      await pending.promise
+      await Promise.resolve()
+    })
+
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(onStaleSuccess).toHaveBeenCalledWith(response)
+  })
+
+  it('does not publish an in-flight save result after unmount', async () => {
+    vi.useFakeTimers()
+    const pending = deferred<LayeredSettings>()
+    const onSaved = vi.fn()
+    const onStaleSuccess = vi.fn()
+    const onError = vi.fn()
+    const view = render(
+      <HookHarness
+        draft={{ language: 'zh-CN' }}
+        saved={{ language: 'zh-CN' }}
+        save={() => pending.promise}
+        onSaved={onSaved}
+        onStaleSuccess={onStaleSuccess}
+        onError={onError}
+      />,
+    )
+
+    view.rerender(
+      <HookHarness
+        draft={{ language: 'en-US' }}
+        saved={{ language: 'zh-CN' }}
+        save={() => pending.promise}
+        onSaved={onSaved}
+        onStaleSuccess={onStaleSuccess}
+        onError={onError}
+      />,
+    )
+    await advanceAutoSaveTimer()
+    view.unmount()
+
+    await act(async () => {
+      pending.resolve(layered({ language: 'en-US' }))
+      await pending.promise
+      await Promise.resolve()
+    })
+
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(onStaleSuccess).not.toHaveBeenCalled()
+    expect(onError).not.toHaveBeenCalled()
+  })
 })
 
 function HookHarness({
   draft,
   saved,
   baseRevision,
+  savedRevision,
+  resetKey,
+  syncKey,
+  ready = true,
   save,
   onSaved,
+  onStaleSuccess,
   onSavingChange = () => undefined,
   onError = () => undefined,
 }: {
   draft: Settings
   saved: Settings
   baseRevision?: string
+  savedRevision?: (next: LayeredSettings) => string | undefined
+  resetKey?: string
+  syncKey?: string | number
+  ready?: boolean
   save: (settings: Settings, baseRevision?: string) => Promise<LayeredSettings>
   onSaved: (next: LayeredSettings) => void
+  onStaleSuccess?: (next: LayeredSettings) => void | Promise<void>
   onSavingChange?: (saving: boolean) => void
   onError?: (message: string) => void
 }) {
-  useAutoSaveSettings({
+  const autosave = useAutoSaveSettings({
     draft,
     saved,
     baseRevision,
-    ready: true,
+    savedRevision,
+    ready,
+    resetKey,
+    syncKey,
     save,
     onSavingChange,
     onSaved,
+    onStaleSuccess,
     onError,
   })
-  return null
+  return (
+    <>
+      <output data-testid="autosave-status">{autosave.status}</output>
+      <button type="button" onClick={() => void autosave.flush()}>flush</button>
+    </>
+  )
 }
 
 async function advanceAutoSaveTimer() {

@@ -1,7 +1,7 @@
 import type { ChatTransport, UIMessage } from 'ai'
 import { DefaultChatTransport } from 'ai'
 import { fetchAPI } from './api-client/client'
-import type { ChatMessage } from './api-client/types'
+import type { ChatMessage, UserMessageReference } from './api-client/types'
 
 export interface AgentMessageMetadata {
   created_at?: string
@@ -25,6 +25,7 @@ export interface AgentMessageMetadata {
   navigation_turn_id?: string
   turn_versions?: { turn_id: string; ts: string; current?: boolean }[]
   turn_version_index?: number
+  user_references?: UserMessageReference[]
 }
 
 type AgentDataPayload = Record<string, unknown>
@@ -41,6 +42,7 @@ export type AgentDataParts = {
   'agent-system': AgentDataPayload
   'agent-token-usage': AgentDataPayload
   'agent-tool-result': AgentDataPayload
+  'agent-workspace-change': AgentDataPayload
 }
 
 export type AgentUIMessage = UIMessage<AgentMessageMetadata, AgentDataParts>
@@ -55,6 +57,11 @@ interface AgentChatRequestBody {
   writing_skill?: string
   image_preset_id?: string
   teller_id?: string
+  review_feedback?: Array<{
+    source?: 'workspace_change' | 'document'
+    review_thread_id: string
+    comment_ids: string[]
+  }>
 }
 
 export class AgentChatTransport implements ChatTransport<AgentUIMessage> {
@@ -86,6 +93,7 @@ export class AgentChatTransport implements ChatTransport<AgentUIMessage> {
 }
 
 export function buildAgentChatRequestBody(body: AgentChatRequestBody): AgentChatRequestBody {
+  const reviewFeedback = normalizeReviewFeedbackRefs(body.review_feedback)
   return {
     references: body.references || [],
     lore_references: body.lore_references || [],
@@ -96,7 +104,26 @@ export function buildAgentChatRequestBody(body: AgentChatRequestBody): AgentChat
     writing_skill: body.writing_skill || undefined,
     image_preset_id: body.image_preset_id || undefined,
     teller_id: body.teller_id || undefined,
+    review_feedback: reviewFeedback.length ? reviewFeedback : undefined,
   }
+}
+
+function normalizeReviewFeedbackRefs(feedback: AgentChatRequestBody['review_feedback']): NonNullable<AgentChatRequestBody['review_feedback']> {
+  const merged = new Map<string, NonNullable<AgentChatRequestBody['review_feedback']>[number]>()
+  for (const selection of feedback ?? []) {
+    const reviewThreadID = selection.review_thread_id.trim()
+    const commentIDs = selection.comment_ids.map((id) => id.trim()).filter(Boolean)
+    if (!reviewThreadID || !commentIDs.length) continue
+    const source = selection.source || 'workspace_change'
+    const key = `${source}\u0000${reviewThreadID}`
+    const current = merged.get(key)
+    merged.set(key, {
+      ...(selection.source ? { source: selection.source } : {}),
+      review_thread_id: reviewThreadID,
+      comment_ids: Array.from(new Set([...(current?.comment_ids ?? []), ...commentIDs])),
+    })
+  }
+  return [...merged.values()]
 }
 
 export function normalizeAgentUIMessages(messages: AgentUIMessage[]): AgentUIMessage[] {
@@ -119,14 +146,21 @@ function normalizeRepeatedAgentUIMessageIDs(messages: AgentUIMessage[]) {
   return normalized
 }
 
-function normalizeRepeatedAgentUIParts(messages: AgentUIMessage[]) {
-  const normalized = messages.map(message => ({ ...message, parts: [...message.parts] })) as AgentUIMessage[]
-  const locationByKey = new Map<string, { messageIndex: number; partIndex: number }>()
-  const removed = new Set<string>()
+const messagePartDedupeKeysCache = new WeakMap<AgentUIMessage, {
+  metadata: AgentUIMessage['metadata']
+  parts: AgentUIMessage['parts']
+  keys: string[]
+}>()
 
-  normalized.forEach((message, messageIndex) => {
+function normalizeRepeatedAgentUIParts(messages: AgentUIMessage[]) {
+  const normalized = [...messages]
+  const locationByKey = new Map<string, { messageIndex: number; partIndex: number }>()
+  const removedByMessage = new Map<number, Set<number>>()
+
+  messages.forEach((message, messageIndex) => {
+    const dedupeKeys = agentUIPartDedupeKeys(message)
     message.parts.forEach((part, partIndex) => {
-      const key = agentUIPartDedupeKey(message, part)
+      const key = dedupeKeys[partIndex]
       if (!key) return
       const existing = locationByKey.get(key)
       if (!existing) {
@@ -134,18 +168,42 @@ function normalizeRepeatedAgentUIParts(messages: AgentUIMessage[]) {
         return
       }
       const existingMessage = normalized[existing.messageIndex]
-      existingMessage.parts[existing.partIndex] = mergeDuplicateAgentUIPart(existingMessage.parts[existing.partIndex], part)
-      existingMessage.metadata = mergeAgentMessageMetadata(existingMessage.metadata, message.metadata)
-      removed.add(`${messageIndex}:${partIndex}`)
+      const existingPart = existingMessage.parts[existing.partIndex]
+      const mergedPart = mergeDuplicateAgentUIPart(existingPart, part)
+      const mergedMetadata = mergeAgentMessageMetadata(existingMessage.metadata, message.metadata)
+      if (mergedPart !== existingPart || mergedMetadata !== existingMessage.metadata) {
+        const parts = mergedPart === existingPart ? existingMessage.parts : [...existingMessage.parts]
+        if (parts !== existingMessage.parts) parts[existing.partIndex] = mergedPart
+        normalized[existing.messageIndex] = {
+          ...existingMessage,
+          parts,
+          metadata: mergedMetadata,
+        } as AgentUIMessage
+      }
+      const removedParts = removedByMessage.get(messageIndex) || new Set<number>()
+      removedParts.add(partIndex)
+      removedByMessage.set(messageIndex, removedParts)
     })
   })
 
   return normalized
-    .map((message, messageIndex) => ({
-      ...message,
-      parts: message.parts.filter((_part, partIndex) => !removed.has(`${messageIndex}:${partIndex}`)),
-    }) as AgentUIMessage)
+    .map((message, messageIndex) => {
+      const removedParts = removedByMessage.get(messageIndex)
+      if (!removedParts?.size) return message
+      return {
+        ...message,
+        parts: message.parts.filter((_part, partIndex) => !removedParts.has(partIndex)),
+      } as AgentUIMessage
+    })
     .filter(message => message.parts.length > 0)
+}
+
+function agentUIPartDedupeKeys(message: AgentUIMessage) {
+  const cached = messagePartDedupeKeysCache.get(message)
+  if (cached && cached.metadata === message.metadata && cached.parts === message.parts) return cached.keys
+  const keys = message.parts.map((part) => agentUIPartDedupeKey(message, part))
+  messagePartDedupeKeysCache.set(message, { metadata: message.metadata, parts: message.parts, keys })
+  return keys
 }
 
 function agentUIPartDedupeKey(message: AgentUIMessage, part: AgentUIMessage['parts'][number]) {

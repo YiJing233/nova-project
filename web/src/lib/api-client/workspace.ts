@@ -6,6 +6,7 @@ import type {
   CreateFileRequest,
   FileOperationResult,
   RenameRequest,
+  WorkspaceReplaceResult,
   WorkspaceSearchResult,
   WorkspaceSummary,
 } from './types'
@@ -44,7 +45,14 @@ export async function getWorkspaceTree(): Promise<unknown[]> {
   return Array.isArray(data) ? data : []
 }
 
-export async function readFile(path: string): Promise<{ path: string; content: string; revision?: string }> {
+export interface WorkspaceFileDocument {
+  workspace: string
+  path: string
+  content: string
+  revision?: string
+}
+
+export async function readFile(path: string): Promise<WorkspaceFileDocument> {
   return requestJSON(`/api/workspace/file?path=${encodeURIComponent(path)}`)
 }
 
@@ -52,17 +60,26 @@ export function workspaceAssetURL(path: string): string {
   return `/api/workspace/asset?path=${encodeURIComponent(path)}`
 }
 
-export async function searchWorkspace(query: string, limit = 100): Promise<WorkspaceSearchResult[]> {
+export async function searchWorkspace(query: string, limit = 100, options: { regex?: boolean } = {}): Promise<WorkspaceSearchResult[]> {
   const params = new URLSearchParams({ q: query, limit: String(limit) })
+  if (options.regex) params.set('regex', '1')
   const data = await requestJSON<{ results: WorkspaceSearchResult[] }>(`/api/workspace/search?${params.toString()}`)
   return Array.isArray(data.results) ? data.results : []
 }
 
-export async function saveFile(path: string, content: string, baseRevision?: string): Promise<{ path: string; message: string; revision?: string }> {
+export async function replaceWorkspace(req: { query: string; replacement: string; regex: boolean; workspace: string }): Promise<WorkspaceReplaceResult> {
+  return requestJSON('/api/workspace/replace', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(req),
+  })
+}
+
+export async function saveFile(path: string, content: string, baseRevision: string, workspace: string): Promise<{ path: string; message: string; revision?: string }> {
   return requestJSON('/api/workspace/file', {
     method: 'POST',
     headers: jsonHeaders,
-    body: JSON.stringify({ path, content, base_revision: baseRevision || '' }),
+    body: JSON.stringify({ path, content, base_revision: baseRevision || '', workspace }),
   })
 }
 
@@ -117,13 +134,14 @@ export async function previewCharacterCard(file: File): Promise<CharacterCardPre
 
 export async function importCharacterCard(
   file: File,
-  options: { targetMode?: 'current' | 'new_book'; bookTitle?: string; userCharacterName?: string } = {},
+  options: { targetMode?: 'current' | 'new_book'; bookTitle?: string; userCharacterName?: string; loreClassification?: 'heuristic' | 'semantic' } = {},
 ): Promise<CharacterCardImportResult> {
   const form = new FormData()
   form.append('file', file)
   if (options.targetMode) form.append('target_mode', options.targetMode)
   if (options.bookTitle) form.append('book_title', options.bookTitle)
   if (options.userCharacterName) form.append('user_character_name', options.userCharacterName)
+  if (options.loreClassification) form.append('lore_classification', options.loreClassification)
   return requestJSON('/api/workspace/import-character-card', {
     method: 'POST',
     body: form,

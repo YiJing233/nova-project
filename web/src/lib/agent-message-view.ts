@@ -63,14 +63,28 @@ export interface AgentTokenUsageRecord {
   usage_calls?: TokenUsageCall[]
 }
 
+// Agent message updates are immutable. Caching by message identity keeps
+// completed history stable while only the active streaming message is rebuilt.
+const messageViewsCache = new WeakMap<AgentUIMessage, AgentMessageView[]>()
+
 export function buildAgentMessageViews(messages: AgentUIMessage[]): AgentMessageView[] {
   const views: AgentMessageView[] = []
   messages.forEach((message) => {
-    if (message.role === 'user' && message.metadata?.display_hidden) return
-    message.parts.forEach((part, partIndex) => {
-      const view = buildAgentMessageView(message, part, partIndex)
-      if (view) views.push(view)
-    })
+    const cachedViews = messageViewsCache.get(message)
+    if (cachedViews) {
+      views.push(...cachedViews)
+      return
+    }
+
+    const messageViews: AgentMessageView[] = []
+    if (!(message.role === 'user' && message.metadata?.display_hidden)) {
+      message.parts.forEach((part, partIndex) => {
+        const view = buildAgentMessageView(message, part, partIndex)
+        if (view) messageViews.push(view)
+      })
+    }
+    messageViewsCache.set(message, messageViews)
+    views.push(...messageViews)
   })
   return views
 }
@@ -81,8 +95,27 @@ export function selectAgentTokenUsageRecords(messages: AgentUIMessage[]): AgentT
     .map(agentTokenUsageRecordFromView)
 }
 
+export function countCompletedAgentTurnSignals(messages: AgentUIMessage[]): number {
+  return buildAgentMessageViews(messages).filter((view) =>
+    (view.kind === 'assistant' || view.kind === 'tool-result' || view.kind === 'tool') &&
+    (Boolean(agentViewContent(view).trim()) || view.status === 'success'),
+  ).length
+}
+
+export function hasCompletedAgentTurn(messages: AgentUIMessage[], isStreaming: boolean): boolean {
+  return !isStreaming && countCompletedAgentTurnSignals(messages) > 0
+}
+
 export function agentViewContent(view: AgentMessageView) {
   return view.content || readString(view.data.content) || readString(view.data.message) || readString(view.data.error)
+}
+
+/** Content whose full height must be reserved for the next visible streaming frame. */
+export function agentViewLayoutContent(view: AgentMessageView) {
+  if (view.streaming && view.metadata.streaming_target_content !== undefined) {
+    return view.metadata.streaming_target_content
+  }
+  return agentViewContent(view)
 }
 
 export function agentViewNavigationAnchor(view: AgentMessageView) {
@@ -326,6 +359,7 @@ function metadataToChatFields(view: AgentMessageView): Partial<ChatMessage> {
     navigation_turn_id: metadata.navigation_turn_id,
     turn_versions: metadata.turn_versions,
     turn_version_index: metadata.turn_version_index,
+    user_references: metadata.user_references,
   }
 }
 
@@ -468,8 +502,10 @@ function readRuleRoll(value: unknown): PublicRuleRoll | undefined {
     ? data.state_changes
         .map((item) => {
           const change = objectData(item)
-          if (!readString(change.path)) return null
-          return { path: readString(change.path), change: readNumber(change.change) || 0, reason: readString(change.reason) }
+          const actorId = readString(change.actor_id)
+          const fieldId = readString(change.field_id)
+          if (!actorId || !fieldId) return null
+          return { actor_id: actorId, field_id: fieldId, change: readNumber(change.change) || 0, reason: readString(change.reason) }
         })
         .filter((item): item is NonNullable<typeof item> => Boolean(item))
     : undefined
@@ -561,7 +597,30 @@ function providerAgentMetadata(value: unknown): AgentMessageMetadata {
     navigation_turn_id: readString(agent.navigation_turn_id) || undefined,
     turn_versions: readTurnVersions(agent.turn_versions),
     turn_version_index: readNumber(agent.turn_version_index),
+    user_references: readUserMessageReferences(agent.user_references),
   }
+}
+
+function readUserMessageReferences(value: unknown): AgentMessageMetadata['user_references'] {
+  if (!Array.isArray(value)) return undefined
+  const references = value
+    .map((item) => {
+      if (!item || typeof item !== 'object' || Array.isArray(item)) return null
+      const data = item as Record<string, unknown>
+      const kind = readString(data.kind)
+      const label = readString(data.label)
+      if (!label || !['file', 'lore', 'style', 'selection', 'review_comment'].includes(kind)) return null
+      return {
+        kind: kind as NonNullable<AgentMessageMetadata['user_references']>[number]['kind'],
+        id: readString(data.id) || undefined,
+        label,
+        detail: readString(data.detail) || undefined,
+        start_line: readNumber(data.start_line),
+        end_line: readNumber(data.end_line),
+      }
+    })
+    .filter((item): item is NonNullable<typeof item> => Boolean(item))
+  return references.length ? references : undefined
 }
 
 function readUsageCalls(value: unknown): TokenUsageCall[] | undefined {

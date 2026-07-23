@@ -48,6 +48,68 @@ func TestInteractiveContextAnalysisLabelsDynamicContextAtFinalMessage(t *testing
 	}
 }
 
+func TestInteractiveContextAnalysisSplitsCurrentTurnByRuntimeSource(t *testing.T) {
+	runtimeContext := prompts.InteractiveStoryRuntimeContext(prompts.InteractiveStoryPromptInput{
+		ReplyTargetChars:            1200,
+		ChoiceCount:                 3,
+		DirectorPlanVisible:         "## 正文 Agent 简报（source: agent-brief.md）\n\n当前目标：进入藏书阁。",
+		StoryDirectorRules:          "冲突升级应保持渐进。",
+		ActorState:                  "主角：体力=8。",
+		StoryDirectorStrategyPrompt: "伏笔回收前先给征兆。",
+	})
+	turnInstruction := prompts.InteractiveStoryTurnInstruction(
+		"我推开藏书阁的门",
+		"守门人会先观察来者身份。",
+		runtimeContext,
+	)
+	analysis, err := BuildInteractiveStoryContextAnalysis(
+		&config.Config{},
+		nil,
+		prompts.InteractiveStorySystemInstructionInput{},
+		nil,
+		ChatRequest{Message: "我推开藏书阁的门"},
+		nil,
+		func(originalMessage, agentMessage string) ([]*schema.Message, error) {
+			return []*schema.Message{schema.UserMessage(turnInstruction)}, nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(analysis.ContextMessages) != 1 {
+		t.Fatalf("context message count = %d, want 1", len(analysis.ContextMessages))
+	}
+	parts := analysis.ContextMessages[0].Parts
+	if len(parts) < 7 {
+		t.Fatalf("current turn should be split into source parts: %#v", parts)
+	}
+	wants := []struct {
+		source  string
+		title   string
+		content string
+	}{
+		{source: "本轮行动", title: "当前用户行动", content: "我推开藏书阁的门"},
+		{source: "StoryTeller.turn_context", title: "导演本轮上下文规则", content: "守门人会先观察来者身份"},
+		{source: "agent-brief.md", title: "正文 Agent 简报", content: "进入藏书阁"},
+		{source: "StoryDirector", title: "故事导演规则清单", content: "冲突升级"},
+		{source: "Snapshot.State.actors + effective Actor schema", title: "Actor 状态手册", content: "体力=8"},
+		{source: "StoryDirector.strategy.prompt_markdown", title: "故事导演 Markdown 策略提示", content: "伏笔回收"},
+	}
+	for _, want := range wants {
+		matches := 0
+		contentFound := false
+		for _, part := range parts {
+			if part.Source == want.source && part.Title == want.title {
+				matches++
+				contentFound = contentFound || strings.Contains(part.Content, want.content)
+			}
+		}
+		if matches != 1 || !contentFound {
+			t.Fatalf("split part source=%q title=%q matches=%d content_found=%v, want one matching %q in %#v", want.source, want.title, matches, contentFound, want.content, parts)
+		}
+	}
+}
+
 func TestInteractiveContextAnalysisUsesConfiguredContextWindow(t *testing.T) {
 	contextWindow := 650000
 	analysis, err := BuildInteractiveStoryContextAnalysis(
@@ -107,12 +169,10 @@ func TestInteractiveDirectorContextAnalysisSplitsInstructionSources(t *testing.T
 		StoryTellerID:        "classic",
 		StoryDirectorID:      "default",
 		BranchID:             "main",
-		DirectorPlanPaths:    "/tmp/director.md",
-		DirectorPlanDocs:     `{"plan":"# 正文Agent可读"}`,
+		DirectorPlanDocs:     "## 文件：agent-brief.md\n\n# 正文 Agent 简报",
 		LoreContext:          "角色 沈凝。外门比试关键见证者。",
 		TurnAuditJSON:        `{"turn_id":"turn-1","user_action":"报名比试"}`,
 		TurnHistory:          "用户：我报名参加公开比试",
-		StoryMemorySummary:   "公开比试即将开始。",
 		StoryDirectorPlan:    "mainline_strength: soft_guidance",
 		DirectorEventCatalog: `{"events":[{"id":"face_slap"}]}`,
 	})
@@ -129,28 +189,48 @@ func TestInteractiveDirectorContextAnalysisSplitsInstructionSources(t *testing.T
 	if analysis.MessageCount != 1 {
 		t.Fatalf("director analysis should estimate the single user instruction message, got %d", analysis.MessageCount)
 	}
-	var sawOutputProtocol, sawLore, sawTurnAudit, sawPlanPath bool
+	var sawOutputProtocol, sawLore, sawTurnAudit, sawPlanDocs bool
 	for _, part := range analysis.SystemPromptParts {
-		if part.ID == "output_protocol" && strings.Contains(part.Content, "director.md") {
+		if part.ID == "output_protocol" && strings.Contains(part.Content, submitDirectorPlanUpdateToolName) {
 			sawOutputProtocol = true
 		}
 	}
 	for _, part := range analysis.ContextMessages {
 		switch {
-		case part.Title == "资料库导演上下文" && strings.Contains(part.Source, "lore index") && strings.Contains(part.Content, "沈凝"):
+		case part.Title == "资料库导演上下文" && strings.Contains(part.Source, "lore-context.md") && strings.Contains(part.Content, "沈凝"):
 			sawLore = true
 		case part.Title == "本回合 TurnResult / RuleResolution / StateDelta 审计 JSON" && strings.Contains(part.Source, "committed turn") && strings.Contains(part.Content, "turn-1"):
 			sawTurnAudit = true
-		case part.Title == "允许读写的导演规划文件路径" && strings.Contains(part.Source, "backend guard") && strings.Contains(part.Content, "director.md"):
-			sawPlanPath = true
+		case part.Title == "文件：agent-brief.md" && strings.Contains(part.Content, "正文 Agent 简报"):
+			sawPlanDocs = true
 		}
 	}
-	if !sawOutputProtocol || !sawLore || !sawTurnAudit || !sawPlanPath {
-		t.Fatalf("director analysis missing expected parts output=%v lore=%v audit=%v planPath=%v parts=%#v", sawOutputProtocol, sawLore, sawTurnAudit, sawPlanPath, analysis.ContextMessages)
+	if !sawOutputProtocol || !sawLore || !sawTurnAudit || !sawPlanDocs {
+		t.Fatalf("director analysis missing expected parts output=%v lore=%v audit=%v planDocs=%v parts=%#v", sawOutputProtocol, sawLore, sawTurnAudit, sawPlanDocs, analysis.ContextMessages)
 	}
 }
 
-func TestIDEContextAnalysisShowsToolContextWithoutDenovaMetadata(t *testing.T) {
+func TestInteractiveDirectorContextAnalysisIncludesStableResidentLoreMessage(t *testing.T) {
+	analysis, err := BuildInteractiveDirectorContextAnalysisWithStableContext(
+		&config.Config{OpenAIContextWindowTokens: 128000},
+		"完整常驻资料（complete=true）",
+		"## [[公开比试规则]]\n\n禁止场外偷袭。",
+		1024,
+		prompts.InteractiveDirectorInstruction(prompts.InteractiveDirectorPromptInput{Title: "外门逆袭"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if analysis.MessageCount != 2 {
+		t.Fatalf("stable resident Lore plus the task instruction should be two exact model messages, got %d", analysis.MessageCount)
+	}
+	if len(analysis.ContextMessages) == 0 || analysis.ContextMessages[0].ID != "resident_lore" || !strings.Contains(analysis.ContextMessages[0].Content, "禁止场外偷袭") || !strings.Contains(analysis.ContextMessages[0].Note, "max_bytes=1024") {
+		t.Fatalf("stable resident Lore should be explicit in diagnostics: %#v", analysis.ContextMessages)
+	}
+}
+
+func TestIDEContextAnalysisShowsExactModelVisibleToolContext(t *testing.T) {
+	result := "第一章内容\n\n" + toolResultMetadataHeader + "\nschema: tool_result.v1"
 	analysis, err := BuildIDEContextAnalysis(
 		&config.Config{},
 		nil,
@@ -166,7 +246,7 @@ func TestIDEContextAnalysisShowsToolContextWithoutDenovaMetadata(t *testing.T) {
 					Arguments: `{"path":"chapters/1.md"}`,
 				},
 			}}),
-			schema.ToolMessage("第一章内容\n\n"+toolResultMetadataHeader+"\nschema: tool_result.v1", "call-read", schema.WithToolName("read_file")),
+			schema.ToolMessage(result, "call-read", schema.WithToolName("read_file")),
 			schema.AssistantMessage("已读取", nil),
 		},
 		4,
@@ -187,8 +267,8 @@ func TestIDEContextAnalysisShowsToolContextWithoutDenovaMetadata(t *testing.T) {
 			}
 		case "tool_result":
 			sawToolResult = true
-			if part.ToolName != "read_file" || part.Content != "第一章内容" || strings.Contains(part.Content, toolResultMetadataHeader) {
-				t.Fatalf("tool result part should be sanitized: %#v", part)
+			if part.ToolName != "read_file" || part.Content != result {
+				t.Fatalf("tool result part should match the model-visible message: %#v", part)
 			}
 		}
 	}

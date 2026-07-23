@@ -58,6 +58,7 @@ describe('AgentsView', () => {
   })
 
   it('reloads model profiles when settings are updated elsewhere', async () => {
+    const user = userEvent.setup()
     vi.mocked(fetchSettings)
       .mockResolvedValueOnce(settingsSnapshot({ effective: { openai_model: 'deepseek-chat' } }))
       .mockResolvedValueOnce(settingsSnapshot({
@@ -74,9 +75,9 @@ describe('AgentsView', () => {
 
     window.dispatchEvent(new CustomEvent('nova:settings-updated'))
 
-    await waitFor(() => {
-      expect(screen.getByText('deepseek（DeepSeek V3）')).toBeInTheDocument()
-    })
+    await waitFor(() => expect(vi.mocked(fetchSettings)).toHaveBeenCalledTimes(2))
+    await user.click(screen.getAllByRole('combobox')[0])
+    expect(await screen.findByText('deepseek（DeepSeek V3）')).toBeInTheDocument()
   })
 
   it('shows context compaction prompt and target ratio settings', async () => {
@@ -186,7 +187,7 @@ describe('AgentsView', () => {
     await user.type(nameInput, 'Researcher')
     await user.click(screen.getByRole('button', { name: '完成' }))
     expect(screen.getByText('Researcher')).toBeInTheDocument()
-    await user.click(screen.getByRole('button', { name: '保存' }))
+    flushAgentsAutosave()
 
     await waitFor(() => {
       expect(vi.mocked(updateUserSettings)).toHaveBeenCalledWith(expect.objectContaining({
@@ -220,7 +221,7 @@ describe('AgentsView', () => {
     const row = reviewer.closest('div.rounded-\\[var\\(--nova-radius\\)\\]')
     expect(row).toBeTruthy()
     await user.click(within(row as HTMLElement).getByRole('switch', { name: '启用状态' }))
-    await user.click(screen.getByRole('button', { name: '保存' }))
+    flushAgentsAutosave()
 
     await waitFor(() => {
       expect(vi.mocked(updateUserSettings)).toHaveBeenCalledWith(expect.objectContaining({
@@ -259,7 +260,7 @@ describe('AgentsView', () => {
       expect(screen.queryByText('Reviewer')).not.toBeInTheDocument()
     })
 
-    await user.click(screen.getByRole('button', { name: '保存' }))
+    flushAgentsAutosave()
 
     await waitFor(() => {
       expect(vi.mocked(updateUserSettings)).toHaveBeenCalledWith(expect.objectContaining({
@@ -290,7 +291,7 @@ describe('AgentsView', () => {
     render(<AgentsView />)
 
     await screen.findByText('Reviewer')
-    await user.click(screen.getByRole('button', { name: '配置管理 Agent资料库、方案预设、Skills、自动化与故事记忆管理' }))
+    await user.click(screen.getByRole('button', { name: '配置管理 Agent资料库、方案预设、Skills 与自动化管理' }))
 
     await waitFor(() => {
       expect(screen.queryByText('Reviewer')).not.toBeInTheDocument()
@@ -310,7 +311,7 @@ describe('AgentsView', () => {
     await user.clear(nameInput)
     await user.type(nameInput, 'Workspace Researcher')
     await user.click(screen.getByRole('button', { name: '完成' }))
-    await user.click(screen.getByRole('button', { name: '保存' }))
+    flushAgentsAutosave()
 
     await waitFor(() => {
       expect(vi.mocked(updateWorkspaceSettings)).toHaveBeenCalledWith(expect.objectContaining({
@@ -397,7 +398,7 @@ describe('AgentsView', () => {
     await user.click(screen.getByRole('button', { name: '删除 SubAgent' }))
     await screen.findByText('删除 SubAgent？')
     await user.click(screen.getByRole('button', { name: '全部删除' }))
-    await user.click(screen.getByRole('button', { name: '保存' }))
+    flushAgentsAutosave()
 
     await waitFor(() => {
       expect(vi.mocked(updateUserSettings)).toHaveBeenLastCalledWith(expect.objectContaining({
@@ -439,7 +440,7 @@ describe('AgentsView', () => {
     expect(generalSwitch).toBeChecked()
     await user.click(generalSwitch)
     expect(generalSwitch).not.toBeChecked()
-    await user.click(screen.getByRole('button', { name: '保存' }))
+    flushAgentsAutosave()
 
     await waitFor(() => {
       expect(vi.mocked(updateUserSettings)).toHaveBeenCalledWith(expect.objectContaining({
@@ -465,6 +466,7 @@ describe('AgentsView', () => {
     await user.click(screen.getByRole('button', { name: '用配置管理 Agent 调整' }))
 
     expect(screen.getByTestId('config-manager-chat')).toBeInTheDocument()
+    expect(screen.getByRole('separator', { name: '调整右侧面板宽度' })).toBeVisible()
     expect(configManagerChatProps.at(-1)).toMatchObject({
       origin: 'agents',
       resourceId: 'user:ide',
@@ -481,6 +483,10 @@ describe('AgentsView', () => {
     })
   })
 })
+
+function flushAgentsAutosave() {
+  fireEvent.keyDown(screen.getByRole('heading', { level: 2, name: 'Agents' }), { key: 's', ctrlKey: true })
+}
 
 function settingsSnapshot(patch: Partial<LayeredSettings>): LayeredSettings {
   return {

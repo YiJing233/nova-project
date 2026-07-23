@@ -1,6 +1,6 @@
 const messages = {
   'messages.title': 'Message Center',
-  'messages.description': 'Read Denova update summaries and product notices.',
+  'messages.description': 'See automation progress, pending actions, and product notices in one place.',
   'messages.open': 'Open message center',
   'messages.loading': 'Loading messages',
   'messages.empty': 'No messages',
@@ -12,9 +12,20 @@ const messages = {
   'messages.unreleased': 'Unreleased',
   'messages.changelogTitle': 'Denova {{version}}',
   'messages.type.changelog': 'Update',
+  'messages.type.automation': 'Automation',
+  'messages.type.automationAction': 'Automation · Action required',
+  'messages.filter.all': 'All',
+  'messages.filter.action': 'Action',
+  'messages.filter.automation': 'Automation',
+  'messages.filter.product': 'Product',
+  'messages.openAutomation': 'Open automation',
+  'messages.openAutomationAction': 'Review action',
   'messages.donation.title': 'Top up Denova',
   'messages.donation.description': 'If Denova has helped you, consider topping it up with a few tokens to help keep Denova open source and improving. Thank you.',
   'messages.donation.alt': 'Denova donation QR code',
+  'messages.github.title': 'Star Denova on GitHub',
+  'messages.github.description': 'If Denova has helped you, a star on GitHub goes a long way toward keeping Denova open source and improving. Thank you!',
+  'messages.github.star': 'Star on GitHub',
 } as const
 
 export default messages

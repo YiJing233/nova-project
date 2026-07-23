@@ -180,75 +180,6 @@
   background: var(--preset-surface);
 }
 
-.preset-directory-header {
-  border-color: var(--preset-line);
-  background: var(--preset-surface);
-}
-
-.preset-directory-section {
-  border-radius: 12px;
-}
-
-.preset-directory-section-header {
-  min-height: 38px;
-  border-radius: 10px;
-}
-
-.preset-directory-section-header:hover,
-.preset-directory-section:focus-within > .preset-directory-section-header {
-  background: color-mix(in srgb, var(--preset-raised) 72%, transparent);
-}
-
-.preset-directory-item {
-  position: relative;
-  min-height: 48px;
-  border: 1px solid transparent;
-  border-radius: 11px;
-}
-
-.preset-directory-item::before {
-  position: absolute;
-  top: 8px;
-  bottom: 8px;
-  left: 0;
-  width: 3px;
-  border-radius: 0 999px 999px 0;
-  background: var(--preset-signal);
-  content: '';
-  opacity: 0;
-  transform: scaleY(0.55);
-  transition: opacity var(--nova-motion-fast) var(--nova-ease), transform var(--nova-motion-normal) var(--nova-ease);
-}
-
-.preset-directory-item.is-active {
-  border-color: var(--preset-line);
-  background: var(--nova-active);
-  box-shadow: none;
-}
-
-.preset-directory-item.is-active::before {
-  opacity: 1;
-  transform: scaleY(1);
-}
-
-.preset-directory-item-icon {
-  display: inline-flex;
-  width: 26px;
-  height: 26px;
-  flex: 0 0 26px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--preset-line);
-  border-radius: 8px;
-  background: color-mix(in srgb, var(--preset-raised) 82%, transparent);
-}
-
-.preset-directory-item.is-active .preset-directory-item-icon {
-  border-color: var(--preset-line);
-  background: var(--preset-raised);
-  color: var(--preset-ink);
-}
-
 .preset-metadata-shell {
   container-name: preset-metadata;
   container-type: inline-size;
@@ -316,31 +247,6 @@
   }
 }
 
-.preset-empty-state {
-  display: flex;
-  width: min(100%, 440px);
-  flex-direction: column;
-  align-items: center;
-  gap: 10px;
-  border: 1px dashed var(--preset-line);
-  border-radius: 14px;
-  background: var(--preset-surface);
-  padding: 30px 24px;
-  text-align: center;
-}
-
-.preset-empty-state-icon {
-  display: inline-flex;
-  width: 42px;
-  height: 42px;
-  align-items: center;
-  justify-content: center;
-  border: 1px solid var(--preset-line);
-  border-radius: 13px;
-  background: var(--preset-raised);
-  color: var(--preset-ink);
-}
-
 /* Every list/detail editor responds to the space left inside the workbench. */
 .preset-config-visual-container {
   container-name: preset-config-editor;
@@ -395,7 +301,7 @@
 }
 
 /* Radix uses an inline display:table wrapper. Horizontal growth is invalid here. */
-:is(.actor-state-tree-scroll, .preset-directory-scroll) [data-slot="scroll-area-viewport"] > div {
+:is(.actor-state-tree-scroll) [data-slot="scroll-area-viewport"] > div {
   display: block !important;
   width: 100%;
   min-width: 0 !important;
@@ -492,8 +398,7 @@
 
 @media (prefers-reduced-motion: reduce) {
   .actor-state-navigation,
-  .actor-state-navigation-backdrop,
-  .preset-directory-item::before {
+  .actor-state-navigation-backdrop {
     transition: none;
   }
 }
@@ -818,13 +723,8 @@ html[data-nova-motion="off"] *::after {
   height: 100dvh;
 }
 
-[data-nova-app-shell="true"] :where(.overflow-y-auto, [data-slot="scroll-area-viewport"], textarea) {
-  overscroll-behavior-y: contain;
-}
-
-[data-nova-app-shell="true"] :where(.overflow-auto) {
-  overscroll-behavior: contain;
-}
+/* Scroll containment is opt-in via `overscroll-contain`. Nested editors must
+   otherwise be able to hand wheel and touch gestures to their parent scroller. */
 
 .nova-mobile-nav {
   padding-bottom: max(0.375rem, env(safe-area-inset-bottom));
@@ -1666,6 +1566,49 @@ html[data-nova-motion="off"] *::after {
   text-indent: 2em;
 }
 
+.editor-content .tiptap .nova-document-review-highlight {
+  cursor: pointer;
+  text-decoration-line: underline;
+  text-decoration-color: color-mix(in srgb, var(--nova-warning) 72%, transparent);
+  text-decoration-thickness: 1.5px;
+  text-underline-offset: 0.18em;
+  text-decoration-skip-ink: auto;
+}
+
+.editor-content .tiptap .nova-document-review-highlight:hover {
+  text-decoration-color: var(--nova-warning);
+  text-decoration-thickness: 2px;
+}
+
+.editor-content .tiptap .nova-document-review-highlight:focus-visible {
+  border-radius: 0.2rem;
+  outline: 2px solid var(--nova-warning);
+  outline-offset: 2px;
+}
+
+.editor-content .tiptap .nova-document-review-widget {
+  display: block;
+  width: 100%;
+  margin: 0.45rem 0 0.8rem;
+  text-indent: 0;
+}
+
+.editor-content .tiptap .nova-document-review-thread-anchor {
+  width: min(32rem, calc(100% - var(--nova-document-review-anchor-offset, 0px)));
+  margin-left: var(--nova-document-review-anchor-offset, 0px);
+}
+
+.editor-content .tiptap .nova-document-review-widget.is-outdated {
+  opacity: 0.78;
+}
+
+.editor-content .tiptap .nova-document-review-widget .nova-review-comment-thread {
+  margin-inline: 0;
+  font-family: var(--nova-font-sans, Inter, sans-serif);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 /* hardBreak 缩进：让 br 换行后的行也有 2em 缩进 */
 .editor-content .tiptap .nova-hard-break::after {
   content: '';
@@ -1822,13 +1765,15 @@ html[data-nova-motion="off"] *::after {
   outline-offset: 2px;
 }
 
-.editor-content .tiptap .nova-search-match {
+.editor-content .tiptap .nova-search-match,
+.nova-rich-markdown .tiptap .nova-search-match {
   border-radius: 3px;
   background: rgba(250, 204, 21, 0.32);
   scroll-margin-top: 48px;
 }
 
-.editor-content .tiptap .nova-search-current {
+.editor-content .tiptap .nova-search-current,
+.nova-rich-markdown .tiptap .nova-search-current {
   background: rgba(251, 146, 60, 0.55);
   outline: 1px solid rgba(251, 191, 36, 0.75);
 }
@@ -1840,6 +1785,31 @@ html[data-nova-motion="off"] *::after {
   float: left;
   height: 0;
   pointer-events: none;
+}
+
+/* 设置面板内嵌的富文本 Markdown 编辑器（MarkdownRichEditor）。
+   排版复用 .chat-agent-message，这里只补编辑器本体行为样式。 */
+.nova-rich-markdown .tiptap {
+  outline: none;
+  min-height: 320px;
+}
+
+.nova-rich-markdown .tiptap > :first-child {
+  margin-top: 0;
+}
+
+.nova-rich-markdown .tiptap > :last-child {
+  margin-bottom: 0;
+}
+
+.nova-rich-markdown .tiptap img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+.nova-rich-markdown .tiptap img.ProseMirror-selectednode {
+  outline: 2px solid var(--nova-accent);
+  outline-offset: 2px;
 }
 
 /* AI 对话区 Markdown 输出样式 */
@@ -1863,32 +1833,6 @@ html[data-nova-motion="off"] *::after {
 }
 
 .chat-agent-message > :last-child {
-  margin-bottom: 0;
-}
-
-.nova-streaming-markdown-stage {
-  position: relative;
-  min-width: 0;
-}
-
-.nova-streaming-markdown-reserve {
-  visibility: hidden;
-  pointer-events: none;
-}
-
-.nova-streaming-markdown-overlay {
-  position: absolute;
-  inset-inline: 0;
-  top: 0;
-}
-
-.nova-streaming-markdown-reserve > :first-child,
-.nova-streaming-markdown-overlay > :first-child {
-  margin-top: 0;
-}
-
-.nova-streaming-markdown-reserve > :last-child,
-.nova-streaming-markdown-overlay > :last-child {
   margin-bottom: 0;
 }
 
@@ -2166,6 +2110,288 @@ html[data-nova-motion="off"] *::after {
   --sidebar-ring: oklch(0.556 0 0);
 }
 
+/* Story state ledger: current committed state placed after the latest prose. */
+.story-state-ledger {
+  --story-state-canvas: var(--nova-surface);
+  --story-state-positive: var(--nova-success);
+  --story-state-positive-soft: var(--nova-success-bg);
+  --story-state-negative: var(--nova-danger);
+  --story-state-negative-soft: var(--nova-danger-bg);
+  --story-state-pending: var(--nova-warning);
+  --story-state-pending-soft: var(--nova-warning-bg);
+  --story-state-meter: var(--nova-text-muted);
+  --story-state-tabs-bg: oklch(0.2 0 0);
+  container-name: story-state-ledger;
+  container-type: inline-size;
+  background: var(--story-state-canvas);
+  font-family: var(--nova-ui-font-family);
+}
+
+.story-state-ledger__tabs-scroll {
+  scrollbar-width: none;
+}
+
+.story-state-ledger__tabs-list {
+  background: var(--story-state-tabs-bg);
+}
+
+[data-theme="light"] .story-state-ledger {
+  --story-state-tabs-bg: var(--nova-surface-2);
+}
+
+.story-state-ledger__tabs-scroll::-webkit-scrollbar {
+  display: none;
+}
+
+.story-state-ledger__director-label {
+  display: none;
+}
+
+/* Turn-change digest: one compact row under the header. */
+.story-state-ledger__summary {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  border-top: 1px solid var(--nova-border-soft);
+  padding: 6px 10px;
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.story-state-ledger__summary-title {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+  color: var(--nova-text-muted);
+}
+
+/* One-page group sections: distinct bordered blocks with titled headers. */
+.story-state-ledger__sections {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 4px 10px 10px;
+}
+
+.story-state-ledger__section[data-decorated] {
+  padding: 8px 10px 10px;
+  border: 1px solid var(--nova-border-soft);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--nova-surface-2) 30%, transparent);
+}
+
+.story-state-ledger__section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+}
+
+.story-state-ledger__section-icon {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+  color: var(--nova-text-faint);
+}
+
+.story-state-ledger__section-title {
+  overflow: hidden;
+  flex: 1;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--nova-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.story-state-ledger__section-count {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--nova-text-faint);
+}
+
+.story-state-ledger__mode-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  padding: 5px;
+  border: 1px dashed var(--nova-border);
+  border-radius: 8px;
+  font-size: 11px;
+  color: var(--nova-text-faint);
+  transition: color 120ms ease, border-color 120ms ease;
+}
+
+.story-state-ledger__mode-toggle:hover {
+  border-color: var(--nova-text-faint);
+  color: var(--nova-text);
+}
+
+/* Dense auto-fill field grid; column basis adapts per group kind. */
+.story-state-ledger__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 240px), 1fr));
+  gap: 10px 20px;
+}
+
+.story-state-ledger__grid[data-group='overview'] {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 150px), 1fr));
+}
+
+.story-state-ledger__grid[data-group='details'] {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 300px), 1fr));
+}
+
+.story-state-ledger__field {
+  position: relative;
+  min-width: 0;
+  padding: 2px 0;
+}
+
+.story-state-ledger__field-label {
+  overflow: hidden;
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--nova-text-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.story-state-ledger__block-text {
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--nova-text);
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.story-state-ledger__block-text--clamped {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 8;
+}
+
+.story-state-ledger__item-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.story-state-ledger__item-row {
+  position: relative;
+  padding-left: 10px;
+  font-size: 12px;
+  line-height: 1.6;
+  color: var(--nova-text);
+  overflow-wrap: anywhere;
+}
+
+.story-state-ledger__item-row::before {
+  position: absolute;
+  left: 0;
+  color: var(--nova-text-faint);
+  content: '·';
+}
+
+.story-state-ledger__nested-object-list {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  font-size: 12px;
+}
+
+.story-state-ledger__nested-object-list--nested {
+  margin-top: 1px;
+  padding-left: 10px;
+}
+
+.story-state-ledger__nested-object-item {
+  min-width: 0;
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.story-state-ledger__nested-object-key {
+  display: inline;
+  margin-right: 0.45em;
+  font-size: 11px;
+  color: var(--nova-text-faint);
+}
+
+.story-state-ledger__nested-object-value {
+  display: inline;
+  min-width: 0;
+  color: var(--nova-text);
+}
+
+.story-state-ledger__nested-object-item--branch > .story-state-ledger__nested-object-key {
+  display: block;
+  margin-right: 0;
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--nova-text-muted);
+}
+
+.story-state-ledger__nested-object-item--branch > .story-state-ledger__nested-object-value {
+  display: block;
+}
+
+.story-state-ledger__object-value-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.story-state-ledger__object-value-item {
+  position: relative;
+  min-width: 0;
+  padding-left: 10px;
+  overflow-wrap: anywhere;
+}
+
+.story-state-ledger__object-value-item::before {
+  position: absolute;
+  left: 0;
+  color: var(--nova-text-faint);
+  content: '·';
+}
+
+.story-state-ledger__change-chip {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 500;
+  line-height: 1.4;
+  font-variant-numeric: tabular-nums;
+}
+
+.story-state-ledger__change-chip--positive {
+  color: var(--story-state-positive);
+}
+
+.story-state-ledger__change-chip--negative {
+  color: var(--story-state-negative);
+}
+
+.story-state-ledger__change-chip--neutral {
+  color: var(--nova-text-faint);
+}
+
+.story-state-ledger__metric-progress [data-slot='progress-indicator'] {
+  background: var(--story-state-meter);
+}
+
+@container story-state-ledger (min-width: 560px) {
+  .story-state-ledger__director-label {
+    display: inline;
+  }
+}
+
+
 /* Director Console: a story continuity desk, scoped to the resizable game sidebar. */
 .director-console {
   --director-canvas: #070707;
@@ -2201,16 +2427,6 @@ html[data-nova-motion="off"] *::after {
   scrollbar-width: thin;
 }
 
-.memory-ledger-card::before {
-  position: absolute;
-  inset: 12px auto 12px 0;
-  width: 2px;
-  border-radius: 0 999px 999px 0;
-  background: var(--director-brass);
-  content: '';
-  opacity: 0.74;
-}
-
 .director-plan-sheet {
   scrollbar-color: var(--nova-scrollbar-thumb) transparent;
   scrollbar-width: thin;
@@ -2236,6 +2452,9 @@ html[data-nova-motion="off"] *::after {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .story-state-ledger *,
+  .story-state-ledger *::before,
+  .story-state-ledger *::after,
   .director-console *,
   .director-console *::before,
   .director-console *::after {

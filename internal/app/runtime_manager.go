@@ -131,6 +131,15 @@ func (s *WorkspaceRuntimeManager) Books() []BookRecord {
 	return records
 }
 
+// BookSortMode returns the ordering shared by all book selection surfaces.
+func (a *App) BookSortMode() BookSortMode {
+	return a.runtime().BookSortMode()
+}
+
+func (s *WorkspaceRuntimeManager) BookSortMode() BookSortMode {
+	return s.app.bookRegistry.SortMode()
+}
+
 // BookInfo 读取指定路径工作区的书籍元信息。
 func (a *App) BookInfo(path string) (book.BookMeta, error) {
 	return a.runtime().BookInfo(path)
@@ -161,9 +170,8 @@ func (s *WorkspaceRuntimeManager) UpdateBookInfo(path string, title, author, des
 	if title != "" {
 		meta.Title = title
 	}
-	if author != "" {
-		meta.Author = author
-	}
+	// author 允许设为空字符串（清除作者），所以总是更新。
+	meta.Author = author
 	// description 允许设为空字符串（清除简介），所以总是更新。
 	meta.Description = description
 	return s.app.bookMetaStore.Write(absPath, meta)
@@ -199,6 +207,15 @@ func (s *WorkspaceRuntimeManager) ReorderBooks(paths []string) error {
 	return s.app.bookRegistry.Reorder(paths)
 }
 
+// SetBookSortMode switches between recent-first and the persisted manual order.
+func (a *App) SetBookSortMode(mode BookSortMode) error {
+	return a.runtime().SetBookSortMode(mode)
+}
+
+func (s *WorkspaceRuntimeManager) SetBookSortMode(mode BookSortMode) error {
+	return s.app.bookRegistry.SetSortMode(mode)
+}
+
 func (s *WorkspaceRuntimeManager) activateFallbackWorkspace(ctx context.Context) (string, error) {
 	a := s.app
 	for _, record := range a.bookRegistry.List() {
@@ -227,7 +244,7 @@ func (s *WorkspaceRuntimeManager) CreateBook(ctx context.Context, parentDir, tit
 	a := s.app
 	novaDir := ""
 	if a.cfg != nil {
-		novaDir = strings.TrimSpace(a.cfg.NovaDir)
+		novaDir = strings.TrimSpace(a.cfg.DataDir())
 	}
 	absParent, err := bookCreationParentDir(parentDir, novaDir)
 	if err != nil {
@@ -274,135 +291,6 @@ func (s *WorkspaceRuntimeManager) CreateBook(ctx context.Context, parentDir, tit
 	return workspace, meta, nil
 }
 
-// VersionStatus 返回当前书籍 workspace 的本地版本状态。
-func (a *App) VersionStatus(ctx context.Context) (book.VersionStatus, error) {
-	return a.runtime().VersionStatus(ctx)
-}
-
-func (s *WorkspaceRuntimeManager) VersionStatus(ctx context.Context) (book.VersionStatus, error) {
-	_ = ctx
-	versionService := s.versionService()
-	if versionService == nil {
-		return book.VersionStatus{}, ErrNoWorkspace
-	}
-	return versionService.Status(s.versionAutoSettings())
-}
-
-// VersionHistory 返回当前书籍 workspace 的版本历史。
-func (a *App) VersionHistory(ctx context.Context, limit int) ([]book.VersionEntry, error) {
-	return a.runtime().VersionHistory(ctx, limit)
-}
-
-func (s *WorkspaceRuntimeManager) VersionHistory(ctx context.Context, limit int) ([]book.VersionEntry, error) {
-	_ = ctx
-	versionService := s.versionService()
-	if versionService == nil {
-		return nil, ErrNoWorkspace
-	}
-	return versionService.History(limit)
-}
-
-// CreateVersion 创建一个手动版本。
-func (a *App) CreateVersion(ctx context.Context, message string) (book.VersionCommandResult, error) {
-	return a.runtime().CreateVersion(ctx, message)
-}
-
-func (s *WorkspaceRuntimeManager) CreateVersion(ctx context.Context, message string) (book.VersionCommandResult, error) {
-	versionService := s.versionService()
-	if versionService == nil {
-		return book.VersionCommandResult{}, ErrNoWorkspace
-	}
-	settings := s.versionAutoSettings()
-	message = s.inferVersionMessage(ctx, message, book.VersionSourceManual, versionService, settings)
-	return versionService.Create(message, book.VersionSourceManual, settings)
-}
-
-// VersionDiff 返回目标版本与当前工作区的差异。
-func (a *App) VersionDiff(ctx context.Context, id, path string) (book.VersionDiff, error) {
-	return a.runtime().VersionDiff(ctx, id, path)
-}
-
-func (s *WorkspaceRuntimeManager) VersionDiff(ctx context.Context, id, path string) (book.VersionDiff, error) {
-	_ = ctx
-	versionService := s.versionService()
-	if versionService == nil {
-		return book.VersionDiff{}, ErrNoWorkspace
-	}
-	return versionService.Diff(id, path)
-}
-
-// VersionRestorePlan 返回恢复版本前的影响预览。
-func (a *App) VersionRestorePlan(ctx context.Context, id string, paths []string) (book.VersionRestorePlan, error) {
-	return a.runtime().VersionRestorePlan(ctx, id, paths)
-}
-
-func (s *WorkspaceRuntimeManager) VersionRestorePlan(ctx context.Context, id string, paths []string) (book.VersionRestorePlan, error) {
-	_ = ctx
-	versionService := s.versionService()
-	if versionService == nil {
-		return book.VersionRestorePlan{}, ErrNoWorkspace
-	}
-	return versionService.RestorePlan(id, paths, s.versionAutoSettings())
-}
-
-// RestoreVersion 将整本书或指定文件恢复到目标版本。
-func (a *App) RestoreVersion(ctx context.Context, id string, paths ...[]string) (book.VersionRestoreResult, error) {
-	return a.runtime().RestoreVersion(ctx, id, paths...)
-}
-
-func (s *WorkspaceRuntimeManager) RestoreVersion(ctx context.Context, id string, paths ...[]string) (book.VersionRestoreResult, error) {
-	versionService := s.versionService()
-	if versionService == nil {
-		return book.VersionRestoreResult{}, ErrNoWorkspace
-	}
-	selectedPaths := restoreRequestPaths(paths)
-	result, err := versionService.RestoreWithPaths(id, selectedPaths, s.versionAutoSettings())
-	if err != nil {
-		return book.VersionRestoreResult{}, err
-	}
-	if result.Scope == book.VersionRestoreScopeWorkspace {
-		if timed, timedErr := versionService.MaybeCreateTimed(s.versionAutoSettings()); timedErr != nil {
-			log.Printf("[versions] 恢复版本后定时保存检查失败 err=%v", timedErr)
-		} else if !timed.Skipped && timed.Version != nil {
-			log.Printf("[versions] 恢复版本后创建定时版本 id=%s", timed.Version.ID)
-		}
-	}
-	_ = ctx
-	return result, nil
-}
-
-func restoreRequestPaths(paths [][]string) []string {
-	if len(paths) == 0 {
-		return nil
-	}
-	return paths[0]
-}
-
-// MaybeCreateTimedVersion 在写操作后按定时策略创建自动版本。
-func (a *App) MaybeCreateTimedVersion(ctx context.Context) {
-	a.runtime().MaybeCreateTimedVersion(ctx)
-}
-
-func (s *WorkspaceRuntimeManager) MaybeCreateTimedVersion(ctx context.Context) {
-	_ = ctx
-	versionService := s.versionService()
-	if versionService == nil {
-		return
-	}
-	result, err := versionService.MaybeCreateTimed(s.versionAutoSettings())
-	if err != nil {
-		log.Printf("[versions] 定时自动保存失败 err=%v", err)
-		return
-	}
-	if result.Skipped {
-		log.Printf("[versions] 定时自动保存跳过 reason=%q", result.Reason)
-		return
-	}
-	if result.Version != nil {
-		log.Printf("[versions] 定时自动保存完成 id=%s", result.Version.ID)
-	}
-}
-
 // Status 返回当前作品状态摘要。
 func (a *App) Status() (bool, string) {
 	return a.runtime().Status()
@@ -431,7 +319,7 @@ func (s *WorkspaceRuntimeManager) Settings() (config.LayeredSettings, error) {
 	novaDir := ""
 	cfg := config.Config{}
 	if a.cfg != nil {
-		novaDir = a.cfg.NovaDir
+		novaDir = a.cfg.DataDir()
 		cfg = *a.cfg
 	}
 	state := a.bookState
@@ -466,19 +354,13 @@ func (s *WorkspaceRuntimeManager) UpdateUserSettings(settings config.Settings, b
 	a.mu.RLock()
 	novaDir := ""
 	if a.cfg != nil {
-		novaDir = a.cfg.NovaDir
+		novaDir = a.cfg.DataDir()
 	}
 	a.mu.RUnlock()
 	path := config.UserConfigPath(novaDir)
-	existing, err := config.ReadSettingsFile(path)
-	if err != nil {
-		return config.LayeredSettings{}, err
-	}
-	prepared, err := config.PrepareUserSettingsForWrite(existing, settings)
-	if err != nil {
-		return config.LayeredSettings{}, err
-	}
-	if err := config.WriteSettingsFileIfRevision(path, prepared, baseRevision); err != nil {
+	if _, err := config.MutateSettingsFile(path, baseRevision, func(existing config.Settings) (config.Settings, error) {
+		return config.PrepareUserSettingsForWrite(existing, settings)
+	}); err != nil {
 		return config.LayeredSettings{}, err
 	}
 	log.Printf("[settings] 用户配置已保存 path=%s", path)
@@ -493,7 +375,7 @@ func (s *WorkspaceRuntimeManager) UpdateUserSettings(settings config.Settings, b
 	return layered, nil
 }
 
-// UpdateWorkspaceSettings 持久化当前工作区配置并返回最新分层快照。
+// UpdateWorkspaceSettings 持久化当前工作区的 Agent 定制并返回最新分层快照。
 func (a *App) UpdateWorkspaceSettings(settings config.Settings, baseRevision ...string) (config.LayeredSettings, error) {
 	return a.runtime().UpdateWorkspaceSettings(settings, firstRevision(baseRevision))
 }
@@ -504,17 +386,15 @@ func (s *WorkspaceRuntimeManager) UpdateWorkspaceSettings(settings config.Settin
 	workspace := a.workspace
 	a.mu.RUnlock()
 	if workspace == "" {
-		return config.LayeredSettings{}, fmt.Errorf("当前没有打开的工作区")
+		return config.LayeredSettings{}, ErrNoWorkspaceOpen
 	}
-	settings.LLMInputLogEnabled = nil
-	settings.TraceCaptureLevel = ""
-	settings.TraceExporter = ""
-	settings.TraceRetentionRuns = nil
 	path := config.WorkspaceConfigPath(workspace)
-	if err := config.WriteSettingsFileIfRevision(path, settings, baseRevision); err != nil {
+	if _, err := config.MutateSettingsFile(path, baseRevision, func(existing config.Settings) (config.Settings, error) {
+		return config.PrepareWorkspaceAgentSettingsForWrite(existing, settings), nil
+	}); err != nil {
 		return config.LayeredSettings{}, err
 	}
-	log.Printf("[settings] 工作区配置已保存 path=%s", path)
+	log.Printf("[settings] 工作区 Agent 定制已保存 path=%s", path)
 	layered, err := s.Settings()
 	if err != nil {
 		return config.LayeredSettings{}, err
@@ -573,8 +453,8 @@ func applyLayeredSettingsToConfig(cfg *config.Config, layered config.LayeredSett
 	if cfg.SkillsDir == "" && effective.SkillsDir != "" {
 		cfg.SkillsDir = effective.SkillsDir
 	}
-	if cfg.NovaDir == "" && layered.Paths.NovaDir != "" {
-		cfg.NovaDir = layered.Paths.NovaDir
+	if cfg.DataDir() == "" && layered.Paths.DenovaDir != "" {
+		cfg.SetDataDir(layered.Paths.DenovaDir)
 	}
 	if effective.BackendPort != nil {
 		cfg.BackendPort = appSettingsInt(effective.BackendPort, 8080)
@@ -769,29 +649,6 @@ func syncRuntimeDiagnostics(cfg *config.Config) {
 	agent.SetTraceRuntimeConfig(cfg.TraceCaptureLevel, cfg.TraceExporter, cfg.TraceRetentionRuns)
 }
 
-func (s *WorkspaceRuntimeManager) versionService() *book.VersionService {
-	a := s.app
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.versionService
-}
-
-func (s *WorkspaceRuntimeManager) versionAutoSettings() book.VersionAutoSettings {
-	a := s.app
-	a.mu.RLock()
-	cfg := a.cfg
-	a.mu.RUnlock()
-	settings := book.DefaultVersionAutoSettings()
-	if cfg == nil {
-		return settings
-	}
-	settings.TimedEnabled = cfg.VersionTimedEnabled
-	settings.TimedIntervalMinutes = cfg.VersionTimedIntervalMinutes
-	settings.AgentEnabled = cfg.VersionAgentEnabled
-	settings.AgentCharThreshold = cfg.VersionAgentCharThreshold
-	return settings
-}
-
 func appSettingsInt(v *int, fallback int) int {
 	if v == nil || *v <= 0 {
 		return fallback
@@ -807,7 +664,7 @@ func appAgentIdleTimeoutSeconds(v *int) int {
 }
 
 func appAgentToolResultLimitKB(v *int) int {
-	if v == nil || *v < 0 {
+	if v == nil || *v <= 0 {
 		return config.DefaultAgentToolResultLimitKB
 	}
 	return *v
@@ -815,7 +672,7 @@ func appAgentToolResultLimitKB(v *int) int {
 
 func agentToolResultMaxBytes(cfg config.Config) int {
 	if cfg.AgentToolResultLimitKB <= 0 {
-		return 0
+		return config.DefaultAgentToolResultLimitKB * 1024
 	}
 	return cfg.AgentToolResultLimitKB * 1024
 }

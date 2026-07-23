@@ -2,11 +2,12 @@ import { ChevronDown } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
+import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select'
 import { Switch } from '@/components/ui/switch'
-import type { ActorStateModule, EventPackageModule, ImagePreset, RuleSystemModule, StoryDirectorModuleRefs, StoryMemoryStructureModule, Teller } from '../../types'
-import { consoleSectionClassName, selectClassName } from './constants'
-import { SectionTitle } from './shared'
+import type { ActorStateModule, EventPackageModule, ImagePreset, RuleSystemModule, StoryDirectorModuleRefs, Teller } from '../../types'
+import { presetSelectClassName as selectClassName } from '../preset-config/editor-styles'
+import { PresetSectionHeader as SectionTitle } from '../preset-config/PresetSectionHeader'
+import { consoleSectionClassName } from './constants'
 import { normalizeIDList } from './utils'
 
 export function DirectorModuleConsole({
@@ -14,15 +15,12 @@ export function DirectorModuleConsole({
   selectedTellerName,
   selectedRuleName,
   selectedActorStateName,
-  selectedMemoryStructureCount,
-  selectedMemoryStructureTotal,
   selectedImageName,
   selectedEventCardCount,
   tellers,
   eventPackages,
   ruleSystems,
   actorStates,
-  memoryStructures,
   imagePresets,
   onModuleRefChange,
 }: {
@@ -30,15 +28,12 @@ export function DirectorModuleConsole({
   selectedTellerName: string
   selectedRuleName: string
   selectedActorStateName: string
-  selectedMemoryStructureCount: number
-  selectedMemoryStructureTotal: number
   selectedImageName: string
   selectedEventCardCount: number
   tellers: Teller[]
   eventPackages: EventPackageModule[]
   ruleSystems: RuleSystemModule[]
   actorStates: ActorStateModule[]
-  memoryStructures: StoryMemoryStructureModule[]
   imagePresets: ImagePreset[]
   onModuleRefChange: <K extends keyof StoryDirectorModuleRefs>(key: K, value: StoryDirectorModuleRefs[K]) => void
 }) {
@@ -95,22 +90,6 @@ export function DirectorModuleConsole({
               enabled={!refs.actor_state_disabled}
               items={actorStates}
               onChange={(value) => onModuleRefChange('actor_state_id', value)}
-            />
-          </ModuleRefRow>
-          <ModuleRefRow
-            label={t('settingPanel.presetKind.memoryStructure')}
-            summary={refs.memory_structure_disabled
-              ? t('settingPanel.storyDirector.moduleDisabled')
-              : t('settingPanel.memoryStructure.summaryCount', { enabled: selectedMemoryStructureCount, total: selectedMemoryStructureTotal })}
-            enabled={!refs.memory_structure_disabled}
-            onEnabledChange={(enabled) => onModuleRefChange('memory_structure_disabled', !enabled)}
-          >
-            <ModuleSelect
-              value={refs.memory_structure_id || ''}
-              fallbackValue="default"
-              enabled={!refs.memory_structure_disabled}
-              items={memoryStructures}
-              onChange={(value) => onModuleRefChange('memory_structure_id', value)}
             />
           </ModuleRefRow>
         </ModuleGroup>
@@ -213,13 +192,15 @@ function ModuleSelect<T extends { id: string; name: string; invalid?: boolean }>
         <SelectValue />
       </SelectTrigger>
       <SelectContent className="nova-panel border text-[var(--nova-text)]">
-        {items.length > 0 ? items.map((item) => (
-          <SelectItem key={item.id} value={item.id}>
-            {item.name}{item.invalid ? ` · ${t('settingPanel.invalid')}` : ''}
-          </SelectItem>
-        )) : (
-          <SelectItem value={fallbackValue}>{fallbackValue}</SelectItem>
-        )}
+        <SelectGroup>
+          {items.length > 0 ? items.map((item) => (
+            <SelectItem key={item.id} value={item.id}>
+              {item.name}{item.invalid ? ` · ${t('settingPanel.invalid')}` : ''}
+            </SelectItem>
+          )) : (
+            <SelectItem value={fallbackValue}>{fallbackValue}</SelectItem>
+          )}
+        </SelectGroup>
       </SelectContent>
     </Select>
   )
@@ -252,7 +233,7 @@ function EventPackagePopoverSelect<T extends { id: string; name: string; invalid
       <PopoverTrigger asChild>
         <Button type="button" className={`${selectClassName} w-full justify-between px-2 text-left text-[var(--nova-text)]`} variant="outline" size="sm" disabled={!enabled}>
           <span className="min-w-0 flex-1 truncate">{t('settingPanel.storyDirector.eventPackagePickerButton', { count: selectedValues.length })}</span>
-          <ChevronDown className="h-3.5 w-3.5 shrink-0 text-[var(--nova-text-faint)]" />
+          <ChevronDown data-icon="inline-end" className="shrink-0 text-[var(--nova-text-faint)]" />
         </Button>
       </PopoverTrigger>
       <PopoverContent align="start" className="nova-panel w-[min(360px,calc(100vw-2rem))] border border-[var(--nova-border)] p-2 text-[var(--nova-text)]">

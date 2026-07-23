@@ -1,7 +1,6 @@
 package agent
 
 import (
-	"fmt"
 	"log"
 	"strings"
 
@@ -10,20 +9,21 @@ import (
 	"denova/config"
 )
 
+// ToolResultContextPolicy controls whether completed tool exchanges can cross
+// user-turn boundaries. Result size is bounded once, when a tool returns; this
+// policy only keeps valid pairs and applies domain-specific semantic filtering.
 type ToolResultContextPolicy struct {
-	Enabled      bool
-	KeepRecent   int
-	BudgetBytes  int
-	PreviewChars int
+	AgentKind      string
+	Enabled        bool
+	MaxResultBytes int
 }
 
 func resolveToolResultContextPolicy(cfg *config.Config, agentKind string) ToolResultContextPolicy {
 	settings := config.ResolveAgentContext(cfg, agentKind)
 	return ToolResultContextPolicy{
-		Enabled:      settings.ToolResultRetentionEnabled,
-		KeepRecent:   settings.ToolResultKeepRecent,
-		BudgetBytes:  settings.ToolResultContextBudgetKB * 1024,
-		PreviewChars: settings.ToolResultPreviewChars,
+		AgentKind:      strings.TrimSpace(agentKind),
+		Enabled:        settings.ToolResultRetentionEnabled,
+		MaxResultBytes: configToolResultMaxBytes(cfg),
 	}
 }
 
@@ -32,15 +32,7 @@ func ResolveToolResultContextPolicyForConversation(cfg *config.Config, agentKind
 }
 
 func (p ToolResultContextPolicy) normalized() ToolResultContextPolicy {
-	if p.KeepRecent <= 0 {
-		p.KeepRecent = config.DefaultToolResultKeepRecent
-	}
-	if p.BudgetBytes <= 0 {
-		p.BudgetBytes = config.DefaultToolResultContextBudgetKB * 1024
-	}
-	if p.PreviewChars <= 0 {
-		p.PreviewChars = config.DefaultToolResultPreviewChars
-	}
+	p.MaxResultBytes = normalizeToolResultLimitBytes(p.MaxResultBytes)
 	return p
 }
 
@@ -50,8 +42,9 @@ type toolResultContextConversation interface {
 }
 
 type toolResultContextRecorder struct {
-	conversation toolResultContextConversation
-	policy       ToolResultContextPolicy
+	conversation    toolResultContextConversation
+	policy          ToolResultContextPolicy
+	retainedCallIDs map[string]struct{}
 }
 
 func newToolResultContextRecorder(conversation Conversation) *toolResultContextRecorder {
@@ -76,17 +69,34 @@ func (r *toolResultContextRecorder) RecordAssistantToolCalls(msg *schema.Message
 	}
 	if err := r.conversation.AppendContextMessage(next); err != nil {
 		logAgentContextPersistError("assistant_tool_calls", err)
+		return
+	}
+	if r.retainedCallIDs == nil {
+		r.retainedCallIDs = make(map[string]struct{}, len(next.ToolCalls))
+	}
+	for _, call := range next.ToolCalls {
+		if callID := strings.TrimSpace(call.ID); callID != "" {
+			r.retainedCallIDs[callID] = struct{}{}
+		}
 	}
 }
 
 func (r *toolResultContextRecorder) RecordToolResult(toolName, toolCallID, content string, meta agentEventMetadata) {
-	if r == nil || r.conversation == nil || meta.SubAgent || isPlanProtocolToolName(toolName) {
+	if r == nil || r.conversation == nil || meta.SubAgent || isPlanProtocolToolName(toolName) || !retainToolContextAcrossTurns(toolName, r.policy) || !r.retainedCall(toolCallID) {
 		return
 	}
-	msg := schema.ToolMessage(toolResultContextContent(toolName, toolCallID, content, r.policy), toolCallID, schema.WithToolName(toolName))
+	msg := schema.ToolMessage(toolResultContextContent(toolName, content, r.policy), toolCallID, schema.WithToolName(toolName))
 	if err := r.conversation.AppendContextMessage(msg); err != nil {
 		logAgentContextPersistError("tool_result", err)
 	}
+}
+
+func (r *toolResultContextRecorder) retainedCall(toolCallID string) bool {
+	if r == nil {
+		return false
+	}
+	_, ok := r.retainedCallIDs[strings.TrimSpace(toolCallID)]
+	return ok
 }
 
 func logAgentContextPersistError(kind string, err error) {
@@ -99,17 +109,15 @@ func assistantToolContextMessage(msg *schema.Message, policy ToolResultContextPo
 	}
 	calls := make([]schema.ToolCall, 0, len(msg.ToolCalls))
 	for _, call := range msg.ToolCalls {
-		if isPlanProtocolToolName(call.Function.Name) {
+		if isPlanProtocolToolName(call.Function.Name) || !retainToolContextAcrossTurns(call.Function.Name, policy) {
 			continue
 		}
 		next := call
-		next.Function.Arguments = limitContextText(next.Function.Arguments, policy.PreviewChars, fmt.Sprintf(
-			"\n[Denova tool call args truncated for context]\ntool_name: %s\ntool_call_id: %s\noriginal_chars: %d\npreview_chars: %d",
-			next.Function.Name,
-			next.ID,
-			countRunes(next.Function.Arguments),
-			policy.PreviewChars,
-		))
+		arguments, valid := retainedToolCallArguments(next.Function.Arguments)
+		if !valid {
+			continue
+		}
+		next.Function.Arguments = arguments
 		calls = append(calls, next)
 	}
 	if len(calls) == 0 {
@@ -118,46 +126,18 @@ func assistantToolContextMessage(msg *schema.Message, policy ToolResultContextPo
 	return schema.AssistantMessage("", calls)
 }
 
-func toolResultContextContent(toolName, toolCallID, content string, policy ToolResultContextPolicy) string {
-	content = stripToolResultMetadata(content)
-	content = strings.TrimRight(content, "\n")
-	if content == "" {
-		content = "(无返回内容)"
+func retainedToolCallArguments(arguments string) (string, bool) {
+	if err := validateToolArgumentsJSON(arguments); err != nil {
+		return "", false
 	}
-	return limitContextText(content, policy.PreviewChars, fmt.Sprintf(
-		"\n[Denova tool result preview truncated for context]\ntool_name: %s\ntool_call_id: %s\noriginal_chars: %d\npreview_chars: %d",
-		toolName,
-		toolCallID,
-		countRunes(content),
-		policy.PreviewChars,
-	))
+	if strings.TrimSpace(arguments) == "" {
+		return "{}", true
+	}
+	return arguments, true
 }
 
-func stripToolResultMetadata(content string) string {
-	content = strings.TrimRight(content, "\n")
-	if content == "" {
-		return ""
-	}
-	for _, separator := range []string{"\n\n" + toolResultMetadataHeader, "\n" + toolResultMetadataHeader} {
-		if before, _, ok := strings.Cut(content, separator); ok {
-			return strings.TrimRight(before, "\n")
-		}
-	}
-	if strings.HasPrefix(strings.TrimSpace(content), toolResultMetadataHeader) {
-		return ""
-	}
-	return content
-}
-
-func limitContextText(content string, maxRunes int, marker string) string {
-	if maxRunes <= 0 || content == "" {
-		return content
-	}
-	runes := []rune(content)
-	if len(runes) <= maxRunes {
-		return content
-	}
-	return strings.TrimRight(string(runes[:maxRunes]), "\n") + marker
+func toolResultContextContent(toolName, content string, policy ToolResultContextPolicy) string {
+	return semanticToolResultContextContent(toolName, content, policy)
 }
 
 func applyToolResultContextPolicy(messages []*schema.Message, policy ToolResultContextPolicy) []*schema.Message {
@@ -168,47 +148,14 @@ func applyToolResultContextPolicy(messages []*schema.Message, policy ToolResultC
 	if !policy.Enabled {
 		return removeToolContextMessages(messages)
 	}
-	toolIndexes := make([]int, 0)
-	for i, msg := range messages {
-		if msg != nil && msg.Role == schema.Tool {
-			toolIndexes = append(toolIndexes, i)
-		}
-	}
-	if len(toolIndexes) == 0 {
-		return messages
-	}
-	keepFull := make(map[int]bool, policy.KeepRecent)
-	for i := len(toolIndexes) - 1; i >= 0 && len(keepFull) < policy.KeepRecent; i-- {
-		keepFull[toolIndexes[i]] = true
-	}
-	result := append([]*schema.Message(nil), messages...)
-	used := 0
-	for i := len(result) - 1; i >= 0; i-- {
-		msg := result[i]
-		if msg == nil || msg.Role != schema.Tool {
-			continue
-		}
-		msg = sanitizedToolContextMessage(msg)
-		result[i] = msg
-		size := len(msg.Content)
-		if used+size <= policy.BudgetBytes {
-			used += size
-			continue
-		}
-		reason := "tool_result_context_budget_exceeded"
-		if keepFull[i] {
-			reason = "recent_tool_result_context_budget_exceeded"
-		}
-		result[i] = toolResultPlaceholderMessage(msg, reason)
-	}
-	return result
+	return filterSemanticToolContextMessages(messages, policy)
 }
 
-func sanitizedToolContextMessage(msg *schema.Message) *schema.Message {
+func sanitizedToolContextMessage(msg *schema.Message, policy ToolResultContextPolicy) *schema.Message {
 	if msg == nil || msg.Role != schema.Tool {
 		return msg
 	}
-	content := stripToolResultMetadata(msg.Content)
+	content := semanticToolResultContextContent(msg.ToolName, msg.Content, policy)
 	if content == msg.Content {
 		return msg
 	}
@@ -242,24 +189,4 @@ func removeToolContextMessages(messages []*schema.Message) []*schema.Message {
 		filtered = append(filtered, msg)
 	}
 	return filtered
-}
-
-func toolResultPlaceholderMessage(msg *schema.Message, reason string) *schema.Message {
-	if msg == nil {
-		return nil
-	}
-	content := fmt.Sprintf(`[Denova retained tool result placeholder]
-schema: tool_result.placeholder.v1
-reason: %s
-tool_name: %s
-tool_call_id: %s
-omitted_bytes: %d
-
-The full retained tool result was omitted from this model context. Re-run the tool if exact content is required.`,
-		reason,
-		strings.TrimSpace(msg.ToolName),
-		strings.TrimSpace(msg.ToolCallID),
-		len(msg.Content),
-	)
-	return schema.ToolMessage(content, msg.ToolCallID, schema.WithToolName(msg.ToolName))
 }

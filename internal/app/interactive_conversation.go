@@ -25,27 +25,33 @@ import (
 )
 
 type interactiveConversation struct {
-	store                *interactive.Store
-	novaDir              string
-	workspace            string
-	cfg                  *config.Config
-	storyID              string
-	branchID             string
-	user                 string
-	replyTargetChars     int
-	directorTask         string
-	mu                   sync.Mutex
-	lastTurn             *interactive.TurnEvent
-	lastStateReady       bool
-	lastSources          string
-	assistantMetadata    session.MessageMetadata
-	displayEvents        []interactive.DisplayEvent
-	modelContextMessages []interactive.ModelContextMessage
-	ruleResolution       *interactive.RuleResolution
-	turnResult           *interactive.TurnResult
-	baseParentID         *string
-	directorTasks        *workspaceDirectorTaskGroup
-	directorGenerator    interactiveDirectorGenerator
+	store                   *interactive.Store
+	novaDir                 string
+	workspace               string
+	cfg                     *config.Config
+	storyID                 string
+	branchID                string
+	user                    string
+	replyTargetChars        int
+	directorTask            string
+	mu                      sync.Mutex
+	lastTurn                *interactive.TurnEvent
+	lastStateReady          bool
+	lastSources             string
+	lastContextSources      []interactiveContextSource
+	lastContextLedgerParts  []agent.ContextLedgerPart
+	stableLeadingMessage    string
+	assistantMetadata       session.MessageMetadata
+	displayEvents           []interactive.DisplayEvent
+	modelContextMessages    []interactive.ModelContextMessage
+	ruleResolution          *interactive.RuleResolution
+	turnProtocol            interactiveTurnProtocol
+	baseParentID            *string
+	directorTasks           *workspaceDirectorTaskGroup
+	directorGenerator       interactiveDirectorGenerator
+	customDirectorGenerator bool
+	openingStateSchemaDraft *interactive.ActorStateSchemaBatchDraft
+	openingStateSchemaAudit interactive.ActorStateSchemaBatchAudit
 }
 
 type interactiveDirectorGenerator func(context.Context, *config.Config, *book.State, agent.InteractiveStoryToolContext, string) (string, error)
@@ -59,6 +65,7 @@ func (c *interactiveConversation) bindDirectorRuntime(tasks *workspaceDirectorTa
 		c.directorTasks = tasks
 		if len(generators) > 0 && generators[0] != nil {
 			c.directorGenerator = generators[0]
+			c.customDirectorGenerator = true
 		}
 	}
 	return c
@@ -79,17 +86,113 @@ func (c *interactiveConversation) withBaseParentID(parentID string) *interactive
 	return c
 }
 
+func (c *interactiveConversation) withOpeningStateSchema(storyCtx interactive.StoryContext) *interactiveConversation {
+	if c == nil || !interactive.StoryStateSchemaPolicyUsesOpeningGameAgent(storyCtx.Meta.StateSchemaPolicy) || storyCtx.Meta.StateSchemaInitialization == nil || storyCtx.Meta.StateSchemaInitialization.Status != interactive.StateSchemaInitializationWaitingOpening || storyCtx.Meta.ActorStateSchema == nil || len(storyCtx.Snapshot.Turns) > 0 {
+		return c
+	}
+	trpgSourceIDs := make([]string, 0, len(storyCtx.Meta.ActorStateSchema.TRPGSystem.RuleTemplates))
+	for _, rule := range storyCtx.Meta.ActorStateSchema.TRPGSystem.RuleTemplates {
+		if id := strings.TrimSpace(rule.ID); id != "" {
+			trpgSourceIDs = append(trpgSourceIDs, id)
+		}
+	}
+	c.mu.Lock()
+	c.openingStateSchemaDraft = interactive.NewOpeningActorStateSchemaBatchDraft(storyCtx.Meta.ActorStateSchema.System, storyCtx.Meta.ActorStateSchema.TRPGSystem)
+	c.openingStateSchemaAudit = interactive.ActorStateSchemaBatchAudit{
+		OpeningSourceIDs: []string{"opening-draft"},
+		TRPGSourceIDs:    trpgSourceIDs,
+		CurrentState:     storyCtx.Snapshot.State,
+	}
+	c.mu.Unlock()
+	log.Printf("[interactive-agent] enabled opening state schema draft story_id=%s branch_id=%s mode=%s base_revision=%d", c.storyID, storyCtx.Snapshot.BranchID, storyCtx.Meta.StateSchemaPolicy.Mode, storyCtx.Meta.ActorStateSchema.Revision)
+	return c
+}
+
+func (c *interactiveConversation) SubmitOpeningStateSchemaBatch(ctx context.Context, batch interactive.ActorStateSchemaBatch) (interactive.ActorStateSchemaBatchResult, error) {
+	if c == nil {
+		return interactive.ActorStateSchemaBatchResult{}, fmt.Errorf("互动故事不存在")
+	}
+	select {
+	case <-ctx.Done():
+		return interactive.ActorStateSchemaBatchResult{}, ctx.Err()
+	default:
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.openingStateSchemaDraft == nil {
+		return interactive.ActorStateSchemaBatchResult{}, fmt.Errorf("当前故事不需要 Game Agent 初始化状态结构")
+	}
+	result := c.openingStateSchemaDraft.SubmitStructureOnly(batch, c.openingStateSchemaAudit)
+	log.Printf("[interactive-agent] staged opening state schema story_id=%s branch_id=%s accepted=%d rejected=%d blocked=%d finalized=%t draft_items=%d", c.storyID, c.branchID, len(result.Accepted), len(result.Rejected), len(result.Blocked), result.Finalized, result.DraftAcceptedItems)
+	return result, nil
+}
+
+func (c *interactiveConversation) openingStateSchemaProposalSnapshot() *interactive.ActorStateSchemaProposal {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	proposal, ok := c.openingStateSchemaDraft.FinalProposal()
+	if !ok {
+		return nil
+	}
+	return &proposal
+}
+
+func (c *interactiveConversation) effectiveTurnState(storyCtx interactive.StoryContext) (interactive.StoryDirectorActorStateSystem, map[string]any, error) {
+	actorState := interactive.StoryDirectorActorStateSystem{}
+	if storyCtx.Meta.ActorStateSchema != nil {
+		actorState = storyCtx.Meta.ActorStateSchema.System
+	} else {
+		actorState = c.storyDirectorForMeta(storyCtx.Meta).ActorState
+	}
+	state := storyCtx.Snapshot.State
+	c.mu.Lock()
+	proposal, hasProposal := c.openingStateSchemaDraft.FinalProposal()
+	draftRequired := c.openingStateSchemaDraft != nil
+	c.mu.Unlock()
+	if draftRequired && !hasProposal {
+		return interactive.StoryDirectorActorStateSystem{}, nil, fmt.Errorf("请先调用 initialize_story_state_schema 并完成 finalize，再提交开局状态")
+	}
+	if hasProposal {
+		if storyCtx.Meta.ActorStateSchema == nil {
+			return interactive.StoryDirectorActorStateSystem{}, nil, fmt.Errorf("故事缺少开局状态结构基线")
+		}
+		target, _, err := interactive.ApplyActorStateSchemaAdaptation(storyCtx.Meta.ActorStateSchema.System, storyCtx.Meta.ActorStateSchema.TRPGSystem, proposal.Adaptation)
+		if err != nil {
+			return interactive.StoryDirectorActorStateSystem{}, nil, err
+		}
+		initialState, err := interactive.BuildActorStateInitialSnapshot(target, storyCtx.Meta.InitialTraitRolls)
+		if err != nil {
+			return interactive.StoryDirectorActorStateSystem{}, nil, err
+		}
+		return target, initialState, nil
+	}
+	if interactive.StoryStateSchemaPolicyUsesOpeningGameAgent(storyCtx.Meta.StateSchemaPolicy) {
+		rawActors, _ := state["actors"].(map[string]any)
+		if len(rawActors) == 0 {
+			initialState, err := interactive.BuildActorStateInitialSnapshot(actorState, storyCtx.Meta.InitialTraitRolls)
+			if err != nil {
+				return interactive.StoryDirectorActorStateSystem{}, nil, err
+			}
+			state = initialState
+		}
+	}
+	return actorState, state, nil
+}
+
 func (c *interactiveConversation) directorTaskHint() string {
 	if c == nil {
 		return ""
 	}
 	switch strings.TrimSpace(c.directorTask) {
-	case "memory_update":
-		return "memory_update：只根据已提交的 TurnResult、StateDelta 和最终正文维护 Story Memory；不得写 Actor State 或 director.md。"
+	case interactiveDirectorTaskOpeningPlan:
+		return "opening_plan：在首个 Game Agent 回合前建立 director.md、agent-brief.md 与 lore-context.md；基于开局设定和资料名称目录完成初始选角、场景与分支规划。"
 	case "director_plan_update":
-		return "director_plan_update：观察已提交事实并判断 keep、patch 或 replan；只维护当前分支 director.md，不得写 Story Memory 或 Actor State。"
+		return "director_plan_update：Game Agent 已提示本回合对后续规划有实质影响；判断 keep、patch 或 replan。普通更新默认只 Patch agent-brief.md，只有重大偏差才修改 director.md，只有资料工作集变化才修改 lore-context.md。"
 	default:
-		return "director_plan_update：观察已提交事实并判断 keep、patch 或 replan；只维护当前分支 director.md，不得写 Story Memory 或 Actor State。"
+		return "director_plan_update：观察已提交事实并判断 keep、patch 或 replan；只 Patch 实际变化的导演 Markdown 文件，不得改写历史 Turn 或 Actor State。"
 	}
 }
 
@@ -103,20 +206,45 @@ func (c *interactiveConversation) PrepareMessages(originalMessage, agentMessage 
 		return nil, err
 	}
 	teller := c.teller(storyCtx.Meta.StoryTellerID)
-	storyDirector := storyDirectorForSnapshot(c.storyDirector(storyCtx.Meta.StoryDirectorID), storyCtx.Meta.ActorStateSchema)
+	storyDirector := storyDirectorForSnapshot(c.storyDirectorForMeta(storyCtx.Meta), storyCtx.Meta.ActorStateSchema)
 	tellerTurnContextPrompt := teller.PromptForTargets("turn_context")
-	turnMemory := buildInteractiveModelVisibleTurnMemory(storyCtx.Snapshot.Turns, storyCtx.Snapshot.ContextCompaction)
-	storyMemory, err := c.store.StoryMemoryContextSummary(c.storyID, storyCtx.Snapshot.BranchID, interactiveStoryRuntimeContextBytes)
-	if err != nil {
-		log.Printf("[interactive-agent] load story memory failed story_id=%s branch_id=%s err=%v", c.storyID, storyCtx.Snapshot.BranchID, err)
-		storyMemory = ""
+	turnHistory := buildInteractiveModelVisibleTurnHistory(storyCtx.Snapshot.Turns, storyCtx.Snapshot.ContextCompaction)
+	checkpointSummary := ""
+	if storyCtx.Snapshot.ContextCompaction != nil {
+		checkpointSummary = strings.TrimSpace(storyCtx.Snapshot.ContextCompaction.Summary)
 	}
 	directorPlanVisible := ""
+	directorPlan := interactive.DirectorPlan{}
 	if storyCtx.Snapshot.DirectorPlan != nil {
-		directorPlanVisible = interactive.DirectorPlanVisibleContext(*storyCtx.Snapshot.DirectorPlan, interactiveStoryRuntimeContextBytes)
+		directorPlan = *storyCtx.Snapshot.DirectorPlan
+		directorPlanVisible = interactive.DirectorPlanVisibleContext(directorPlan, interactiveStoryRuntimeContextBytes)
+	}
+	loreRuntime, err := buildInteractiveStoryLoreContext(c.workspace, directorPlan, agentMessage)
+	if err != nil {
+		return nil, err
+	}
+	loreStore := book.NewLoreStore(c.workspace)
+	residentLore, err := loreStore.ResidentContextMarkdown()
+	if err != nil {
+		return nil, fmt.Errorf("读取常驻资料失败: %w", err)
+	}
+	residentContentBytes, err := loreStore.ResidentContentBytes()
+	if err != nil {
+		return nil, fmt.Errorf("读取常驻资料预算失败: %w", err)
+	}
+	if residentContentBytes > book.ResidentLoreSafetyMaxBytes {
+		return nil, fmt.Errorf("常驻资料正文异常过大（%d KB）；请检查是否误将大型文件设为常驻资料", (residentContentBytes+1023)/1024)
+	}
+	if len([]byte(residentLore)) > interactiveResidentLoreMessageMaxBytes {
+		return nil, fmt.Errorf("常驻资料模型上下文过大: %d > %d bytes", len([]byte(residentLore)), interactiveResidentLoreMessageMaxBytes)
+	}
+	loreRevision, err := loreStore.Revision()
+	if err != nil {
+		return nil, fmt.Errorf("读取资料库 revision 失败: %w", err)
 	}
 	ruleSummary := interactive.StoryDirectorRuleSummary(storyDirector, interactiveStoryRuntimeContextBytes)
-	actorStateRuntime := interactive.ActorStateRuntimeContext(storyDirector.ActorState, storyCtx.Snapshot.State, interactiveStoryRuntimeContextBytes)
+	actorStateRuntime := interactive.ActorStateRuntimeContext(storyDirector.ActorState, storyCtx.Snapshot.State, interactiveStoryRuntimeContextBytes, storyCtx.Meta.ChoiceCount)
+	stateSchemaInitialization := interactive.OpeningGameStateSchemaInstruction(storyCtx.Meta)
 	strategyPrompt := interactive.StoryDirectorStrategyPromptMarkdown(storyDirector)
 	runtimeContext := prompts.InteractiveStoryRuntimeContext(prompts.InteractiveStoryPromptInput{
 		Title:                       storyCtx.Meta.Title,
@@ -125,30 +253,45 @@ func (c *interactiveConversation) PrepareMessages(originalMessage, agentMessage 
 		StoryDirectorID:             storyCtx.Meta.StoryDirectorID,
 		BranchID:                    storyCtx.Snapshot.BranchID,
 		ReplyTargetChars:            c.replyTargetChars,
-		LongTermMemory:              storyMemory,
+		ChoiceCount:                 storyCtx.Meta.ChoiceCount,
 		DirectorPlanVisible:         directorPlanVisible,
 		StoryDirectorRules:          ruleSummary,
 		ActorState:                  actorStateRuntime,
+		StateSchemaInitialization:   stateSchemaInitialization,
 		StoryDirectorStrategyPrompt: strategyPrompt,
-		PreviousTurnsSummary:        turnMemory.PreviousSummary,
+		PreviousTurnsSummary:        turnHistory.PreviousSummary,
+		LoreContext:                 loreRuntime,
 	})
-	history := make([]*schema.Message, 0, len(turnMemory.Turns)*2+3)
+	history := make([]*schema.Message, 0, len(turnHistory.Turns)*2+4)
+	stableLeadingMessage := ""
+	if residentLore != "" {
+		stableLeadingMessage = agentcontext.StandaloneMessage("常驻资料库", residentLore, "source: enabled resident lore; stable leading context")
+		if len([]byte(stableLeadingMessage)) > interactiveResidentLoreMessageMaxBytes {
+			return nil, fmt.Errorf("常驻资料最终模型消息过大: %d > %d bytes", len([]byte(stableLeadingMessage)), interactiveResidentLoreMessageMaxBytes)
+		}
+		history = append(history, schema.UserMessage(stableLeadingMessage))
+	}
 	if storyCtx.Snapshot.ContextCompaction != nil && strings.TrimSpace(storyCtx.Snapshot.ContextCompaction.Summary) != "" {
 		history = append(history, agent.NewContextCompactionSummaryMessage(storyCtx.Snapshot.ContextCompaction.Epoch, storyCtx.Snapshot.ContextCompaction.Summary))
 	}
-	for _, turn := range turnMemory.Turns {
+	for _, turn := range turnHistory.Turns {
 		history = append(history, schema.UserMessage(turn.User))
 		history = append(history, schemaMessagesFromInteractiveContext(turn.ModelContextMessages)...)
 		history = append(history, schema.AssistantMessage(turn.Narrative, nil))
 	}
 	history = agent.ApplyToolResultContextPolicyForConversation(history, c.ToolResultContextPolicy())
 	history = append(history, schema.UserMessage(prompts.InteractiveStoryTurnInstruction(agentMessage, tellerTurnContextPrompt, runtimeContext)))
-	sourceSummary := interactiveStorySourceSummary(storyCtx.Meta.Title, storyCtx.Meta.Origin, teller, storyMemory, directorPlanVisible, ruleSummary, strategyPrompt, turnMemory, agentMessage)
+	sourceParts := interactiveStoryContextSources(storyCtx.Meta.Title, storyCtx.Meta.Origin, teller, checkpointSummary, directorPlanVisible, residentLore, loreRevision, loreRuntime, ruleSummary, actorStateRuntime, stateSchemaInitialization, strategyPrompt, turnHistory, agentMessage)
+	sourceSummary := interactiveContextSourceListSummary(sourceParts)
+	contextLedgerParts := interactiveContextLedgerParts(sourceParts, history, c.ToolResultContextPolicy())
 	c.mu.Lock()
 	c.lastSources = sourceSummary
+	c.lastContextSources = cloneInteractiveContextSources(sourceParts)
+	c.lastContextLedgerParts = contextLedgerParts
+	c.stableLeadingMessage = stableLeadingMessage
 	c.mu.Unlock()
 	log.Printf(
-		"[interactive-agent] context composition story_id=%s branch_id=%s story_title=%s origin=%s teller_id=%s story_director_id=%s teller_slots=%s teller_turn_context=%s story_memory=%s director_plan=%s turns=%d model_turns=%d compressed_turns=%s history=%s turn_instruction=%s sources=%s",
+		"[interactive-agent] context composition story_id=%s branch_id=%s story_title=%s origin=%s teller_id=%s story_director_id=%s teller_slots=%s teller_turn_context=%s history_checkpoint=%s director_plan=%s turns=%d model_turns=%d history=%s turn_instruction=%s sources=%s",
 		c.storyID,
 		storyCtx.Snapshot.BranchID,
 		interactivePartSummary(storyCtx.Meta.Title),
@@ -157,11 +300,10 @@ func (c *interactiveConversation) PrepareMessages(originalMessage, agentMessage 
 		storyCtx.Meta.StoryDirectorID,
 		interactiveTellerSlotSummary(teller, "turn_context"),
 		interactivePartSummary(tellerTurnContextPrompt),
-		interactivePartSummary(storyMemory),
+		interactivePartSummary(checkpointSummary),
 		interactivePartSummary(directorPlanVisible),
 		len(storyCtx.Snapshot.Turns),
-		len(turnMemory.Turns),
-		interactivePartSummary(turnMemory.PreviousSummary),
+		len(turnHistory.Turns),
 		interactiveMessageListSummary(history),
 		interactivePartSummary(history[len(history)-1].Content),
 		sourceSummary,
@@ -178,6 +320,47 @@ func (c *interactiveConversation) ContextSourceSummary() string {
 	return c.lastSources
 }
 
+func (c *interactiveConversation) ContextLedgerParts() []agent.ContextLedgerPart {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]agent.ContextLedgerPart(nil), c.lastContextLedgerParts...)
+}
+
+func (c *interactiveConversation) ContextLedgerPartsForMessages(messages []*schema.Message) []agent.ContextLedgerPart {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	sources := cloneInteractiveContextSources(c.lastContextSources)
+	c.mu.Unlock()
+	parts := interactiveContextLedgerParts(sources, messages, c.ToolResultContextPolicy())
+	c.mu.Lock()
+	c.lastContextLedgerParts = append([]agent.ContextLedgerPart(nil), parts...)
+	c.mu.Unlock()
+	return parts
+}
+
+func (c *interactiveConversation) RunTraceMetadata() agent.RunTraceMetadata {
+	if c == nil {
+		return agent.RunTraceMetadata{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	metadata := agent.RunTraceMetadata{
+		StoryID:         c.storyID,
+		BranchID:        c.branchID,
+		MaintenanceTask: c.directorTask,
+	}
+	if c.lastTurn != nil {
+		metadata.BranchID = c.lastTurn.BranchID
+		metadata.TurnID = c.lastTurn.ID
+	}
+	return metadata
+}
+
 func (c *interactiveConversation) PrepareInteractiveTurn(ctx context.Context, request interactive.TurnCheckRequest) (interactive.RuleResolution, error) {
 	if c == nil || c.store == nil {
 		return interactive.RuleResolution{}, fmt.Errorf("互动故事不存在")
@@ -191,8 +374,13 @@ func (c *interactiveConversation) PrepareInteractiveTurn(ctx context.Context, re
 		return interactive.RuleResolution{}, ctx.Err()
 	default:
 	}
-	storyDirector := storyDirectorForSnapshot(c.storyDirector(storyCtx.Meta.StoryDirectorID), storyCtx.Meta.ActorStateSchema)
-	resolution, err := interactive.ResolveTurnRulesWithDirector(c.storyID, storyCtx.Snapshot.BranchID, storyCtx.Snapshot.State, storyDirector, request)
+	actorState, currentState, err := c.effectiveTurnState(storyCtx)
+	if err != nil {
+		return interactive.RuleResolution{}, err
+	}
+	storyDirector := storyDirectorForSnapshot(c.storyDirectorForMeta(storyCtx.Meta), storyCtx.Meta.ActorStateSchema)
+	storyDirector.ActorState = actorState
+	resolution, err := interactive.ResolveTurnRulesWithDirector(c.storyID, storyCtx.Snapshot.BranchID, currentState, storyDirector, request)
 	if err != nil {
 		return interactive.RuleResolution{}, err
 	}
@@ -204,42 +392,57 @@ func (c *interactiveConversation) PrepareInteractiveTurn(ctx context.Context, re
 
 // SubmitTurnResult stages the Game Agent's structured outcome. Nothing is
 // persisted until the final narrative is accepted and committed atomically.
-func (c *interactiveConversation) SubmitTurnResult(ctx context.Context, result interactive.TurnResult) (interactive.TurnResult, error) {
+func (c *interactiveConversation) SubmitTurnResult(ctx context.Context, input interactive.TurnSubmissionInput) (interactive.TurnSubmissionReceipt, error) {
 	if c == nil || c.store == nil {
-		return interactive.TurnResult{}, fmt.Errorf("互动故事不存在")
+		return interactive.TurnSubmissionReceipt{}, fmt.Errorf("互动故事不存在")
 	}
 	select {
 	case <-ctx.Done():
-		return interactive.TurnResult{}, ctx.Err()
+		return interactive.TurnSubmissionReceipt{}, ctx.Err()
 	default:
 	}
-	result = interactive.NormalizeTurnResult(result)
-	if strings.TrimSpace(result.Contract.PlayerIntent) == "" {
-		result.Contract.PlayerIntent = strings.TrimSpace(c.user)
+	if c.InteractiveNarrativeReady() {
+		log.Printf("[interactive-agent] ignored duplicate turn result before validation story_id=%s branch_id=%s", c.storyID, c.branchID)
+		return interactiveTurnResultAlreadyAcceptedReceipt(), nil
 	}
-	if err := interactive.ValidateTurnResult(result); err != nil {
-		return interactive.TurnResult{}, err
+	storyCtx, err := c.store.StoryContext(c.storyID, c.branchID)
+	if err != nil {
+		return interactive.TurnSubmissionReceipt{}, err
 	}
-	if len(result.ActorStatePatches) > 0 {
-		storyCtx, err := c.store.StoryContext(c.storyID, c.branchID)
-		if err != nil {
-			return interactive.TurnResult{}, err
-		}
-		actorState := interactive.StoryDirectorActorStateSystem{}
-		if storyCtx.Meta.ActorStateSchema != nil {
-			actorState = storyCtx.Meta.ActorStateSchema.System
-		} else {
-			actorState = c.storyDirector(storyCtx.Meta.StoryDirectorID).ActorState
-		}
-		if _, err := interactive.ValidateActorStatePatchesAgainstState(actorState, storyCtx.Snapshot.State, result.ActorStatePatches, ""); err != nil {
-			return interactive.TurnResult{}, fmt.Errorf("Actor 状态更新校验失败，可修正参数后重试 submit_interactive_turn_result: %w", err)
-		}
+	actorState, currentState, err := c.effectiveTurnState(storyCtx)
+	if err != nil {
+		return interactive.TurnSubmissionReceipt{}, err
+	}
+	director := c.storyDirectorForMeta(storyCtx.Meta)
+	c.mu.Lock()
+	current := c.turnProtocol.draft()
+	prepared, receipt := interactive.PrepareTurnSubmission(interactive.TurnSubmissionContext{
+		ActorState:                  actorState,
+		CurrentState:                currentState,
+		ChoiceCount:                 storyCtx.Meta.ChoiceCount,
+		RuleResolution:              c.ruleResolution,
+		RuleStateConsumptionMode:    director.Strategy.RuleStateConsumptionMode,
+		RequireCompleteInitialState: c.openingStateSchemaDraft != nil && len(storyCtx.Snapshot.Turns) == 0,
+	}, current, input)
+	staged := c.turnProtocol.update(prepared)
+	c.mu.Unlock()
+	if !staged {
+		receipt = interactiveTurnResultAlreadyAcceptedReceipt()
+		log.Printf("[interactive-agent] ignored turn result update after protocol lock story_id=%s branch_id=%s", c.storyID, c.branchID)
+		return receipt, nil
+	}
+	stagedResult := prepared.TurnResult()
+	log.Printf("[interactive-agent] updated turn result draft story_id=%s branch_id=%s ready=%t state_updates=%d choices=%d state_changes_status=%s choices_status=%s diagnostics=%q", c.storyID, c.branchID, receipt.Ready, len(stagedResult.StateUpdates), len(stagedResult.Choices), receipt.ModuleStatus.StateChanges, receipt.ModuleStatus.Choices, interactiveTurnSubmissionDiagnosticSummary(receipt.Diagnostics))
+	return receipt, nil
+}
+
+func (c *interactiveConversation) InteractiveNarrativeReady() bool {
+	if c == nil {
+		return false
 	}
 	c.mu.Lock()
-	c.turnResult = &result
-	c.mu.Unlock()
-	log.Printf("[interactive-agent] staged turn result story_id=%s branch_id=%s state_patches=%d facts=%d choices=%d scene_status=%s deviation=%s", c.storyID, c.branchID, len(result.ActorStatePatches), len(result.FactCandidates), len(result.Choices), result.SceneResult.Status, result.PlanSignals.DeviationLevel)
-	return result, nil
+	defer c.mu.Unlock()
+	return c.turnProtocol.narrativeReady()
 }
 
 func (c *interactiveConversation) CompactContextIfNeeded(ctx context.Context, input agent.ContextCompactionInput) ([]*schema.Message, agent.ContextCompactionResult, error) {
@@ -253,20 +456,18 @@ func (c *interactiveConversation) CompactContextIfNeeded(ctx context.Context, in
 	if !input.Force && storyCtx.Snapshot.ContextCompactionRemoval != nil && storyCtx.Snapshot.ContextCompactionRemoval.SourceTurnCount >= len(storyCtx.Snapshot.Turns) {
 		return input.Messages, agent.ContextCompactionResult{SkippedReason: "removed_same_source"}, nil
 	}
-	source, existingMemory := interactiveCompactionSource(storyCtx.Snapshot.Turns, storyCtx.Snapshot.ContextCompaction)
+	source, existingCheckpoint := interactiveCompactionSource(storyCtx.Snapshot.Turns, storyCtx.Snapshot.ContextCompaction)
 	source = agent.ApplyToolResultContextPolicyForConversation(source, c.ToolResultContextPolicy())
 	epoch := 1
 	if storyCtx.Snapshot.ContextCompaction != nil {
 		epoch = storyCtx.Snapshot.ContextCompaction.Epoch + 1
 	}
 	input.SourceMessages = source
-	if strings.TrimSpace(input.ExistingMemory) == "" {
-		input.ExistingMemory = existingMemory
-	}
-	if strings.TrimSpace(input.ReferenceContext) == "" {
-		input.ReferenceContext = interactiveCompactionReferenceContext(c.store, c.storyID, storyCtx.Snapshot.BranchID)
+	if strings.TrimSpace(input.ExistingCheckpoint) == "" {
+		input.ExistingCheckpoint = existingCheckpoint
 	}
 	input.KeepLatestUser = true
+	stableLeadingMessage := c.stableLeadingMessageSnapshot()
 	completionReserve, toolReserve := agent.EstimateContextProjectionReserves(c.cfg, config.AgentKindInteractiveStory, c.replyTargetChars)
 	if input.ReservedCompletionTokens <= 0 {
 		input.ReservedCompletionTokens = completionReserve
@@ -278,6 +479,8 @@ func (c *interactiveConversation) CompactContextIfNeeded(ctx context.Context, in
 	if err != nil || !result.Triggered {
 		return newMessages, result, err
 	}
+	newMessages = preserveInteractiveStableLeadingMessage(newMessages, stableLeadingMessage)
+	result = interactiveCompactionResultForMessages(result, newMessages, input.Tools)
 	event := interactive.ContextCompactionEvent{
 		AgentKind:           config.AgentKindInteractiveStory,
 		Epoch:               result.Epoch,
@@ -300,8 +503,8 @@ func (c *interactiveConversation) CompactContextIfNeeded(ctx context.Context, in
 	if event.Epoch != result.Epoch {
 		result.Epoch = event.Epoch
 		newMessages = agent.BuildCompactedModelMessages(input.Messages, result.Summary, event.Epoch, result.RetainedTurns)
-		result.TokensAfter = agent.EstimateContextTokens(newMessages, input.Tools)
-		result.MessageCountAfter = len(newMessages)
+		newMessages = preserveInteractiveStableLeadingMessage(newMessages, stableLeadingMessage)
+		result = interactiveCompactionResultForMessages(result, newMessages, input.Tools)
 	}
 	return newMessages, result, nil
 }
@@ -416,9 +619,9 @@ func schemaToolCallsFromInteractive(calls []interactive.ModelContextToolCall) []
 
 func interactiveCompactionSource(turns []interactive.TurnEvent, compaction *interactive.ContextCompactionEvent) ([]*schema.Message, string) {
 	sourceStart := 0
-	existingMemory := ""
+	existingCheckpoint := ""
 	if compaction != nil && strings.TrimSpace(compaction.Summary) != "" {
-		existingMemory = compaction.Summary
+		existingCheckpoint = compaction.Summary
 		sourceStart = compaction.SourceTurnCount
 		if sourceStart < 0 {
 			sourceStart = 0
@@ -427,23 +630,22 @@ func interactiveCompactionSource(turns []interactive.TurnEvent, compaction *inte
 			sourceStart = len(turns)
 		}
 	}
-	return interactiveTurnMessages(turns[sourceStart:]), existingMemory
+	return interactiveCompactionTurnMessages(turns[sourceStart:]), existingCheckpoint
 }
 
-func interactiveCompactionReferenceContext(store *interactive.Store, storyID, branchID string) string {
-	if store == nil {
-		return ""
+func interactiveCompactionTurnMessages(turns []interactive.TurnEvent) []*schema.Message {
+	messages := make([]*schema.Message, 0, len(turns)*2)
+	for _, turn := range turns {
+		source := fmt.Sprintf("[source turn_id=%s branch_id=%s]", turn.ID, turn.BranchID)
+		if strings.TrimSpace(turn.User) != "" {
+			messages = append(messages, schema.UserMessage(source+"\n"+turn.User))
+		}
+		messages = append(messages, schemaMessagesFromInteractiveContext(turn.ModelContextMessages)...)
+		if strings.TrimSpace(turn.Narrative) != "" {
+			messages = append(messages, schema.AssistantMessage(source+"\n"+turn.Narrative, nil))
+		}
 	}
-	storyMemory, err := store.StoryMemoryCompactionContext(storyID, branchID)
-	if err != nil {
-		log.Printf("[interactive-agent] load story memory for compaction failed story_id=%s branch_id=%s err=%v", storyID, branchID, err)
-		return ""
-	}
-	storyMemory = strings.TrimSpace(storyMemory)
-	if storyMemory == "" {
-		return ""
-	}
-	return "Story Memory reference for context compaction. Treat plot_summary / 剧情纪要 records as highest-priority continuity evidence.\n\n" + storyMemory
+	return messages
 }
 
 func (c *interactiveConversation) AppendAssistant(content string) error {
@@ -491,7 +693,7 @@ func (c *interactiveConversation) AppendAssistantWithMetadata(content, thinking 
 	assistantMetadata := c.assistantMetadataSnapshot()
 	turnResult := c.turnResultSnapshot()
 	if turnResult == nil {
-		return fmt.Errorf("互动回合缺少 submit_interactive_turn_result，已拒绝写入不完整状态")
+		return fmt.Errorf("互动回合的 state_changes 或 choices 尚未完整提交，已拒绝写入不完整状态")
 	}
 	turn, _, err := c.store.AppendTurnWithState(c.storyID, interactive.AppendTurnWithStateRequest{
 		BranchID:             c.branchID,
@@ -501,16 +703,18 @@ func (c *interactiveConversation) AppendAssistantWithMetadata(content, thinking 
 		Thinking:             thinking,
 		RunID:                assistantMetadata.RunID,
 		AgentKind:            assistantMetadata.AgentKind,
-		DisplayEvents:        c.displayEventsSnapshot(),
+		DisplayEvents:        withInteractiveNarrativeAnchor(c.displayEventsSnapshot()),
 		ModelContextMessages: c.modelContextMessagesSnapshot(),
 		RuleResolution:       c.ruleResolutionSnapshot(),
 		TurnResult:           turnResult,
 		TerminalOutcome:      c.terminalOutcomeSnapshot(narrative),
+		StateSchemaProposal:  c.openingStateSchemaProposalSnapshot(),
 	})
 	if err == nil {
 		c.mu.Lock()
 		c.lastTurn = &turn
 		c.lastStateReady = turn.StateStatus == "ready"
+		c.turnProtocol.markCommitted()
 		c.mu.Unlock()
 	}
 	return err
@@ -807,6 +1011,35 @@ func (c *interactiveConversation) displayEventsSnapshot() []interactive.DisplayE
 	return result
 }
 
+// interactiveNarrativeAnchorEventID 是正文锚点展示事件的固定 ID，一个回合最多一个锚点。
+const interactiveNarrativeAnchorEventID = "narrative-anchor"
+
+// withInteractiveNarrativeAnchor 在持久化的展示时间线中插入正文锚点，标记正文
+// 实际流出的位置：正文在 submit_interactive_turn 之前输出完整，因此锚点
+// 插在首个提交工具调用事件前。找不到提交工具事件时
+// （异常或旧数据）不插入锚点，前端按“正文在最后”的旧布局兜底；已含锚点的
+// 事件列表原样返回。
+func withInteractiveNarrativeAnchor(events []interactive.DisplayEvent) []interactive.DisplayEvent {
+	if len(events) == 0 {
+		return events
+	}
+	for _, event := range events {
+		if event.Role == interactive.DisplayEventRoleNarrative {
+			return events
+		}
+	}
+	anchor := interactive.DisplayEvent{ID: interactiveNarrativeAnchorEventID, Role: interactive.DisplayEventRoleNarrative}
+	for index, event := range events {
+		if event.Role == "tool_call" && agent.IsInteractiveTurnSubmissionTool(event.Name) {
+			result := make([]interactive.DisplayEvent, 0, len(events)+1)
+			result = append(result, events[:index]...)
+			result = append(result, anchor)
+			return append(result, events[index:]...)
+		}
+	}
+	return events
+}
+
 func (c *interactiveConversation) assistantMetadataSnapshot() session.MessageMetadata {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -839,11 +1072,33 @@ func (c *interactiveConversation) ruleResolutionSnapshot() *interactive.RuleReso
 func (c *interactiveConversation) turnResultSnapshot() *interactive.TurnResult {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.turnResult == nil {
-		return nil
+	return c.turnProtocol.turnResult()
+}
+
+func interactiveTurnSubmissionDiagnosticSummary(diagnostics []interactive.TurnSubmissionDiagnostic) string {
+	parts := make([]string, 0, len(diagnostics))
+	for _, diagnostic := range diagnostics {
+		parts = append(parts, strings.Join([]string{diagnostic.Module, diagnostic.Code, diagnostic.Path, diagnostic.MessageZH}, ":"))
 	}
-	result := interactive.NormalizeTurnResult(*c.turnResult)
-	return &result
+	return strings.Join(parts, "; ")
+}
+
+func interactiveTurnResultAlreadyAcceptedReceipt() interactive.TurnSubmissionReceipt {
+	return interactive.TurnSubmissionReceipt{
+		Ready: true,
+		ModuleStatus: interactive.TurnSubmissionModuleStatus{
+			StateChanges: interactive.TurnSubmissionModuleAccepted,
+			Choices:      interactive.TurnSubmissionModuleAccepted,
+		},
+		Diagnostics: []interactive.TurnSubmissionDiagnostic{{
+			Module:    "submission",
+			Code:      "turn_result_already_accepted",
+			Severity:  "warning",
+			Retryable: false,
+			MessageZH: "本回合已有完整 TurnResult，已保留首次接受的模块；无需重试。",
+			MessageEN: "This turn already has a complete TurnResult; the first accepted modules were retained.",
+		}},
+	}
 }
 
 func (c *interactiveConversation) baseParentIDSnapshot() *string {
@@ -885,6 +1140,30 @@ func (c *interactiveConversation) LastTurnForState() (interactive.TurnEvent, boo
 }
 
 func (c *interactiveConversation) BuildDirectorInstruction(turn interactive.TurnEvent) (string, error) {
+	_, instruction, err := c.buildDirectorModelInput(turn)
+	return instruction, err
+}
+
+func (c *interactiveConversation) buildDirectorModelInput(turn interactive.TurnEvent) (interactiveDirectorStableContext, string, error) {
+	stableContext, err := buildInteractiveDirectorStableContext(c.workspace)
+	if err != nil {
+		return interactiveDirectorStableContext{}, "", err
+	}
+	instruction, err := c.buildDirectorInstruction(turn, stableContext)
+	if err != nil {
+		return interactiveDirectorStableContext{}, "", err
+	}
+	assembledRevision, err := book.NewLoreStore(c.workspace).Revision()
+	if err != nil {
+		return interactiveDirectorStableContext{}, "", fmt.Errorf("读取导演资料库装配后 revision 失败: %w", err)
+	}
+	if strings.TrimSpace(assembledRevision) != strings.TrimSpace(stableContext.Revision) {
+		return interactiveDirectorStableContext{}, "", fmt.Errorf("资料库在导演上下文装配期间发生变化: stable=%s dynamic=%s", strings.TrimSpace(stableContext.Revision), strings.TrimSpace(assembledRevision))
+	}
+	return stableContext, instruction, nil
+}
+
+func (c *interactiveConversation) buildDirectorInstruction(turn interactive.TurnEvent, stableContext interactiveDirectorStableContext) (string, error) {
 	if c == nil || c.store == nil {
 		return "", fmt.Errorf("互动故事不存在")
 	}
@@ -892,43 +1171,42 @@ func (c *interactiveConversation) BuildDirectorInstruction(turn interactive.Turn
 	if err != nil {
 		return "", err
 	}
-	if strings.TrimSpace(c.directorTask) == interactiveDirectorTaskMemoryUpdate {
-		return c.buildMemoryRecorderInstruction(storyCtx, turn)
-	}
-	storyMemory, err := c.store.StoryMemoryContextSummary(c.storyID, storyCtx.Snapshot.BranchID, interactiveDirectorContextBytes)
-	if err != nil {
-		log.Printf("[interactive-director-agent] load story memory failed story_id=%s branch_id=%s err=%v", c.storyID, storyCtx.Snapshot.BranchID, err)
-		storyMemory = ""
-	}
-	storyDirector := storyDirectorForSnapshot(c.storyDirector(storyCtx.Meta.StoryDirectorID), storyCtx.Meta.ActorStateSchema)
+	storyDirector := storyDirectorForSnapshot(c.storyDirectorForMeta(storyCtx.Meta), storyCtx.Meta.ActorStateSchema)
 	strategyPrompt := interactive.StoryDirectorStrategyPromptMarkdown(storyDirector)
-	loreContext := c.directorLoreContext(turn)
-	turnMemory := buildInteractiveModelVisibleTurnMemory(storyCtx.Snapshot.Turns, storyCtx.Snapshot.ContextCompaction)
-	turnHistory := formatInteractiveTurnMemoryHistory(turnMemory, storyCtx.Snapshot.ContextCompaction, "（暂无历史回合，请基于本回合审计更新导演计划。）")
+	visibleHistory := buildInteractiveModelVisibleTurnHistory(storyCtx.Snapshot.Turns, storyCtx.Snapshot.ContextCompaction)
+	historyText := formatInteractiveTurnHistoryWithCheckpoint(visibleHistory, storyCtx.Snapshot.ContextCompaction, "（暂无历史回合，请基于本回合审计更新导演计划。）")
 	directorPlan := interactive.DirectorPlan{}
 	if storyCtx.Snapshot.DirectorPlan != nil {
 		directorPlan = *storyCtx.Snapshot.DirectorPlan
 	} else if plan, err := c.store.DirectorPlan(c.storyID, storyCtx.Snapshot.BranchID); err == nil {
 		directorPlan = plan
 	}
-	actorStateSnapshot := map[string]any{}
-	if actors, ok := storyCtx.Snapshot.State["actors"]; ok {
-		actorStateSnapshot = map[string]any{"actors": actors}
+	loreContext, err := buildInteractiveDirectorLoreContext(c.workspace, directorPlan, turn)
+	if err != nil {
+		return "", err
 	}
-	allowedPaths := c.store.DirectorPlanAllowedPaths(c.storyID, storyCtx.Snapshot.BranchID)
-	budget := newDirectorContextBudget(c.cfg, interactiveDirectorTaskDirectorPlanUpdate)
+	actorStateSnapshot := interactive.ActorStateRuntimeProjection(storyDirector.ActorState, storyCtx.Snapshot.State)
+	openingInitialization := strings.TrimSpace(c.directorTask) == interactiveDirectorTaskOpeningPlan
+	budget := newDirectorContextBudget(c.cfg, c.directorTask, stableContext)
 	title := budget.take("story.title", storyCtx.Meta.Title, 512)
-	turnAudit := budget.take("turn.audit", boundedJSON(interactiveDirectorTurnAudit(turn), interactiveDirectorContextBytes), interactiveDirectorContextBytes)
-	planDocs := budget.take("director_plan.docs", boundedJSON(directorPlan.Docs, interactiveDirectorContextBytes), interactiveDirectorContextBytes)
+	turnAudit := ""
+	if !openingInitialization {
+		turnAudit = budget.take("turn.audit", boundedJSON(interactiveDirectorTurnAudit(turn), interactiveDirectorContextBytes), interactiveDirectorContextBytes)
+	}
+	planDocsMarkdown := formatDirectorDocumentsContext(directorPlan.Docs, directorPlan.Metadata.Docs)
+	planDocs := budget.take("director_plan.docs", planDocsMarkdown, interactiveDirectorContextBytes)
 	actorState := budget.take("actor_state.snapshot", boundedJSON(actorStateSnapshot, interactiveDirectorContextBytes), interactiveDirectorContextBytes)
 	actorStateSchema := budget.take("actor_state.schema", interactive.ActorStateSchemaContext(storyDirector.ActorState, interactiveDirectorContextBytes), interactiveDirectorContextBytes)
-	memoryContext := budget.take("story_memory.records", storyMemory, interactiveDirectorContextBytes)
 	lore := budget.take("lore.relevant", loreContext, interactiveDirectorContextBytes)
-	history := budget.take("turn.history", turnHistory, interactiveDirectorContextBytes)
+	history := budget.take("turn.history", historyText, interactiveDirectorContextBytes)
 	origin := budget.take("story.origin", storyCtx.Meta.Origin, interactiveDirectorContextBytes)
 	planningTemplates := budget.take("director.strategy.templates", boundedJSON(storyDirector.Strategy.PlanningTemplates, interactiveDirectorContextBytes), interactiveDirectorContextBytes)
 	planningSummary := budget.take("director.planning_summary", interactive.StoryDirectorPlanningSummary(storyDirector, interactiveDirectorContextBytes), interactiveDirectorContextBytes)
 	strategyContext := budget.take("director.strategy.prompt", strategyPrompt, interactiveDirectorContextBytes)
+	openingContext := ""
+	if openingInitialization {
+		openingContext = budget.take("story.opening_input", turn.User, 4*1024)
+	}
 	eventOpportunity, eventRuntime, eventIndex, eventErr := c.store.DirectorEventContext(c.storyID, storyCtx.Snapshot.BranchID, turn.ID)
 	if eventErr != nil {
 		return "", fmt.Errorf("读取事件编排上下文失败: %w", eventErr)
@@ -940,72 +1218,41 @@ func (c *interactiveConversation) BuildDirectorInstruction(turn interactive.Turn
 	instruction := prompts.InteractiveDirectorInstruction(prompts.InteractiveDirectorPromptInput{
 		Title:                       title,
 		Origin:                      origin,
+		OpeningContext:              openingContext,
+		OpeningInitialization:       openingInitialization,
 		StoryTellerID:               budget.take("story.teller_id", storyCtx.Meta.StoryTellerID, 128),
 		StoryDirectorID:             budget.take("story.director_id", storyCtx.Meta.StoryDirectorID, 128),
 		BranchID:                    budget.take("story.branch_id", storyCtx.Snapshot.BranchID, 128),
 		TaskHint:                    budget.take("director.task", c.directorTaskHint(), 1024),
-		DirectorPlanPaths:           budget.take("director_plan.paths", strings.Join(allowedPaths, "\n"), 2*1024),
 		DirectorPlanDocs:            planDocs,
 		PlanningTemplates:           planningTemplates,
 		BranchPlanningTurns:         storyDirector.Strategy.BranchPlanningTurns,
 		LoreContext:                 lore,
 		TurnAuditJSON:               turnAudit,
 		TurnHistory:                 history,
-		StoryMemory:                 memoryContext,
 		ActorStateSchema:            actorStateSchema,
 		ActorState:                  actorState,
-		StoryMemorySummary:          "",
 		StoryDirectorPlan:           planningSummary,
 		StoryDirectorStrategyPrompt: strategyContext,
 		DirectorEventCatalog:        eventCatalog,
 		EventOpportunity:            budget.take("director.event_opportunity", boundedJSON(eventOpportunity, 4*1024), 4*1024),
 		EventRuntime:                budget.take("director.event_runtime", boundedJSON(eventRuntime, 8*1024), 8*1024),
 	})
-	log.Printf("[interactive-director-agent] context budget story_id=%s branch_id=%s turn_id=%s instruction_bytes=%d model_window_tokens=%d threshold_tokens=%d source_budget_tokens=%d fragments=%s", c.storyID, storyCtx.Snapshot.BranchID, turn.ID, len(instruction), budget.contextWindowTokens, budget.thresholdTokens, budget.initialTokens, budget.trace())
+	log.Printf("[interactive-director-agent] context budget story_id=%s branch_id=%s turn_id=%s instruction_bytes=%d stable_bytes=%d model_window_tokens=%d threshold_tokens=%d source_budget_tokens=%d fragments=%s", c.storyID, storyCtx.Snapshot.BranchID, turn.ID, len(instruction), len([]byte(stableContext.Content)), budget.contextWindowTokens, budget.thresholdTokens, budget.initialTokens, budget.trace())
 	log.Printf(
-		"[interactive-director-agent] context composition story_id=%s branch_id=%s turn_id=%s teller_id=%s story_director_id=%s director_plan=%s allowed_paths=%d teller_memory_rules=%s lore=%s turn_audit=%s story_memory=%s story_memory_schema=%s actor_state=%s history=%s instruction=%s",
+		"[interactive-director-agent] context composition story_id=%s branch_id=%s turn_id=%s teller_id=%s story_director_id=%s director_plan=%s lore=%s turn_audit=%s actor_state=%s history=%s instruction=%s",
 		c.storyID,
 		storyCtx.Snapshot.BranchID,
 		turn.ID,
 		storyCtx.Meta.StoryTellerID,
 		storyCtx.Meta.StoryDirectorID,
-		interactivePartSummary(boundedJSON(directorPlan.Docs, interactiveDirectorContextBytes)),
-		len(allowedPaths),
-		"none",
+		interactivePartSummary(planDocsMarkdown),
 		interactivePartSummary(loreContext),
-		interactivePartSummary(boundedJSON(interactiveDirectorTurnAudit(turn), interactiveDirectorContextBytes)),
-		interactivePartSummary(storyMemory),
-		"not_injected",
+		interactivePartSummary(turnAudit),
 		interactivePartSummary(boundedJSON(actorStateSnapshot, interactiveDirectorContextBytes)),
-		interactivePartSummary(turnHistory),
+		interactivePartSummary(historyText),
 		interactivePartSummary(instruction),
 	)
-	return instruction, nil
-}
-
-func (c *interactiveConversation) buildMemoryRecorderInstruction(storyCtx interactive.StoryContext, turn interactive.TurnEvent) (string, error) {
-	storyMemory, err := c.store.StoryMemoryContextSummary(c.storyID, storyCtx.Snapshot.BranchID, interactive.DirectorContextMaxBytes)
-	if err != nil {
-		return "", fmt.Errorf("读取故事记忆失败: %w", err)
-	}
-	storyMemorySchema, err := c.store.StoryMemorySchemaContext(c.storyID, interactive.DirectorContextMaxBytes)
-	if err != nil {
-		return "", fmt.Errorf("读取故事记忆结构失败: %w", err)
-	}
-	turnMemory := buildInteractiveModelVisibleTurnMemory(storyCtx.Snapshot.Turns, storyCtx.Snapshot.ContextCompaction)
-	turnHistory := formatInteractiveTurnMemoryHistory(turnMemory, storyCtx.Snapshot.ContextCompaction, "（暂无更早历史回合。）")
-	teller := c.teller(storyCtx.Meta.StoryTellerID)
-	budget := newDirectorContextBudget(c.cfg, interactiveDirectorTaskMemoryUpdate)
-	instruction := prompts.InteractiveMemoryRecorderInstruction(prompts.InteractiveMemoryRecorderPromptInput{
-		Title:                  budget.take("story.title", storyCtx.Meta.Title, 512),
-		BranchID:               budget.take("story.branch_id", storyCtx.Snapshot.BranchID, 128),
-		TurnAuditJSON:          budget.take("turn.audit", boundedNewestTurnAudits(interactiveMemoryRecorderTurnAudit(storyCtx.Snapshot.Turns, turn.ID), interactive.DirectorContextMaxBytes), interactive.DirectorContextMaxBytes),
-		StoryMemorySchema:      budget.take("story_memory.schema", storyMemorySchema, interactive.DirectorContextMaxBytes),
-		StoryMemory:            budget.take("story_memory.records", storyMemory, interactive.DirectorContextMaxBytes),
-		StoryTellerMemoryRules: budget.take("teller.state_memory", teller.PromptForTargets("state_memory"), interactive.DirectorContextMaxBytes),
-		TurnHistory:            budget.take("turn.history", turnHistory, interactive.DirectorContextMaxBytes),
-	})
-	log.Printf("[interactive-memory-recorder] context composition story_id=%s branch_id=%s turn_id=%s model_window_tokens=%d threshold_tokens=%d source_budget_tokens=%d fragments=%s instruction=%s", c.storyID, storyCtx.Snapshot.BranchID, turn.ID, budget.contextWindowTokens, budget.thresholdTokens, budget.initialTokens, budget.trace(), interactivePartSummary(instruction))
 	return instruction, nil
 }
 
@@ -1020,40 +1267,6 @@ func interactiveDirectorTurnAudit(turn interactive.TurnEvent) map[string]any {
 		"state_delta":      turn.StateDelta,
 		"terminal_outcome": turn.TerminalOutcome,
 	}
-}
-
-func boundedNewestTurnAudits(audits []map[string]any, limit int) string {
-	if limit <= 0 {
-		return "[]"
-	}
-	for start := 0; start < len(audits); start++ {
-		payload := map[string]any{
-			"omitted_older_turns": start,
-			"turns":               audits[start:],
-		}
-		data, err := json.MarshalIndent(payload, "", "  ")
-		if err == nil && len(data) <= limit {
-			return string(data)
-		}
-	}
-	return "{\"omitted_older_turns\":0,\"turns\":[]}"
-}
-
-func interactiveMemoryRecorderTurnAudit(turns []interactive.TurnEvent, currentTurnID string) []map[string]any {
-	const maxMemoryAuditTurns = 12
-	end := len(turns)
-	for i := range turns {
-		if turns[i].ID == currentTurnID {
-			end = i + 1
-			break
-		}
-	}
-	start := max(0, end-maxMemoryAuditTurns)
-	result := make([]map[string]any, 0, end-start)
-	for _, turn := range turns[start:end] {
-		result = append(result, interactiveDirectorTurnAudit(turn))
-	}
-	return result
 }
 
 func interactiveDirectorEventCatalog(director interactive.StoryDirector) []interactive.DirectorEvent {
@@ -1091,7 +1304,7 @@ type directorContextBudget struct {
 	parts               []string
 }
 
-func newDirectorContextBudget(cfg *config.Config, task string) *directorContextBudget {
+func newDirectorContextBudget(cfg *config.Config, task string, stableContext interactiveDirectorStableContext) *directorContextBudget {
 	model := config.ResolveAgentModel(cfg, config.AgentKindInteractiveDirector)
 	window := model.ContextWindowTokens
 	if window <= 0 {
@@ -1105,15 +1318,22 @@ func newDirectorContextBudget(cfg *config.Config, task string) *directorContextB
 	thresholdTokens := int(float64(window) * threshold)
 	systemPrompt := prompts.BuildInteractiveDirectorSystemInstruction()
 	emptyPrompt := prompts.InteractiveDirectorInstruction(prompts.InteractiveDirectorPromptInput{})
-	if task == interactiveDirectorTaskMemoryUpdate {
-		systemPrompt = prompts.BuildInteractiveMemoryRecorderSystemInstruction()
-		emptyPrompt = prompts.InteractiveMemoryRecorderInstruction(prompts.InteractiveMemoryRecorderPromptInput{})
+	if task == interactiveDirectorTaskOpeningPlan {
+		emptyPrompt = prompts.InteractiveDirectorInstruction(prompts.InteractiveDirectorPromptInput{OpeningInitialization: true})
 	}
 	customPrompt := config.ResolveAgentPrompt(cfg, config.AgentKindInteractiveDirector).SystemPrompt
-	overheadTokens := agent.EstimateContextTokens([]*schema.Message{
+	overheadMessages := []*schema.Message{
 		schema.SystemMessage(systemPrompt + "\n" + customPrompt),
 		schema.UserMessage(emptyPrompt),
-	}, nil)
+	}
+	if stable := strings.TrimSpace(stableContext.Content); stable != "" {
+		title := strings.TrimSpace(stableContext.Title)
+		if title == "" {
+			title = "稳定模型上下文"
+		}
+		overheadMessages = append(overheadMessages, schema.UserMessage(fmt.Sprintf("# %s\n\n%s", title, stable)))
+	}
+	overheadTokens := agent.EstimateContextTokens(overheadMessages, nil)
 	completionReserve, toolReserve := agent.EstimateContextProjectionReserves(cfg, config.AgentKindInteractiveDirector, 1024)
 	toolSchemaAndRuntimeHeadroom := max(2048, window/100)
 	available := max(0, thresholdTokens-overheadTokens-completionReserve-toolReserve-toolSchemaAndRuntimeHeadroom)
@@ -1172,6 +1392,20 @@ func (c *interactiveConversation) teller(tellerID string) interactive.Teller {
 
 func (c *interactiveConversation) storyDirector(directorID string) interactive.StoryDirector {
 	return loadStoryDirector(c.novaDir, directorID)
+}
+
+func (c *interactiveConversation) storyDirectorForMeta(meta interactive.StoryMeta) interactive.StoryDirector {
+	return loadStoryDirectorForMeta(c.novaDir, meta)
+}
+
+func loadStoryDirectorForMeta(novaDir string, meta interactive.StoryMeta) interactive.StoryDirector {
+	director := loadStoryDirector(novaDir, meta.StoryDirectorID)
+	if meta.ModuleRefs == nil {
+		return director
+	}
+	director.ModuleRefs = interactive.NormalizeStoryDirectorModuleRefs(*meta.ModuleRefs)
+	director.ResolvedSnapshot = interactive.StoryDirectorResolvedSnapshot{}
+	return interactive.ResolveStoryDirectorModules(novaDir, director)
 }
 
 func storyDirectorForSnapshot(director interactive.StoryDirector, snapshot *interactive.ActorStateSchemaSnapshot) interactive.StoryDirector {
@@ -1233,155 +1467,6 @@ func interactiveStoryTellerSystemInput(teller interactive.Teller, styleRules ...
 	}
 }
 
-func (c *interactiveConversation) directorLoreContext(turn interactive.TurnEvent) string {
-	if c.workspace == "" {
-		return ""
-	}
-	store := book.NewLoreStore(c.workspace)
-	var sb strings.Builder
-	index, err := store.LoreIndexMarkdown(book.LoreIndexOptions{
-		Limit:    50,
-		MaxBytes: interactiveDirectorLoreIndexBytes,
-	})
-	if err != nil {
-		log.Printf("[interactive-director-agent] load lore index failed workspace=%s err=%v", c.workspace, err)
-	} else {
-		appendDirectorLoreContextSection(&sb, "## 资料库索引（source: lore/items.json, bounded）", index)
-	}
-	items, err := store.List()
-	if err != nil {
-		log.Printf("[interactive-director-agent] load lore items failed workspace=%s err=%v", c.workspace, err)
-		return boundedText(sb.String(), interactiveDirectorLoreContextBytes)
-	}
-	selected := selectDirectorLoreItems(items, turn)
-	if len(selected) > 0 {
-		var full strings.Builder
-		full.WriteString("以下条目优先供导演规划重要角色、势力、规则、地点和当前回合相关设定；不要把未列出的资料库内容当作不存在。\n\n")
-		for _, item := range selected {
-			full.WriteString(formatDirectorLoreItem(item))
-			full.WriteString("\n\n")
-		}
-		appendDirectorLoreContextSection(&sb, "## 重点资料正文（source: lore/items.json, bounded）", boundedText(full.String(), interactiveDirectorLoreItemsBytes))
-	}
-	return boundedText(sb.String(), interactiveDirectorLoreContextBytes)
-}
-
-func appendDirectorLoreContextSection(sb *strings.Builder, title, content string) {
-	content = strings.TrimSpace(content)
-	if content == "" {
-		return
-	}
-	if sb.Len() > 0 {
-		sb.WriteString("\n\n")
-	}
-	sb.WriteString(title)
-	sb.WriteString("\n\n")
-	sb.WriteString(content)
-}
-
-func selectDirectorLoreItems(items []book.LoreItem, turn interactive.TurnEvent) []book.LoreItem {
-	const maxItems = 12
-	selected := make([]book.LoreItem, 0, maxItems)
-	seen := make(map[string]bool, maxItems)
-	add := func(item book.LoreItem) {
-		if len(selected) >= maxItems || strings.TrimSpace(item.ID) == "" || seen[item.ID] {
-			return
-		}
-		seen[item.ID] = true
-		selected = append(selected, item)
-	}
-	for _, item := range items {
-		if isDirectorPriorityLoreItem(item) {
-			add(item)
-		}
-	}
-	for _, item := range items {
-		if loreItemRelevantToDirectorTurn(item, turn) {
-			add(item)
-		}
-	}
-	return selected
-}
-
-func isDirectorPriorityLoreItem(item book.LoreItem) bool {
-	switch item.Type {
-	case "character", "faction", "rule", "location":
-	default:
-		return false
-	}
-	return item.Importance == "major" || item.Importance == "important" || item.LoadMode == book.LoreLoadModeResident
-}
-
-func loreItemRelevantToDirectorTurn(item book.LoreItem, turn interactive.TurnEvent) bool {
-	haystack := strings.ToLower(turn.User + "\n" + turn.Narrative)
-	if strings.TrimSpace(haystack) == "" {
-		return false
-	}
-	probes := append([]string{item.ID, item.Name}, item.Tags...)
-	probes = append(probes, item.Keywords...)
-	for _, probe := range probes {
-		probe = strings.ToLower(strings.TrimSpace(probe))
-		if len([]rune(probe)) < 2 {
-			continue
-		}
-		if strings.Contains(haystack, probe) {
-			return true
-		}
-	}
-	return false
-}
-
-func formatDirectorLoreItem(item book.LoreItem) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "### %s（%s / %s）\n", strings.TrimSpace(item.Name), directorLoreTypeLabel(item.Type), directorLoreImportanceLabel(item.Importance))
-	if strings.TrimSpace(item.ID) != "" {
-		fmt.Fprintf(&sb, "ID：%s\n", strings.TrimSpace(item.ID))
-	}
-	if len(item.Tags) > 0 {
-		fmt.Fprintf(&sb, "标签：%s\n", strings.Join(item.Tags, "、"))
-	}
-	if strings.TrimSpace(item.BriefDescription) != "" {
-		fmt.Fprintf(&sb, "简介：%s\n", strings.TrimSpace(item.BriefDescription))
-	}
-	if content := strings.TrimSpace(item.Content); content != "" {
-		sb.WriteString("\n正文摘录：\n")
-		sb.WriteString(boundedText(content, interactiveDirectorLoreItemBytes))
-	}
-	return strings.TrimSpace(sb.String())
-}
-
-func directorLoreTypeLabel(value string) string {
-	switch value {
-	case "character":
-		return "角色"
-	case "world":
-		return "世界观"
-	case "location":
-		return "地点"
-	case "faction":
-		return "势力"
-	case "rule":
-		return "规则"
-	case "item":
-		return "物品"
-	default:
-		return "其他"
-	}
-}
-
-func directorLoreImportanceLabel(value string) string {
-	switch value {
-	case "major":
-		return "核心"
-	case "important":
-		return "重要"
-	case "minor":
-		return "次要"
-	default:
-		return "未标注"
-	}
-}
-
 func (c *interactiveConversation) MarkInterrupted(userMessage, assistantContent, reason string) error {
 	log.Printf("[interactive-agent] interruption ignored story_id=%s branch_id=%s reason=%s", c.storyID, c.branchID, reason)
 	return nil
@@ -1395,14 +1480,7 @@ func (c *interactiveConversation) ResolveInterruption(id string) error {
 	return nil
 }
 
-type interactiveContextSource struct {
-	Source  string
-	Title   string
-	Content string
-	Note    string
-}
-
-type interactiveTurnMemory struct {
+type interactiveTurnHistory struct {
 	PreviousSummary string
 	Turns           []interactive.TurnEvent
 	PreviousCount   int
@@ -1410,20 +1488,20 @@ type interactiveTurnMemory struct {
 }
 
 const (
-	interactiveStoryRuntimeContextBytes = 16 * 1024
+	interactiveStoryRuntimeContextBytes = interactive.DirectorContextMaxBytes
 	interactiveDirectorContextBytes     = interactive.DirectorContextMaxBytes
-	interactiveDirectorLoreContextBytes = 4 * 1024
-	interactiveDirectorLoreIndexBytes   = 2 * 1024
-	interactiveDirectorLoreItemsBytes   = 3 * 1024
-	interactiveDirectorLoreItemBytes    = 2 * 1024
+	// The raw resident bodies keep their 1 MiB safety ceiling. This additional
+	// bounded allowance covers deterministic Lore metadata and the standalone
+	// message wrapper while still constraining the exact model-visible fragment.
+	interactiveResidentLoreMessageMaxBytes = book.ResidentLoreSafetyMaxBytes + interactive.DirectorContextMaxBytes
 )
 
-func buildInteractiveTurnMemory(turns []interactive.TurnEvent) interactiveTurnMemory {
-	return interactiveTurnMemory{Turns: append([]interactive.TurnEvent(nil), turns...)}
+func buildInteractiveTurnHistory(turns []interactive.TurnEvent) interactiveTurnHistory {
+	return interactiveTurnHistory{Turns: append([]interactive.TurnEvent(nil), turns...)}
 }
 
-func buildInteractiveModelVisibleTurnMemory(turns []interactive.TurnEvent, compaction *interactive.ContextCompactionEvent) interactiveTurnMemory {
-	return buildInteractiveTurnMemoryWithCompaction(turns, compaction, retainedTurnsForInteractiveCompaction(compaction))
+func buildInteractiveModelVisibleTurnHistory(turns []interactive.TurnEvent, compaction *interactive.ContextCompactionEvent) interactiveTurnHistory {
+	return buildInteractiveTurnHistoryWithCompaction(turns, compaction, retainedTurnsForInteractiveCompaction(compaction))
 }
 
 func retainedTurnsForInteractiveCompaction(compaction *interactive.ContextCompactionEvent) int {
@@ -1436,9 +1514,9 @@ func retainedTurnsForInteractiveCompaction(compaction *interactive.ContextCompac
 	return config.DefaultContextCompactionRetainedTurns
 }
 
-func buildInteractiveTurnMemoryWithCompaction(turns []interactive.TurnEvent, compaction *interactive.ContextCompactionEvent, retainedTurns int) interactiveTurnMemory {
+func buildInteractiveTurnHistoryWithCompaction(turns []interactive.TurnEvent, compaction *interactive.ContextCompactionEvent, retainedTurns int) interactiveTurnHistory {
 	if compaction == nil || strings.TrimSpace(compaction.Summary) == "" {
-		return buildInteractiveTurnMemory(turns)
+		return buildInteractiveTurnHistory(turns)
 	}
 	if retainedTurns <= 0 {
 		retainedTurns = config.DefaultContextCompactionRetainedTurns
@@ -1461,7 +1539,7 @@ func buildInteractiveTurnMemoryWithCompaction(turns []interactive.TurnEvent, com
 	retained := make([]interactive.TurnEvent, 0, len(sourceTail)+len(appended))
 	retained = append(retained, sourceTail...)
 	retained = append(retained, appended...)
-	return interactiveTurnMemory{
+	return interactiveTurnHistory{
 		PreviousSummary: "",
 		Turns:           retained,
 		PreviousCount:   sourceCount,
@@ -1482,99 +1560,21 @@ func formatInteractiveTurnHistory(turns []interactive.TurnEvent, emptyMessage st
 	return strings.TrimSpace(sb.String())
 }
 
-func formatInteractiveTurnMemoryHistory(turnMemory interactiveTurnMemory, compaction *interactive.ContextCompactionEvent, emptyMessage string) string {
+func formatInteractiveTurnHistoryWithCheckpoint(turnHistory interactiveTurnHistory, compaction *interactive.ContextCompactionEvent, emptyMessage string) string {
 	var sb strings.Builder
 	if compaction != nil && strings.TrimSpace(compaction.Summary) != "" {
-		sb.WriteString("[上下文压缩摘要]\n")
+		sb.WriteString("[历史上下文检查点]\n")
 		sb.WriteString(agent.NewContextCompactionSummaryMessage(compaction.Epoch, compaction.Summary).Content)
 		sb.WriteString("\n\n")
 	}
-	if len(turnMemory.Turns) > 0 {
-		sb.WriteString(formatInteractiveTurnHistory(turnMemory.Turns, emptyMessage))
+	if len(turnHistory.Turns) > 0 {
+		sb.WriteString(formatInteractiveTurnHistory(turnHistory.Turns, emptyMessage))
 	}
 	result := strings.TrimSpace(sb.String())
 	if result == "" {
 		return emptyMessage
 	}
 	return result
-}
-
-func interactiveStorySourceSummary(title, origin string, teller interactive.Teller, storyMemory, directorPlanVisible, ruleSummary, strategyPrompt string, turnMemory interactiveTurnMemory, userAction string) string {
-	parts := []interactiveContextSource{
-		{Source: "互动故事", Title: "故事标题", Content: title},
-		{Source: "互动故事", Title: "开端", Content: origin},
-	}
-	parts = append(parts, interactiveTellerSlotSources(teller, "turn_context")...)
-	if strings.TrimSpace(storyMemory) != "" {
-		parts = append(parts, interactiveContextSource{Source: "故事记忆", Title: "当前分支可见故事记忆", Content: storyMemory})
-	}
-	if strings.TrimSpace(directorPlanVisible) != "" {
-		parts = append(parts, interactiveContextSource{Source: "DirectorPlan", Title: "后台导演规划可读区", Content: directorPlanVisible, Note: "bounded"})
-	}
-	if strings.TrimSpace(ruleSummary) != "" {
-		parts = append(parts, interactiveContextSource{Source: "StoryDirector", Title: "故事导演规则清单", Content: ruleSummary, Note: "bounded"})
-	}
-	if strings.TrimSpace(strategyPrompt) != "" {
-		parts = append(parts, interactiveContextSource{Source: "StoryDirector.strategy.prompt_markdown", Title: "故事导演 Markdown 策略提示", Content: strategyPrompt, Note: "bounded"})
-	}
-	if strings.TrimSpace(turnMemory.PreviousSummary) != "" {
-		parts = append(parts, interactiveContextSource{Source: "历史回合", Title: fmt.Sprintf("较早 %d 回合压缩摘要", turnMemory.PreviousCount), Content: turnMemory.PreviousSummary, Note: "compressed"})
-	}
-	for i, turn := range turnMemory.Turns {
-		parts = append(parts,
-			interactiveContextSource{Source: "历史回合", Title: fmt.Sprintf("第 %d 回合用户行动", i+1), Content: turn.User},
-			interactiveContextSource{Source: "历史回合", Title: fmt.Sprintf("第 %d 回合剧情", i+1), Content: turn.Narrative},
-		)
-	}
-	parts = append(parts, interactiveContextSource{Source: "本轮行动", Title: "当前用户行动", Content: userAction})
-	return interactiveContextSourceListSummary(parts)
-}
-
-func interactiveTellerSlotSources(teller interactive.Teller, targets ...string) []interactiveContextSource {
-	allowed := make(map[string]bool, len(targets))
-	for _, target := range targets {
-		allowed[target] = true
-	}
-	parts := []interactiveContextSource{}
-	for _, slot := range teller.Slots {
-		if !slot.Enabled || !allowed[slot.Target] || strings.TrimSpace(slot.Content) == "" {
-			continue
-		}
-		parts = append(parts, interactiveContextSource{
-			Source:  "导演注入规则",
-			Title:   fmt.Sprintf("%s（%s）", slot.Name, slot.Target),
-			Content: slot.Content,
-			Note:    "teller=" + teller.ID,
-		})
-	}
-	return parts
-}
-
-func interactiveTellerSlotSummary(teller interactive.Teller, targets ...string) string {
-	sources := interactiveTellerSlotSources(teller, targets...)
-	if len(sources) == 0 {
-		return "count=0"
-	}
-	names := make([]string, 0, len(sources))
-	for _, source := range sources {
-		names = append(names, source.Title)
-	}
-	return fmt.Sprintf("count=%d names=%q", len(names), names)
-}
-
-func interactiveContextSourceListSummary(parts []interactiveContextSource) string {
-	sources := make([]agentcontext.Source, 0, len(parts))
-	for _, part := range parts {
-		sources = append(sources, agentcontext.Source{
-			Source:    part.Source,
-			Title:     part.Title,
-			Content:   part.Content,
-			Placement: agentcontext.PlacementAuditOnly,
-			Included:  true,
-			Note:      part.Note,
-		})
-	}
-	return agentcontext.SourceSummary(sources, agentcontext.DefaultPreviewChars)
 }
 
 func interactiveMessageListSummary(messages []*schema.Message) string {

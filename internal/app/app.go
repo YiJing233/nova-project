@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -32,10 +33,12 @@ type App struct {
 	bookMetaStore          *BookMetaStore
 	versionService         *book.VersionService
 	activeTask             *Task
-	activeInteractiveTask  *Task
+	activeInteractiveRun   *interactiveTaskRun
 	activeLoreImageTask    *Task
 	activeAutomationTasks  map[string]*Task
 	activeAutomationRuns   map[string]automationRunState
+	activeAutomationClaims map[string]*automationRunClaim
+	automationTriggers     *automationTriggerCoordinator
 	workspaceDirectorTasks *workspaceDirectorTaskGroup
 	directorGenerator      interactiveDirectorGenerator
 
@@ -81,8 +84,8 @@ func (a *App) interactiveDirectorGenerator() interactiveDirectorGenerator {
 // New 创建应用运行时。当 workspace 为空且没有上次打开的 workspace 时，App 进入“无书籍”状态，
 // 等待用户在前端书籍管理页选择或新建书籍后再构建 runtime。
 func New(ctx context.Context, cfg *config.Config) (*App, error) {
-	registry := NewBookRegistry(cfg.NovaDir)
-	bookMetaStore := NewBookMetaStore(cfg.NovaDir)
+	registry := NewBookRegistry(cfg.DataDir())
+	bookMetaStore := NewBookMetaStore(cfg.DataDir())
 	workspace := cfg.Workspace
 	if workspace == "" && cfg.ResumeLastWorkspace {
 		if lastWorkspace := registry.Current(); lastWorkspace != "" {
@@ -119,8 +122,12 @@ func New(ctx context.Context, cfg *config.Config) (*App, error) {
 // ErrNoWorkspace 表示当前 App 尚未绑定任何书籍 workspace。
 var ErrNoWorkspace = fmt.Errorf("尚未选择书籍工作区")
 
+// ErrNoWorkspaceOpen 表示请求需要一个已打开的工作区但当前没有。
+var ErrNoWorkspaceOpen = errors.New("当前没有打开的工作区")
+
 func (a *App) ensureServices() {
 	a.servicesOnce.Do(func() {
+		a.automationTriggers = newAutomationTriggerCoordinator()
 		a.runtimeManager = &WorkspaceRuntimeManager{app: a}
 		a.chatApp = &ChatAppService{app: a}
 		a.interactiveApp = &InteractiveAppService{app: a}
@@ -217,6 +224,10 @@ func (a *App) directorTasksForWorkspace(workspace string) *workspaceDirectorTask
 
 // Close stops background work owned by the current workspace runtime.
 func (a *App) Close() {
+	a.ensureServices()
+	if a.automationTriggers != nil {
+		a.automationTriggers.Close()
+	}
 	a.stopWorkspaceDirectorTasks()
 }
 

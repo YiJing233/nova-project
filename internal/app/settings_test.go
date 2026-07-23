@@ -2,7 +2,9 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,24 +92,40 @@ func TestAppUpdateUserSettingsPreservesRemoteAccessPasswordHash(t *testing.T) {
 	}
 }
 
-func TestAppUpdateWorkspaceSettingsPersists(t *testing.T) {
+func TestAppUpdateWorkspaceSettingsOnlyPersistsAgentOverrides(t *testing.T) {
 	ws := t.TempDir()
 	novaDir := t.TempDir()
+	if err := config.WriteSettingsFile(config.WorkspaceConfigPath(ws), config.Settings{OpenAIModel: "legacy-workspace-model"}); err != nil {
+		t.Fatal(err)
+	}
 
 	a := &App{
 		cfg:       &config.Config{Workspace: ws, NovaDir: novaDir},
 		workspace: ws,
 	}
-	in := config.Settings{OpenAIModel: "ws-model"}
-	if _, err := a.UpdateWorkspaceSettings(in); err != nil {
+	enabled := false
+	in := config.Settings{
+		OpenAIModel: "ignored-new-model",
+		AgentTools: config.AgentToolSettings{
+			IDE: config.AgentToolOverride{ShellExecute: &enabled},
+		},
+	}
+	layered, err := a.UpdateWorkspaceSettings(in)
+	if err != nil {
 		t.Fatal(err)
 	}
 	out, err := config.ReadSettingsFile(config.WorkspaceConfigPath(ws))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.OpenAIModel != "ws-model" {
-		t.Fatalf("workspace model not persisted: %s", out.OpenAIModel)
+	if out.OpenAIModel != "legacy-workspace-model" {
+		t.Fatalf("legacy workspace general setting should be preserved: %s", out.OpenAIModel)
+	}
+	if out.AgentTools.IDE.ShellExecute == nil || *out.AgentTools.IDE.ShellExecute {
+		t.Fatalf("workspace Agent override not persisted: %#v", out.AgentTools.IDE)
+	}
+	if layered.Workspace.OpenAIModel != "" || layered.Effective.OpenAIModel == "ignored-new-model" {
+		t.Fatalf("workspace general settings must not become effective: %#v", layered)
 	}
 }
 
@@ -174,6 +192,109 @@ func TestAppUpdateWorkspaceSettingsRejectsStaleRevision(t *testing.T) {
 	}
 }
 
+func TestAppSettingsConcurrentSameRevisionAllowsOneWriter(t *testing.T) {
+	t.Run("user", func(t *testing.T) {
+		ws := t.TempDir()
+		novaDir := t.TempDir()
+		path := config.UserConfigPath(novaDir)
+		if err := config.WriteSettingsFile(path, config.Settings{OpenAIModel: "base"}); err != nil {
+			t.Fatal(err)
+		}
+		baseRevision, err := config.SettingsFileRevision(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := &App{cfg: &config.Config{Workspace: ws, NovaDir: novaDir}, workspace: ws}
+		models := []string{"first", "second"}
+		errs := concurrentSettingsUpdates(t, len(models), func(index int) error {
+			_, updateErr := a.UpdateUserSettings(config.Settings{OpenAIModel: models[index]}, baseRevision)
+			return updateErr
+		})
+		assertOneSettingsWriter(t, errs)
+		persisted, err := config.ReadSettingsFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if persisted.OpenAIModel != "first" && persisted.OpenAIModel != "second" {
+			t.Fatalf("unexpected persisted user model %q", persisted.OpenAIModel)
+		}
+	})
+
+	t.Run("workspace", func(t *testing.T) {
+		ws := t.TempDir()
+		novaDir := t.TempDir()
+		path := config.WorkspaceConfigPath(ws)
+		if err := config.WriteSettingsFile(path, config.Settings{AgentPrompts: config.AgentPromptSettings{
+			IDE: config.AgentPromptOverride{SystemPrompt: "base"},
+		}}); err != nil {
+			t.Fatal(err)
+		}
+		baseRevision, err := config.SettingsFileRevision(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		a := &App{cfg: &config.Config{Workspace: ws, NovaDir: novaDir}, workspace: ws}
+		prompts := []string{"first", "second"}
+		errs := concurrentSettingsUpdates(t, len(prompts), func(index int) error {
+			_, updateErr := a.UpdateWorkspaceSettings(config.Settings{AgentPrompts: config.AgentPromptSettings{
+				IDE: config.AgentPromptOverride{SystemPrompt: prompts[index]},
+			}}, baseRevision)
+			return updateErr
+		})
+		assertOneSettingsWriter(t, errs)
+		persisted, err := config.ReadSettingsFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		prompt := persisted.AgentPrompts.IDE.SystemPrompt
+		if prompt != "first" && prompt != "second" {
+			t.Fatalf("unexpected persisted workspace prompt %q", prompt)
+		}
+	})
+}
+
+func concurrentSettingsUpdates(t *testing.T, count int, update func(int) error) []error {
+	t.Helper()
+	errs := make([]error, count)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for index := 0; index < count; index++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					errs[index] = fmt.Errorf("settings update panic: %v", recovered)
+				}
+			}()
+			<-start
+			errs[index] = update(index)
+		}(index)
+	}
+	close(start)
+	wg.Wait()
+	return errs
+}
+
+func assertOneSettingsWriter(t *testing.T, errs []error) {
+	t.Helper()
+	succeeded := 0
+	conflicted := 0
+	for _, err := range errs {
+		switch {
+		case err == nil:
+			succeeded++
+		case errors.Is(err, config.ErrSettingsRevisionConflict):
+			conflicted++
+		default:
+			t.Fatalf("unexpected settings update error: %v", err)
+		}
+	}
+	if succeeded != 1 || conflicted != 1 {
+		t.Fatalf("concurrent settings results: succeeded=%d conflicted=%d errors=%v", succeeded, conflicted, errs)
+	}
+}
+
 func TestApplyLayeredSettingsToConfigAppliesContextWindow(t *testing.T) {
 	contextWindow := 650000
 	cfg := &config.Config{}
@@ -226,7 +347,7 @@ func TestApplyLayeredSettingsToConfigAppliesAgentToolResultLimit(t *testing.T) {
 	}
 }
 
-func TestApplyLayeredSettingsToConfigAllowsUnlimitedAgentToolResultLimit(t *testing.T) {
+func TestApplyLayeredSettingsToConfigMapsZeroToolResultLimitToHighDefault(t *testing.T) {
 	limitKB := 0
 	cfg := &config.Config{AgentToolResultLimitKB: 128}
 	applyLayeredSettingsToConfig(cfg, config.LayeredSettings{
@@ -234,8 +355,8 @@ func TestApplyLayeredSettingsToConfigAllowsUnlimitedAgentToolResultLimit(t *test
 			AgentToolResultLimitKB: &limitKB,
 		},
 	})
-	if cfg.AgentToolResultLimitKB != 0 {
-		t.Fatalf("agent tool result limit = %d, want 0", cfg.AgentToolResultLimitKB)
+	if cfg.AgentToolResultLimitKB != config.DefaultAgentToolResultLimitKB {
+		t.Fatalf("agent tool result limit = %d, want %d", cfg.AgentToolResultLimitKB, config.DefaultAgentToolResultLimitKB)
 	}
 }
 

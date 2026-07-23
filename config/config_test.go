@@ -88,7 +88,7 @@ func TestNormalizePathExpandsRelativeAndHome(t *testing.T) {
 	}
 }
 
-func TestLoadWithWorkspaceMergesLayers(t *testing.T) {
+func TestLoadWithWorkspaceUsesUserSettingsAndWorkspaceAgentOverrides(t *testing.T) {
 	novaDir := t.TempDir()
 	ws := t.TempDir()
 	t.Setenv("NOVA_DIR", novaDir)
@@ -100,7 +100,13 @@ func TestLoadWithWorkspaceMergesLayers(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := WriteSettingsFile(filepath.Join(ws, ".nova", "config.toml"),
-		Settings{OpenAIModel: "ws-model", Language: "en-US", WritingSkillDefault: "novel-heavy", IDEImagePresetID: "2d-illustration"}); err != nil {
+		Settings{
+			OpenAIModel:         "ws-model",
+			Language:            "en-US",
+			WritingSkillDefault: "novel-heavy",
+			IDEImagePresetID:    "2d-illustration",
+			AgentTools:          AgentToolSettings{IDE: AgentToolOverride{ShellExecute: boolPtr(false)}},
+		}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -108,20 +114,26 @@ func TestLoadWithWorkspaceMergesLayers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.OpenAIModel != "ws-model" {
-		t.Fatalf("Workspace override expected, got %s", cfg.OpenAIModel)
+	if cfg.OpenAIModel != "user-model" {
+		t.Fatalf("user model expected, got %s", cfg.OpenAIModel)
 	}
-	if cfg.Language != "en-US" {
-		t.Fatalf("workspace language override expected, got %s", cfg.Language)
+	if cfg.Language != "zh-CN" {
+		t.Fatalf("user language expected, got %s", cfg.Language)
 	}
-	if cfg.WritingSkillDefault != "novel-heavy" {
-		t.Fatalf("workspace writing skill default expected, got %s", cfg.WritingSkillDefault)
+	if cfg.WritingSkillDefault != "novel-lite" {
+		t.Fatalf("user writing skill default expected, got %s", cfg.WritingSkillDefault)
 	}
-	if cfg.IDEImagePresetID != "2d-illustration" {
-		t.Fatalf("workspace image preset default expected, got %s", cfg.IDEImagePresetID)
+	if cfg.IDEImagePresetID != "realistic" {
+		t.Fatalf("user image preset default expected, got %s", cfg.IDEImagePresetID)
 	}
 	if layered.User.OpenAIModel != "user-model" {
 		t.Fatalf("user layer raw value lost")
+	}
+	if layered.Workspace.OpenAIModel != "" || layered.Workspace.Language != "" || layered.Workspace.WritingSkillDefault != "" {
+		t.Fatalf("workspace general settings should be filtered: %#v", layered.Workspace)
+	}
+	if cfg.AgentTools.IDE.ShellExecute == nil || *cfg.AgentTools.IDE.ShellExecute {
+		t.Fatalf("workspace Agent override should remain effective: %#v", cfg.AgentTools.IDE)
 	}
 }
 
@@ -150,7 +162,7 @@ func TestLoadWithWorkspaceAllowsUnlimitedAgentIdleTimeout(t *testing.T) {
 	}
 }
 
-func TestLoadWithWorkspaceAllowsUnlimitedAgentToolResultLimit(t *testing.T) {
+func TestLoadWithWorkspaceMapsZeroToolResultLimitToHighDefault(t *testing.T) {
 	novaDir := t.TempDir()
 	ws := t.TempDir()
 	t.Setenv("NOVA_DIR", novaDir)
@@ -166,11 +178,11 @@ func TestLoadWithWorkspaceAllowsUnlimitedAgentToolResultLimit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AgentToolResultLimitKB != 0 {
-		t.Fatalf("agent tool result limit should allow explicit 0, got %d", cfg.AgentToolResultLimitKB)
+	if cfg.AgentToolResultLimitKB != DefaultAgentToolResultLimitKB {
+		t.Fatalf("agent tool result limit should map 0 to the high default, got %d", cfg.AgentToolResultLimitKB)
 	}
-	if layered.Effective.AgentToolResultLimitKB == nil || *layered.Effective.AgentToolResultLimitKB != 0 {
-		t.Fatalf("effective agent tool result limit should preserve explicit 0")
+	if layered.Effective.AgentToolResultLimitKB == nil || *layered.Effective.AgentToolResultLimitKB != DefaultAgentToolResultLimitKB {
+		t.Fatalf("effective agent tool result limit should expose the high default")
 	}
 }
 
@@ -291,7 +303,7 @@ func TestLoadWithWorkspaceAllowsGlobalUnlimitedAgentIdleTimeout(t *testing.T) {
 	}
 }
 
-func TestLoadWithWorkspaceAllowsGlobalUnlimitedAgentToolResultLimit(t *testing.T) {
+func TestLoadWithWorkspaceMapsGlobalZeroToolResultLimitToHighDefault(t *testing.T) {
 	root := t.TempDir()
 	t.Chdir(root)
 	ws := t.TempDir()
@@ -307,11 +319,11 @@ func TestLoadWithWorkspaceAllowsGlobalUnlimitedAgentToolResultLimit(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.AgentToolResultLimitKB != 0 {
-		t.Fatalf("global agent tool result limit should allow explicit 0, got %d", cfg.AgentToolResultLimitKB)
+	if cfg.AgentToolResultLimitKB != DefaultAgentToolResultLimitKB {
+		t.Fatalf("global agent tool result limit should map 0 to the high default, got %d", cfg.AgentToolResultLimitKB)
 	}
-	if layered.Global.AgentToolResultLimitKB == nil || *layered.Global.AgentToolResultLimitKB != 0 {
-		t.Fatalf("global layer should preserve explicit 0")
+	if layered.Global.AgentToolResultLimitKB == nil || *layered.Global.AgentToolResultLimitKB != DefaultAgentToolResultLimitKB {
+		t.Fatalf("global layer should expose the high default")
 	}
 }
 
